@@ -107,6 +107,6 @@ static const void *const disptab[NUM_OPCODES] = {
 &&L_OP_CLOSURE,
 &&L_OP_VARARG,
 &&L_OP_VARARGPREP,
-&&L_OP_EXTRAARG
-
+&&L_OP_EXTRAARG,
+&&L_OP_2Q
 };

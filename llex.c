@@ -44,7 +44,7 @@ static const char *const luaX_tokens [] = {
     "return", "then", "true", "until", "while",
     "//", "..", "...", "==", ">=", "<=", "~=",
     "<<", ">>", "::", "<eof>",
-    "<number>", "<integer>", "<name>", "<string>"
+    "<number>", "<integer>", "<name>", "<string>", "??"
 };
 
 
@@ -446,6 +446,14 @@ static int llex (LexState *ls, SemInfo *seminfo) {
   luaZ_resetbuffer(ls->buff);
   for (;;) {
     switch (ls->current) {
+      case '?': {
+        next(ls);
+        if (ls->current == '?') {
+          next(ls);
+          return TK_2Q;
+        }
+        return '?'; 
+      }
       case '\n': case '\r': {  /* line breaks */
         inclinenumber(ls);
         break;

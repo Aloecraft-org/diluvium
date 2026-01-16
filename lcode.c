@@ -1720,6 +1720,19 @@ void luaK_posfix (FuncState *fs, BinOpr opr,
       *e1 = *e2;
       break;
     }
+    case OPR_2Q: {
+        luaK_exp2nextreg(fs, e1); /* Ensure e1 is a value */
+        luaK_exp2nextreg(fs, e2); /* Ensure e2 is a value */
+        /* Generate the VM OpCode OP_QQ */
+        luaK_codeABC(fs, OP_2Q, 0, e1->u.info, e2->u.info);
+        /* Update the expression descriptor 'e1' to point to new instruction */
+        freeexp(fs, e2); /* Free the right operand's register */
+        freeexp(fs, e1); /* Free the left operand (IF it was a temp register) */
+        
+        e1->u.info = fs->pc - 1;
+        e1->k = VRELOC; /* relocatable instruction result */
+        break;
+    }
     case OPR_CONCAT: {  /* e1 .. e2 */
       luaK_exp2nextreg(fs, e2);
       codeconcat(fs, e1, e2, line);
