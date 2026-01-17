@@ -578,6 +578,9 @@ static int stringK (FuncState *fs, TString *s) {
   return addk(fs, &o, &o);  /* use string itself as key */
 }
 
+int luaK_stringK (FuncState *fs, TString *s) {
+  return stringK(fs,s);
+}
 
 /*
 ** Add an integer to list of constants and return its index.

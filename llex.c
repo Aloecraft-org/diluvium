@@ -115,6 +115,9 @@ static l_noret lexerror (LexState *ls, const char *msg, int token) {
   luaD_throw(ls->L, LUA_ERRSYNTAX);
 }
 
+l_noret luaX_lexerror (LexState *ls, const char *msg, int token) {
+  lexerror(ls,msg,token);
+}
 
 l_noret luaX_syntaxerror (LexState *ls, const char *msg) {
   lexerror(ls, msg, ls->t.token);
