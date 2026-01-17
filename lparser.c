@@ -1183,6 +1183,27 @@ static void simpleexp (LexState *ls, expdesc *v) {
       body(ls, v, 0, ls->linenumber);
       return;
     }
+    case TK_FPART: {
+        init_exp(v, VK, 0);
+        v->u.info = luaK_stringK(ls->fs, ls->t.seminfo.ts);
+        while (ls->t.token == TK_FPART) {
+            luaK_exp2nextreg(ls->fs, v);
+            expdesc e2;
+            luaX_next(ls);
+            expr(ls, &e2);
+            luaK_exp2nextreg(ls->fs, &e2);
+            luaK_posfix(ls->fs, OPR_CONCAT, v, &e2, ls->linenumber);
+            if (ls->t.token != '}') {
+                luaX_syntaxerror(ls, "expected '}' in f-string");
+            }
+            luaX_read_fstring(ls, ls->fstring_del);
+            init_exp(&e2, VK, 0);
+            e2.u.info = luaK_stringK(ls->fs, ls->t.seminfo.ts);
+            luaK_exp2nextreg(ls->fs, &e2);
+            luaK_posfix(ls->fs, OPR_CONCAT, v, &e2, ls->linenumber);
+        }   
+        break;
+    }
     default: {
       suffixedexp(ls, v);
       return;

@@ -39,7 +39,7 @@ enum RESERVED {
   TK_IDIV, TK_CONCAT, TK_DOTS, TK_EQ, TK_GE, TK_LE, TK_NE,
   TK_SHL, TK_SHR,
   TK_DBCOLON, TK_EOS,
-  TK_FLT, TK_INT, TK_NAME, TK_STRING, TK_2Q
+  TK_FLT, TK_INT, TK_NAME, TK_STRING, TK_2Q, TK_FPART
 };
 
 /* number of reserved words */
@@ -75,6 +75,7 @@ typedef struct LexState {
   struct Dyndata *dyd;  /* dynamic structures used by the parser */
   TString *source;  /* current source name */
   TString *envn;  /* environment variable name */
+  int fstring_del;
 } LexState;
 
 
@@ -87,6 +88,6 @@ LUAI_FUNC int luaX_lookahead (LexState *ls);
 LUAI_FUNC l_noret luaX_syntaxerror (LexState *ls, const char *s);
 LUAI_FUNC const char *luaX_token2str (LexState *ls, int token);
 LUAI_FUNC l_noret luaX_lexerror (LexState *ls, const char *msg, int token);
-
+LUAI_FUNC void luaX_read_fstring (LexState *ls, int del);
 
 #endif

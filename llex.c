@@ -444,6 +444,70 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
                                    luaZ_bufflen(ls->buff) - 2);
 }
 
+static void read_fstring (LexState *ls, int del) {
+  while (ls->current != del) {
+    
+    switch (ls->current) {
+      case EOZ:
+        luaX_lexerror(ls, "unfinished string", TK_EOS);
+        break;
+      case '\n':
+      case '\r':
+        luaX_lexerror(ls, "unfinished string", TK_STRING);
+        break;
+      case '\\': {
+        // Handle escape sequences
+        next(ls);
+        int c = ls->current;
+        
+        switch (c) {
+          case 'a': c = '\a'; break;
+          case 'b': c = '\b'; break;
+          case 'f': c = '\f'; break;
+          case 'n': c = '\n'; break;
+          case 'r': c = '\r'; break;
+          case 't': c = '\t'; break;
+          case 'v': c = '\v'; break;
+          
+          // Handle escaped delimiters and backslashes
+          case '\\': c = '\\'; break;
+          case '"':  c = '"';  break;
+          case '\'': c = '\''; break;
+          
+          /* Note: Full Lua supports \123 (decimal), \x (hex), \u (unicode), \z (skip) */
+          /* For now, we default to just saving the char if it's not special (e.g. \{ ) */
+          default: break; 
+        }
+        
+        save(ls, c); /* Save the converted byte (e.g., 10 for newline) */
+        next(ls);    /* Consume the 'n' (or whatever followed slash) */
+        continue;
+      }
+      case '{': {
+        /* INTERPOLATION START */
+        next(ls); /* Consumes '{' */
+        ls->t.token = TK_FPART;
+        goto end_read;
+      }
+      default:
+        save_and_next(ls);
+    }
+  }
+  
+  /* STRING END */
+  next(ls); /* Consumes the closing quote */
+  ls->t.token = TK_STRING;
+
+end_read:
+  ls->t.seminfo.ts = luaX_newstring(ls, luaZ_buffer(ls->buff),
+                                   luaZ_bufflen(ls->buff));
+}
+
+/* Expose this so the Parser can call it */
+void luaX_read_fstring (LexState *ls, int del) {
+  luaZ_resetbuffer(ls->buff);
+  read_fstring(ls, del);
+}
 
 static int llex (LexState *ls, SemInfo *seminfo) {
   luaZ_resetbuffer(ls->buff);
@@ -456,6 +520,28 @@ static int llex (LexState *ls, SemInfo *seminfo) {
           return TK_2Q;
         }
         return '?'; 
+      }
+      case '$': {
+          save_and_next(ls);
+          int sep = ls->current;
+          if (sep == '"' || sep == '\'') {
+              ls->fstring_del = sep;
+              next(ls); /* Consumes " */
+              luaX_read_fstring(ls, sep);
+              return ls->t.token;
+          }
+          else {
+              /* It is NOT a $-string */
+              /* We are now in the middle of an identifier. Continue reading it. */
+              while (lislalnum(ls->current) || ls->current == '_') {
+                  save_and_next(ls);
+              }
+              /* Finalize the token as a Name (Identifier) */
+              ls->t.seminfo.ts = luaX_newstring(ls, luaZ_buffer(ls->buff),
+                                                  luaZ_bufflen(ls->buff));
+              /* Note: No keywords start with $, so we don't need check_reserved */
+              return TK_NAME;
+          }
       }
       case '\n': case '\r': {  /* line breaks */
         inclinenumber(ls);
