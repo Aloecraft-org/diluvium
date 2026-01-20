@@ -1,15 +1,15 @@
 .gitattributes
-
+.dump
 *.so
 *.o
 *.a
 
-manual/manual.html
+doc/manual/manual.html
 
-testes/time.txt
-testes/time-debug.txt
+test/time.txt
+test/time-debug.txt
 
-testes/libs/all
+test/libs/all
 
 temp
 lua
