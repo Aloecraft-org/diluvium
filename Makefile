@@ -22,6 +22,7 @@ _build_step0:
 	@echo '=== Step 0: Clean & Gather ==='
 	rm -rf $(CURDIR)/.data/*
 	mkdir -p $(CURDIR)/.data
+	mkdir -p $(CURDIR)/dist
 	cp -r $(CURDIR)/src/* $(CURDIR)/.data
 
 _wasm_build_step0: _build_step0
@@ -40,6 +41,7 @@ _wasm_build_step2:
 
 _wasm_build_step3:
 	@echo '=== Step 3: Link with C Driver ==='
+	
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o diluvium.wasm $(BUILD_WASM_OPT)"
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o libdiluvium.wasm $(BUILD_WASM_OPT) \
 		-Wl,--no-entry"
