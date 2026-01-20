@@ -28,12 +28,30 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install podman
 
+      - name: Install QEMU (for ARM64 support)
+        uses: docker/setup-qemu-action@v3
+
       - name: Build WASM
         run: make build_wasm
 
       - name: Build Linux Static (x86_64)
-        # Override ARCHl to ensure the naming even if runner reports something else
         run: make build_linux_static ARCHl=x86_64
+
+      - name: Build Linux Static (ARM64 / Raspberry Pi)
+        run: |
+          # Pass the --platform flag to podman to trigger QEMU emulation
+          # We define ARCHl=aarch64 so the output file is named correctly
+          make build_linux_static \
+            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm64 -v $(pwd):/data -w /data/src alpine:latest" \
+            ARCHl=aarch64
+
+      - name: Build Linux Static (ARM32 / Pi Zero)
+        run: |
+          # --platform linux/arm/v7 targets 32-bit ARM
+          # We manually set ARCHl=armv7l so the file is named 'diluvium_linux_static_armv7l'
+          make build_linux_static \
+            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm/v7 -v $(pwd):/data -w /data/src alpine:latest" \
+            ARCHl=armv7l
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
@@ -43,7 +61,10 @@ jobs:
 
   # Job 2: Build macOS (Native)
   build-macos:
-    runs-on: macos-latest
+    strategy:
+        matrix:
+          os: [macos-latest, macos-13]
+    runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -61,7 +82,7 @@ jobs:
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: macos-artifacts
+          name: macos-artifacts-${{ matrix.os }}
           path: dist/*
 
   # Job 3: Build Windows (via MSYS2)
@@ -109,9 +130,26 @@ jobs:
           merge-multiple: true
           path: release_dist
 
+      - name: Generate Release Notes
+        run: |
+          # Create a temporary file with the table
+          echo "## 📥 Download Guide" > release_notes.md
+          echo "" >> release_notes.md
+          echo "| Platform | File to Download | Notes |" >> release_notes.md
+          echo "| :--- | :--- | :--- |" >> release_notes.md
+          echo "| **Linux (Standard)** | \`diluvium_linux_static_x86_64\` | Works on Ubuntu, Fedora, CentOS, Arch |" >> release_notes.md
+          echo "| **Raspberry Pi 3/4/5** | \`diluvium_linux_static_aarch64\` | 64-bit OS only |" >> release_notes.md
+          echo "| **macOS (M1/M2/M3)** | \`diluvium_darwin_arm64\` | Apple Silicon |" >> release_notes.md
+          echo "| **Windows** | \`diluvium_windows_x86_64.exe\` | Standard 64-bit Windows |" >> release_notes.md
+          echo "" >> release_notes.md
+          echo "---" >> release_notes.md
+          echo "" >> release_notes.md
+
       - name: Create Release
         uses: softprops/action-gh-release@v1
         with:
           files: release_dist/*
+          body_path: release_notes.md
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
