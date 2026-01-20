@@ -42,7 +42,7 @@ jobs:
           # Pass the --platform flag to podman to trigger QEMU emulation
           # We define ARCHl=aarch64 so the output file is named correctly
           make build_linux_static \
-            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm64 -v $(pwd):/data -w /data/src alpine:latest" \
+            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm64 -v $(pwd)/.data:/data -w /data alpine:latest" \
             ARCHl=aarch64
 
       - name: Build Linux Static (ARM32 / Pi Zero)
@@ -50,7 +50,7 @@ jobs:
           # --platform linux/arm/v7 targets 32-bit ARM
           # We manually set ARCHl=armv7l so the file is named 'diluvium_linux_static_armv7l'
           make build_linux_static \
-            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm/v7 -v $(pwd):/data -w /data/src alpine:latest" \
+            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm/v7 -v $(pwd)/.data:/data -w /data alpine:latest" \
             ARCHl=armv7l
 
       - name: Upload Artifacts
@@ -63,7 +63,7 @@ jobs:
   build-macos:
     strategy:
         matrix:
-          os: [macos-latest, macos-13]
+          os: [macos-latest, macos-15-intel]
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout code
