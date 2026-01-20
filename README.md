@@ -58,3 +58,46 @@ See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#ter
 ## Quick Start
 
 Check back frequently for updates
+
+## Installation Instructions
+
+**Linux (Portable AMD64) Installation**
+``` sh
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_linux_static_x86_64
+cp diluvium_linux_static_x86_64 diluvium && chmod +x diluvium
+./diluvium
+```
+
+**Linux (aarch64/Raspberry Pi 3/4/5) Installation**
+``` sh
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_linux_static_aarch64
+cp diluvium_linux_static_aarch64 diluvium && chmod +x diluvium
+./diluvium
+```
+
+**Linux (32bit armv7l/Raspberry Pi 1/2/Zero/Zero W) Installation**
+``` sh
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_linux_static_armv7l
+cp diluvium_linux_static_armv7l diluvium && chmod +x diluvium
+./diluvium
+```
+
+**MacOS (ARM64) Installation**
+``` sh
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_darwin_arm64
+cp diluvium_darwin_arm64 diluvium && chmod +x diluvium
+./diluvium
+```
+
+**MacOS (Intel) Installation**
+``` sh
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_darwin_x86_64
+cp diluvium_darwin_x86_64 diluvium && chmod +x diluvium
+./diluvium
+```
+
+**Windows Installation**
+``` ps
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_windows_x86_64.exe -OutFile diluvium.exe
+./diluvium
+```
