@@ -4,6 +4,13 @@ on:
   push:
     tags:
       - 'v*' # Trigger only on tags like v1.0, v2.3.4, etc.
+      
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Reason for manual run'
+        required: true
+        default: 'Manual test run'
 
 permissions:
   contents: write
