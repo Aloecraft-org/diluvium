@@ -1,0 +1,110 @@
+name: Build and Release
+
+on:
+  push:
+    tags:
+      - 'v*' # Trigger only on tags like v1.0, v2.3.4, etc.
+
+permissions:
+  contents: write
+
+jobs:
+  # Job 1: Build Linux Static + WASM
+  build-linux-and-wasm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install podman
+
+      - name: Build WASM
+        run: make build_wasm
+
+      - name: Build Linux Static (x86_64)
+        # Override ARCHl to ensure the naming even if runner reports something else
+        run: make build_linux_static ARCHl=x86_64
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-wasm-artifacts
+          path: dist/*
+
+  # Job 2: Build macOS (Native)
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: brew install lua readline
+
+      - name: Build macOS Native
+        run: |
+          # Help clang find readline if it's in a non-standard brew location
+          export CPATH="$(brew --prefix readline)/include:$CPATH"
+          export LIBRARY_PATH="$(brew --prefix readline)/lib:$LIBRARY_PATH"
+          make build_platform
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-artifacts
+          path: dist/*
+
+  # Job 3: Build Windows (via MSYS2)
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-x86_64-gcc
+
+      - name: Build Windows
+        shell: msys2 {0}
+        run: |
+          # We manually set the variables to control the ugly default filename
+          # Default MSYS uname is long like "mingw64_nt-10.0..."
+          make build_platform UNAME_Sl=windows ARCHl=x86_64
+          
+          # Optional: Verify it built and rename if needed
+          ls -l dist/
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-artifacts
+          path: dist/*          
+
+  # Job 4: Create Release
+  release:
+    needs: [build-linux-and-wasm, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*-artifacts"
+          merge-multiple: true
+          path: release_dist
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: release_dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

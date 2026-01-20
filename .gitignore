@@ -1,5 +1,6 @@
 .gitattributes
 .dump
+.data
 *.so
 *.o
 *.a
@@ -13,3 +14,4 @@ test/libs/all
 
 temp
 lua
+dist
