@@ -11,6 +11,23 @@ UNAME_S := $(shell uname -s)
 UNAME_Sl := $(shell uname -s | tr 'A-Z' 'a-z')
 ARCHl := $(shell uname -m | tr 'A-Z' 'a-z')
 
+PLAT_CFLAGS  := -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE
+PLAT_LDFLAGS := -Wl,-E
+PLAT_LIBS    := -ldl -lreadline
+
+ifeq ($(UNAME_S),Darwin)
+    PLAT_CFLAGS  := -std=c99 -DLUA_USE_MACOSX -DLUA_USE_READLINE
+    PLAT_LDFLAGS := 
+    PLAT_LIBS    := -lreadline
+endif
+
+ifneq (,$(findstring MINGW,$(UNAME_S)))
+    PLAT_CFLAGS  := -std=c99 -DLUA_USE_WINDOWS
+    PLAT_LDFLAGS := 
+    PLAT_LIBS    := 
+    UNAME_Sl     := windows
+endif
+
 # TODO: Test `BUILD_WASM_OPT` without `-Wl,--export-all` to reduce binary size
 # TODO: Add this later: -include script/platform.mk
 
@@ -62,9 +79,16 @@ build_wasm: _wasm_build_step0 _wasm_build_step1 _wasm_build_step2 _wasm_build_st
 
 build_platform:
 	mkdir -p dist
-	(cd src && make all && \
-     cp lua ../dist/diluvium_$(UNAME_Sl)_$(ARCHl) 2>/dev/null || \
-     cp lua.exe ../dist/diluvium_$(UNAME_Sl)_$(ARCHl).exe && make clean)
+	@echo "Building for $(UNAME_S)..."
+	cd src && make clean && make all \
+		MYCFLAGS='$(PLAT_CFLAGS)' \
+		MYLDFLAGS='$(PLAT_LDFLAGS)' \
+		MYLIBS='$(PLAT_LIBS)'
+	
+	cp src/lua dist/diluvium_$(UNAME_Sl)_$(ARCHl) 2>/dev/null || \
+	cp src/lua.exe dist/diluvium_$(UNAME_Sl)_$(ARCHl).exe
+	
+	cd src && make clean
 
 build_linux_static: _build_step0
 	@echo '=== Building Static Alpine Binary ==='
