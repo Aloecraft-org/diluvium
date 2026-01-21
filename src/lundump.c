@@ -24,6 +24,13 @@
 #include "lundump.h"
 #include "lzio.h"
 
+static void unscramble_bytes(void *data, size_t size) {
+  unsigned char *p = (unsigned char *)data;
+  unsigned char key = 0xBE;
+  for (size_t i = 0; i < size; i++) {
+    p[i] ^= key;
+  }
+}
 
 #if !defined(luai_verifycode)
 #define luai_verifycode(L,f)  /* empty */
@@ -162,31 +169,42 @@ static void loadConstants (LoadState *S, Proto *f) {
   for (i = 0; i < n; i++) {
     TValue *o = &f->k[i];
     int t = loadByte(S);
-    switch (t) {
-      case LUA_VNIL:
-        setnilvalue(o);
-        break;
-      case LUA_VFALSE:
-        setbfvalue(o);
-        break;
-      case LUA_VTRUE:
-        setbtvalue(o);
-        break;
-      case LUA_VNUMFLT:
-        setfltvalue(o, loadNumber(S));
-        break;
-      case LUA_VNUMINT:
-        setivalue(o, loadInteger(S));
-        break;
-      case LUA_VSHRSTR:
-      case LUA_VLNGSTR:
-        setsvalue2n(S->L, o, loadString(S, f));
-        break;
-      default: lua_assert(0);
+    
+    if (f->is_encrypted && (t == LUA_VSHRSTR || t == LUA_VLNGSTR)) {
+      size_t len = loadSize(S);
+      char *encrypted = luaM_newvector(S->L, len, char);
+      loadVector(S, encrypted, len);
+      unscramble_bytes(encrypted, len);
+      TString *ts = luaS_newlstr(S->L, encrypted, len);
+      setsvalue2n(S->L, o, ts);
+      luaM_freearray(S->L, encrypted, len);
+    } else {
+      switch (t) {
+        case LUA_VNIL:
+          setnilvalue(o);
+          break;
+        case LUA_VFALSE:
+          setbfvalue(o);
+          break;
+        case LUA_VTRUE:
+          setbtvalue(o);
+          break;
+        case LUA_VNUMFLT:
+          setfltvalue(o, loadNumber(S));
+          break;
+        case LUA_VNUMINT:
+          setivalue(o, loadInteger(S));
+          break;
+        case LUA_VSHRSTR:
+        case LUA_VLNGSTR:
+          setsvalue2n(S->L, o, loadString(S, f));
+          break;
+        default: 
+          lua_assert(0);
+      }
     }
   }
 }
-
 
 static void loadProtos (LoadState *S, Proto *f) {
   int i;
@@ -256,6 +274,7 @@ static void loadDebug (LoadState *S, Proto *f) {
 
 
 static void loadFunction (LoadState *S, Proto *f, TString *psource) {
+  f->is_encrypted = loadByte(S);
   f->source = loadStringN(S, f);
   if (f->source == NULL)  /* no source in dump? */
     f->source = psource;  /* reuse parent's source */
@@ -265,6 +284,8 @@ static void loadFunction (LoadState *S, Proto *f, TString *psource) {
   f->is_vararg = loadByte(S);
   f->maxstacksize = loadByte(S);
   loadCode(S, f);
+  if (f->is_encrypted)
+    unscramble_bytes(f->code, f->sizecode);
   loadConstants(S, f);
   loadUpvalues(S, f);
   loadProtos(S, f);

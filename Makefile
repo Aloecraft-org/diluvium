@@ -56,14 +56,26 @@ _wasm_build_step2:
 	@echo '=== Step 2: Compile WASM Stubs ==='
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c wasm_stubs.c -o wasm_stubs.o $(WASM_LLVM_OPT)"
 
-_wasm_build_step3:
+_wasm_build_compiler_obj:
+	@echo '=== Building Compiler Object (oneluac.o) ==='
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c onelua.c -o oneluac.o $(WASM_LLVM_OPT) \
+		-DMAKE_LUAC \
+		-D_WASI_EMULATED_SIGNAL \
+		-D_WASI_EMULATED_PROCESS_CLOCKS \
+		-Wno-deprecated-declarations"
+
+_wasm_build_step3: _wasm_build_compiler_obj
 	@echo '=== Step 3: Link with C Driver ==='
 	
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o diluvium.wasm $(BUILD_WASM_OPT)"
-	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o libdiluvium.wasm $(BUILD_WASM_OPT) \
-		-Wl,--no-entry"
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o libdiluvium.wasm $(BUILD_WASM_OPT) -Wl,--no-entry"
+	
+	@echo '=== Building Compiler (luac.wasm) - No stubs needed ==='
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) oneluac.o -o luac.wasm -lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export=malloc -Wl,--export=free"
+
 	@cp .data/diluvium.wasm dist/diluvium.wasm
 	@cp .data/libdiluvium.wasm dist/libdiluvium.wasm
+	@cp .data/luac.wasm dist/diluvium_compiler.wasm
 	
 _wasm_verify_step1:
 	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-objdump -d /data/onelua.o | grep -E "longjmp|setjmp" | head -n 5
@@ -84,9 +96,16 @@ build_platform:
 		MYCFLAGS='$(PLAT_CFLAGS)' \
 		MYLDFLAGS='$(PLAT_LDFLAGS)' \
 		MYLIBS='$(PLAT_LIBS)'
+
+	@echo '=== Building Compiler (luac) ==='
+	gcc -o .data/luac .data/onelua.c \
+		-std=c99 -DMAKE_LUAC -lm
 	
 	cp src/lua dist/diluvium_$(UNAME_Sl)_$(ARCHl) 2>/dev/null || \
 	cp src/lua.exe dist/diluvium_$(UNAME_Sl)_$(ARCHl).exe
+	
+	cp .data/luac dist/diluvium_compiler_$(UNAME_Sl)_$(ARCHl) 2>/dev/null || \
+	cp .data/luac.exe dist/diluvium_compiler_$(UNAME_Sl)_$(ARCHl).exe
 	
 	cd src && make clean
 
@@ -98,9 +117,13 @@ build_linux_static: _build_step0
 		make clean && \
 		make all \
 			CC=gcc \
-			MYCFLAGS='-static -Os -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE' \
+			MYCFLAGS='-static -Os -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE -DMAKE_LUAC' \
 			MYLDFLAGS='-static' \
-			MYLIBS='-lreadline -lncurses'"
+			MYLIBS='-lreadline -lncurses' && \
+		echo '--- Building Compiler (luac) ---' && \
+		gcc -o /data/luac onelua.c -static -Os -std=c99 -DMAKE_LUAC -lm"
+
+	cp .data/luac dist/diluvium_compiler_linux_static_$(ARCHl)
 	cp .data/lua dist/diluvium_linux_static_$(ARCHl)
 
 verify_wasm: _wasm_verify_step1 _wasm_verify_step2 _wasm_verify_step3
@@ -208,6 +231,9 @@ test_cases: test_build
 	@echo "Running Test: pm.lua"
 	@echo "============================================="
 	(cd $(CURDIR)/test && $(TEST_BIN) pm.lua           )
+	@echo "Running Test: secure_function.lua"
+	@echo "============================================="
+	(cd $(CURDIR)/test && $(TEST_BIN) secure_function.lua)
 	@echo "Running Test: sort.lua"
 	@echo "============================================="
 	(cd $(CURDIR)/test && $(TEST_BIN) sort.lua         )

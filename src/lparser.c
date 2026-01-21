@@ -708,6 +708,12 @@ static Proto *addprototype (LexState *ls) {
   }
   f->p[fs->np++] = clp = luaF_newproto(L);
   luaC_objbarrier(L, f, clp);
+
+  if (ls->encrypted_flag) {
+    clp->is_encrypted = 1;
+    ls->encrypted_flag = 0;
+  }
+
   return clp;
 }
 
@@ -1895,16 +1901,36 @@ static void statement (LexState *ls) {
       repeatstat(ls, line);
       break;
     }
+    case '~': {
+      luaX_next(ls);
+      if (ls->t.token != TK_FUNCTION) {
+        luaX_syntaxerror(ls, "expected 'function' after '~'");
+      }
+      ls->encrypted_flag = 1;
+      funcstat(ls, ls->linenumber);
+      break;
+    }
     case TK_FUNCTION: {  /* stat -> funcstat */
       funcstat(ls, line);
       break;
     }
     case TK_LOCAL: {  /* stat -> localstat */
       luaX_next(ls);  /* skip LOCAL */
-      if (testnext(ls, TK_FUNCTION))  /* local function? */
+      if (testnext(ls, TK_FUNCTION)) { /* local function? */
         localfunc(ls);
+      }
+      else if (ls->t.token == '~') {    /* local ~function */
+        luaX_next(ls);
+        if (ls->t.token != TK_FUNCTION) {
+          luaX_syntaxerror(ls, "expected 'function' after '~'");
+        }
+        ls->encrypted_flag = 1;
+        funcstat(ls, ls->linenumber);
+      }
       else
+      {
         localstat(ls);
+      }
       break;
     }
     case TK_DBCOLON: {  /* stat -> label */

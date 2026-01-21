@@ -12,13 +12,14 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>
+#include <stdio.h>
 
 #include "lua.h"
 
 #include "lobject.h"
 #include "lstate.h"
 #include "lundump.h"
-
 
 typedef struct {
   lua_State *L;
@@ -100,10 +101,25 @@ static void dumpString (DumpState *D, const TString *s) {
   }
 }
 
+static void scramble_bytes(void *data, size_t size) {
+  unsigned char *p = (unsigned char *)data;
+  unsigned char key = 0xBE;
+  for (size_t i = 0; i < size; i++) {
+    p[i] ^= key;
+  }
+}
 
 static void dumpCode (DumpState *D, const Proto *f) {
   dumpInt(D, f->sizecode);
-  dumpVector(D, f->code, f->sizecode);
+  if (f->is_encrypted) {
+      Instruction *buff = luaM_newvector(D->L, f->sizecode, Instruction);
+      memcpy(buff, f->code, f->sizecode * sizeof(Instruction));
+      scramble_bytes(buff, f->sizecode);
+      dumpVector(D, buff, f->sizecode);
+      luaM_freearray(D->L, buff, f->sizecode);
+  } else {
+    dumpVector(D, f->code, f->sizecode);
+  }
 }
 
 
@@ -115,25 +131,39 @@ static void dumpConstants (DumpState *D, const Proto *f) {
   dumpInt(D, n);
   for (i = 0; i < n; i++) {
     const TValue *o = &f->k[i];
-    int tt = ttypetag(o);
-    dumpByte(D, tt);
-    switch (tt) {
-      case LUA_VNUMFLT:
-        dumpNumber(D, fltvalue(o));
-        break;
-      case LUA_VNUMINT:
-        dumpInteger(D, ivalue(o));
-        break;
-      case LUA_VSHRSTR:
-      case LUA_VLNGSTR:
-        dumpString(D, tsvalue(o));
-        break;
-      default:
-        lua_assert(tt == LUA_VNIL || tt == LUA_VFALSE || tt == LUA_VTRUE);
+    
+    if (f->is_encrypted && ttisstring(o)) {
+      TString *ts = tsvalue(o);
+      size_t len = tsslen(ts);
+      char *encrypted = luaM_newvector(D->L, len, char);
+      memcpy(encrypted, getstr(ts), len);
+      // Simple XOR scramble. (not secure)
+      scramble_bytes(encrypted, len);
+      int tt = ttypetag(o);
+      dumpByte(D, tt);
+      dumpSize(D, len);
+      dumpVector(D, encrypted, len);
+      luaM_freearray(D->L, encrypted, len);
+    } else {
+      int tt = ttypetag(o);
+      dumpByte(D, tt);
+      switch (tt) {
+        case LUA_VNUMFLT:
+          dumpNumber(D, fltvalue(o));
+          break;
+        case LUA_VNUMINT:
+          dumpInteger(D, ivalue(o));
+          break;
+        case LUA_VSHRSTR:
+        case LUA_VLNGSTR:
+          dumpString(D, tsvalue(o));
+          break;
+        default:
+          lua_assert(tt == LUA_VNIL || tt == LUA_VFALSE || tt == LUA_VTRUE);
+      }
     }
   }
 }
-
 
 static void dumpProtos (DumpState *D, const Proto *f) {
   int i;
@@ -181,6 +211,7 @@ static void dumpDebug (DumpState *D, const Proto *f) {
 
 
 static void dumpFunction (DumpState *D, const Proto *f, TString *psource) {
+  dumpByte(D, f->is_encrypted);
   if (D->strip || f->source == psource)
     dumpString(D, NULL);  /* no debug info or same source as its parent */
   else

@@ -76,6 +76,7 @@ typedef struct LexState {
   TString *source;  /* current source name */
   TString *envn;  /* environment variable name */
   int fstring_del;
+  int encrypted_flag;
 } LexState;
 
 

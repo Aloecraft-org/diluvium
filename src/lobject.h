@@ -570,6 +570,7 @@ typedef struct Proto {
   LocVar *locvars;  /* information about local variables (debug information) */
   TString  *source;  /* used for debug information */
   GCObject *gclist;
+  lu_byte is_encrypted;
 } Proto;
 
 /* }================================================================== */
