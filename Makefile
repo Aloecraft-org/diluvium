@@ -91,6 +91,7 @@ build_wasm: _wasm_build_step0 _wasm_build_step1 _wasm_build_step2 _wasm_build_st
 
 build_platform:
 	mkdir -p dist
+	cp -r src/* .data
 	@echo "Building for $(UNAME_S)..."
 	cd src && make clean && make all \
 		MYCFLAGS='$(PLAT_CFLAGS)' \

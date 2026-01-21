@@ -16,8 +16,11 @@
 
 ## What is Diluvium?
 
-The Diluvium Programming Language is a **100% backward-compatible** extension of Lua with modern features like string interpolation, null coalescing, security enhancements, and more, without breaking legacy code.
+The Diluvium Programming Language is a **100% backward-compatible** extension of Lua with modern features like string interpolation, null coalescing, security enhancements, and more, without breaking legacy code. It's blazing fast, tiny (~1MiB runtime), and runs just about everywhere.
 
+## Language Features
+
+**String Interpolation**
 ```lua
 -- Standard Lua works perfectly
 local function greet(name)
@@ -29,12 +32,36 @@ function greet_modern(name)
     -- String interpolation
     return $"Hello, {name}!"
 end
+```
 
+**Null Coalescing**
+``` lua
 -- And null coalescing
 local config = user_config ?? default_config
 
--- And coming soon: switch/match, defer, compound assignment, and more
+print(nil ?? "hello!")
 ```
+
+**Secure Functions**
+
+**NOTE:** Secure functions are cryptographically weak but their contents cannot be read by simply opening a text editor.
+
+``` lua
+-- Put a tilde (~) make a function into a secure function*
+~function secure_function()
+    -- Variable names and variable constants will be encrypted at rest
+    password="BUY_SHIB_lol"
+
+    -- That include string literals
+    return $"My password is, {password}!"
+end
+``` 
+
+**And coming soon:** 
+- switch/match
+- defer/with
+- compound assignment
+- and more
 
 ## Why Diluvium?
 
