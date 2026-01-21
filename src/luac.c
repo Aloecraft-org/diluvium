@@ -24,6 +24,7 @@
 #include "lopnames.h"
 #include "lstate.h"
 #include "lundump.h"
+#include "analyze.h"
 
 static void PrintFunction(const Proto* f, int full);
 #define luaU_print	PrintFunction
@@ -34,6 +35,7 @@ static void PrintFunction(const Proto* f, int full);
 static int listing=0;			/* list bytecodes? */
 static int dumping=1;			/* dump bytecodes? */
 static int stripping=0;			/* strip debug information? */
+static int report=0;			/* generate analysis report */
 static char Output[]={ OUTPUT };	/* default output file name */
 static const char* output=Output;	/* actual output file name */
 static const char* progname=PROGNAME;	/* actual program name */
@@ -65,6 +67,7 @@ static void usage(const char* message)
   "  -p       parse only\n"
   "  -s       strip debug information\n"
   "  -v       show version information\n"
+  "  -r       generate analysis report (JSON)\n"
   "  --       stop handling options\n"
   "  -        stop handling options and process stdin\n"
   ,progname,Output);
@@ -105,6 +108,8 @@ static int doargs(int argc, char* argv[])
    stripping=1;
   else if (IS("-v"))			/* show version */
    ++version;
+  else if (IS("-r"))			/* generate report */
+   report=1;
   else					/* unknown option */
    usage(argv[i]);
  }
@@ -165,6 +170,16 @@ static int writer(lua_State* L, const void* p, size_t size, void* u)
  return (fwrite(p,size,1,(FILE*)u)!=1) && (size!=0);
 }
 
+static void Report(lua_State* L, const Proto* f)
+{
+	InterfaceReport* rep = analyze_proto(f);
+	FILE* out = (output==NULL) ? stdout : fopen(output,"w");
+	if (out==NULL) cannot("open");
+	print_report_json(rep, out);
+	if (output) fclose(out);
+	free_report(rep);
+}
+
 static int pmain(lua_State* L)
 {
  int argc=(int)lua_tointeger(L,1);
@@ -189,6 +204,10 @@ static int pmain(lua_State* L)
   lua_unlock(L);
   if (ferror(D)) cannot("write");
   if (fclose(D)) cannot("close");
+ }
+ if (report)
+ {
+	Report(L,f);
  }
  return 0;
 }

@@ -55,6 +55,8 @@ _wasm_build_step1:
 _wasm_build_step2:
 	@echo '=== Step 2: Compile WASM Stubs ==='
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c wasm_stubs.c -o wasm_stubs.o $(WASM_LLVM_OPT)"
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c analyze.c -o analyze.o $(WASM_LLVM_OPT) \
+		-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-deprecated-declarations"
 
 _wasm_build_compiler_obj:
 	@echo '=== Building Compiler Object (oneluac.o) ==='
@@ -71,7 +73,7 @@ _wasm_build_step3: _wasm_build_compiler_obj
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o libdiluvium.wasm $(BUILD_WASM_OPT) -Wl,--no-entry"
 	
 	@echo '=== Building Compiler (luac.wasm) - No stubs needed ==='
-	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) oneluac.o -o luac.wasm -lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export=malloc -Wl,--export=free"
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) oneluac.o analyze.o -o luac.wasm -lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export=malloc -Wl,--export=free"
 
 	@cp .data/diluvium.wasm dist/diluvium.wasm
 	@cp .data/libdiluvium.wasm dist/libdiluvium.wasm
@@ -97,7 +99,7 @@ build_platform: _build_step0
 		MYLIBS='$(PLAT_LIBS)'
 
 	@echo '=== Building Compiler (luac) ==='
-	gcc -o .data/luac .data/onelua.c \
+	gcc -o .data/luac .data/onelua.c .data/analyze.c \
 		-std=c99 -DMAKE_LUAC -lm
 	
 	cp src/lua dist/diluvium_$(UNAME_Sl)_$(ARCHl) 2>/dev/null || \
@@ -120,7 +122,7 @@ build_linux_static: _build_step0
 			MYLDFLAGS='-static' \
 			MYLIBS='-lreadline -lncurses' && \
 		echo '--- Building Compiler (luac) ---' && \
-		gcc -o /data/luac onelua.c -static -Os -std=c99 -DMAKE_LUAC -lm"
+		gcc -o /data/luac onelua.c analyze.c -static -Os -std=c99 -DMAKE_LUAC -lm"
 
 	cp .data/luac dist/diluvium_compiler_linux_static_$(ARCHl)
 	cp .data/lua dist/diluvium_linux_static_$(ARCHl)
@@ -239,7 +241,10 @@ test_cases: test_build
 	@echo "Running Test: strings.lua"
 	@echo "============================================="
 	(cd $(CURDIR)/test && $(TEST_BIN) strings.lua      )
-	@echo "Running Test: test_fstrings.lu"
+	@echo "Running Test: test_analysis.lua"
+	@echo "============================================="
+	(cd $(CURDIR)/test && $(TEST_BIN) test_analysis.lua)
+	@echo "Running Test: test_fstrings.lua"
 	@echo "============================================="
 	(cd $(CURDIR)/test && $(TEST_BIN) test_fstrings.lua)
 	@echo "Running Test: tpack.lua"
