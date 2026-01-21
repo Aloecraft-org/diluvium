@@ -128,3 +128,76 @@ cp diluvium_darwin_x86_64 diluvium && chmod +x diluvium
 wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_windows_x86_64.exe -OutFile diluvium.exe
 ./diluvium
 ```
+
+## Compiler Features
+
+**Bytecode analysis report**
+
+The `-r` flag generates a compiler analysis report. This comes in handy working with bytecode compiled from secure functions.
+
+``` sh
+diluvium_compiler -r -o test_analysis.rpt ./test/test_analysis.lua
+```
+
+Example Output:
+``` json
+{
+  "functions": [
+    {
+      "name": "@./test/secure_function.lua",
+      "params": 0,
+      "vararg": true,
+      "upvalues": ["_ENV"],
+      "returns_table": false
+    },
+    {
+      "name": "@./test/secure_function.lua:2",
+      "params": 2,
+      "param_names": ["a", "b"],
+      "vararg": false,
+      "upvalues": ["_ENV"],
+      "returns_table": false
+    },
+    {
+      "name": "@./test/secure_function.lua:8",
+      "params": 1,
+      "param_names": ["name"],
+      "vararg": false,
+      "upvalues": [],
+      "returns_table": false
+    },
+    {
+      "name": "@./test/secure_function.lua:15",
+      "params": 0,
+      "vararg": false,
+      "upvalues": ["_ENV"],
+      "returns_table": false
+    },
+    {
+      "name": "@./test/secure_function.lua:23",
+      "params": 0,
+      "vararg": false,
+      "upvalues": ["_ENV"],
+      "returns_table": false
+    },
+    {
+      "name": "@./test/secure_function.lua:26",
+      "params": 0,
+      "vararg": false,
+      "upvalues": ["_ENV"],
+      "returns_table": false
+    },
+    {
+      "name": "@./test/secure_function.lua:34",
+      "params": 0,
+      "vararg": false,
+      "upvalues": ["_ENV"],
+      "returns_table": false
+    }
+  ],
+  "globals_after_load": {
+    "functions": ["SecureAdd", "SecureGreet", "SecureSecret", "OuterSecure"],
+    "variables": ["NormalFunction", "InnerNotSecure"]
+  }
+}
+```

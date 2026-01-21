@@ -23,9 +23,9 @@
 #define LUA_VERSION_NUM			504
 #define LUA_VERSION_RELEASE_NUM		(LUA_VERSION_NUM * 100 + 7)
 
-#define LUA_VERSION	"Diluvium (Lua) " LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
+#define LUA_VERSION	"diluvium (lua) " LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
 #define LUA_RELEASE	LUA_VERSION "." LUA_VERSION_RELEASE
-#define LUA_COPYRIGHT	LUA_RELEASE " rc3  aloecraft.org (C) 2026\n(original copyright (c) 1994-2024 lua.org)"
+#define LUA_COPYRIGHT	LUA_RELEASE " rc4  aloecraft.org (C) 2026\n(original copyright (c) 1994-2024 lua.org)"
 #define LUA_AUTHORS	"M. Godfrey, R. Ierusalimschy, L. H. de Figueiredo, W. Celes"
 
 
@@ -34,7 +34,6 @@
 
 /* option for multiple returns in 'lua_pcall' and 'lua_call' */
 #define LUA_MULTRET	(-1)
-
 
 /*
 ** Pseudo-indices
