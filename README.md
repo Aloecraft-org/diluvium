@@ -47,7 +47,7 @@ print(nil ?? "hello!")
 **NOTE:** Secure functions are cryptographically weak but their contents cannot be read by simply opening a text editor.
 
 ``` lua
--- Put a tilde (~) make a function into a secure function*
+-- Use a tilde (~) to make a function into a secure function*
 ~function secure_function()
     -- Variable names and variable constants will be encrypted at rest
     password="BUY_SHIB_lol"
