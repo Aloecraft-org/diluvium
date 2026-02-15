@@ -6,6 +6,10 @@ BUILD_WASM_OPT:=-lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -
 PODMAN_RUN_WASM:=podman run --rm $(BUILD_MNT) $(WASI_IMG)
 PODMAN_BUILD_WASM:=$(PODMAN_RUN_WASM) bash -c
 PODMAN_RUN_ALPINE := podman run --rm $(BUILD_MNT) -w /data alpine:latest
+WASI_AR:=/opt/wasi-sdk/bin/llvm-ar
+WASI_SYSROOT:=/opt/wasi-sdk/share/wasi-sysroot
+WASI_SYSROOT_LIBS:=/opt/wasi-sdk/share/wasi-sysroot/lib/wasm32-wasi
+WASI_INCLUDES:=-I$(WASI_SYSROOT)/include -I$(WASI_SYSROOT)/include/wasm32-wasi
 
 UNAME_S := $(shell uname -s)
 UNAME_Sl := $(shell uname -s | tr 'A-Z' 'a-z')
@@ -42,11 +46,29 @@ _build_step0:
 	mkdir -p $(CURDIR)/dist
 	cp -r $(CURDIR)/src/* $(CURDIR)/.data
 
+_native_static_lib: _build_step0
+	@echo '=== Building Native Static Archive ==='
+	rm -f $(CURDIR)/dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a
+	# We use -DLUA_LIB and -UMAKE_LUA to ensure the standalone 'main' is NOT compiled
+	cd .data && gcc -O3 -c onelua.c -o onelua_$(UNAME_Sl)_$(ARCHl).o -fPIC $(PLAT_CFLAGS) -DDILUVIUM_AS_LIBRARY
+	cd .data && gcc -O3 -c wasm_stubs.c -o wasm_stubs_$(UNAME_Sl)_$(ARCHl).o -fPIC
+	ar rcs dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a .data/onelua_$(UNAME_Sl)_$(ARCHl).o .data/wasm_stubs_$(UNAME_Sl)_$(ARCHl).o
+	@echo 'Native library built: dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a'
+
+_portable_static_lib: _build_step0
+	@echo '=== Building Portable (musl) Static Archive ==='
+	$(PODMAN_RUN_ALPINE) sh -c "\
+		apk add --no-cache gcc musl-dev && \
+		gcc -O3 -c onelua.c -o onelua_musl.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY && \
+		gcc -O3 -c wasm_stubs.c -o wasm_stubs_musl.o -fPIC && \
+		ar rcs /data/libdiluvium_musl_$(ARCHl).a onelua_musl.o wasm_stubs_musl.o"
+	@cp .data/libdiluvium_musl_$(ARCHl).a dist/libdiluvium_musl_$(ARCHl).a
+
 _wasm_build_step0: _build_step0
 
 _wasm_build_step1:
-	@echo '=== Step 1: Compile Lua ==='
-	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c onelua.c -o onelua.o $(WASM_LLVM_OPT) \
+	@echo '=== Step 1: Compile Lua (PIC for library use) ==='
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c onelua.c -o onelua.o $(WASM_LLVM_OPT) -fPIC \
 	-DL_tmpnam=32 \
 	-D_WASI_EMULATED_SIGNAL \
 	-D_WASI_EMULATED_PROCESS_CLOCKS \
@@ -57,6 +79,44 @@ _wasm_build_step2:
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c wasm_stubs.c -o wasm_stubs.o $(WASM_LLVM_OPT)"
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c analyze.c -o analyze.o $(WASM_LLVM_OPT) \
 		-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-deprecated-declarations"
+
+_wasi_static_lib: _build_step0 _wasm_build_step1 _wasm_build_step2
+	@echo '=== Creating Static Archive and Extracting WASI Libs ==='
+	$(PODMAN_BUILD_WASM) "/opt/wasi-sdk/bin/llvm-ar rcs /data/libdiluvium.a /data/onelua.o /data/wasm_stubs.o"
+	@cp .data/libdiluvium.a dist/libdiluvium.a
+
+	@echo '=== Pulling WASI/C libs from container ==='
+	$(PODMAN_RUN_WASM) sh -c "cp $(WASI_SYSROOT_LIBS)/libwasi-emulated-signal.a /data/ && \
+								cp $(WASI_SYSROOT_LIBS)/libwasi-emulated-process-clocks.a /data/ && \
+								cp $(WASI_SYSROOT_LIBS)/libsetjmp.a /data/ && \
+								cp $(WASI_SYSROOT_LIBS)/libc.a /data/libwasic.a"
+	@cp .data/libwasi-emulated-signal.a dist/
+	@cp .data/libwasi-emulated-process-clocks.a dist/
+	@cp .data/libsetjmp.a dist/
+	@cp .data/libwasic.a dist/
+
+_wasm_unknown_build: _build_step0
+	@echo '=== Building for wasm32-unknown-unknown (browser, no WASI) ==='
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) --target=wasm32-unknown-unknown \
+		-c onelua.c -o onelua_unknown.o -O3 -fPIC \
+		-I/data \
+		$(WASI_INCLUDES) \
+		-DDILUVIUM_AS_LIBRARY \
+		-DLUA_USE_C89 \
+		-DL_tmpnam=32 \
+		-Dloadlib_c \
+		-Dloslib_c \
+		-Dliolib_c \
+		-D__wasi__ \
+		-D_WASI_EMULATED_SIGNAL \
+		-D_WASI_EMULATED_PROCESS_CLOCKS \
+		-Wno-deprecated-declarations"
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) --target=wasm32-unknown-unknown \
+		-c wasm_stubs_unknown.c -o wasm_stubs_unknown.o -O3 \
+		$(WASI_INCLUDES) -D__wasi__"
+	$(PODMAN_BUILD_WASM) "/opt/wasi-sdk/bin/llvm-ar rcs /data/libdiluvium_unknown.a \
+		/data/onelua_unknown.o /data/wasm_stubs_unknown.o"
+	@cp .data/libdiluvium_unknown.a dist/libdiluvium_unknown.a
 
 _wasm_build_compiler_obj:
 	@echo '=== Building Compiler Object (oneluac.o) ==='
@@ -70,7 +130,7 @@ _wasm_build_step3: _wasm_build_compiler_obj
 	@echo '=== Step 3: Link with C Driver ==='
 	
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o diluvium.wasm $(BUILD_WASM_OPT)"
-	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o libdiluvium.wasm $(BUILD_WASM_OPT) -Wl,--no-entry"
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua.o wasm_stubs.o -o libdiluvium.wasm $(BUILD_WASM_OPT) -Wl,--no-entry -Wl,--allow-undefined"
 	
 	@echo '=== Building Compiler (luac.wasm) - No stubs needed ==='
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) oneluac.o analyze.o -o luac.wasm -lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export=malloc -Wl,--export=free"
@@ -78,7 +138,7 @@ _wasm_build_step3: _wasm_build_compiler_obj
 	@cp .data/diluvium.wasm dist/diluvium.wasm
 	@cp .data/libdiluvium.wasm dist/libdiluvium.wasm
 	@cp .data/luac.wasm dist/diluvium_compiler.wasm
-	
+
 _wasm_verify_step1:
 	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-objdump -d /data/onelua.o | grep -E "longjmp|setjmp" | head -n 5
 
@@ -89,9 +149,9 @@ _wasm_verify_step3:
 	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/diluvium.wasm | grep -E "luaL_newstate|lua_close" | head -n 5
 	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/libdiluvium.wasm | grep -E "luaL_newstate|lua_close" | head -n 5
 
-build_wasm: _wasm_build_step0 _wasm_build_step1 _wasm_build_step2 _wasm_build_step3
+build_wasm: _wasm_build_step0 _wasm_build_step1 _wasm_build_step2 _wasi_static_lib _wasm_build_step3
 
-build_platform: _build_step0
+build_platform: _build_step0 _native_static_lib
 	@echo "Building for $(UNAME_S)..."
 	cd src && make clean && make all \
 		MYCFLAGS='$(PLAT_CFLAGS)' \
@@ -110,7 +170,7 @@ build_platform: _build_step0
 	
 	cd src && make clean
 
-build_linux_static: _build_step0
+build_linux_static: _build_step0 _portable_static_lib
 	@echo '=== Building Static Alpine Binary ==='
 	$(PODMAN_RUN_ALPINE) sh -c "\
 		apk add --no-cache gcc make musl-dev ncurses-static readline-static readline-dev && \
@@ -126,6 +186,8 @@ build_linux_static: _build_step0
 
 	cp .data/luac dist/diluvium_compiler_linux_static_$(ARCHl)
 	cp .data/lua dist/diluvium_linux_static_$(ARCHl)
+
+build_static_libs: _wasm_unknown_build _wasi_static_lib _native_static_lib _portable_static_lib
 
 verify_wasm: _wasm_verify_step1 _wasm_verify_step2 _wasm_verify_step3
 

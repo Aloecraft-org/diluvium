@@ -7,6 +7,7 @@
 **Lua for Modern Development**
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Repo](https://img.shields.io/badge/github-repo-blue.svg)](https://github.com/Aloecraft-org/diluvium)
 [![Lua Version](https://img.shields.io/badge/lua-5.4.7-purple.svg)](https://www.lua.org/)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-Ready-orange.svg)](https://webassembly.org/)
 
