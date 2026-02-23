@@ -11,7 +11,13 @@ char *tmpnam(char *s) { return NULL; }
 
 lua_State *global_L = NULL;
 
-__attribute__((export_name("init_lua"))) void init_lua()
+#ifdef __wasm__
+#define WASM_EXPORT(name) __attribute__((export_name(name)))
+#else
+#define WASM_EXPORT(name)
+#endif
+
+WASM_EXPORT("init_lua") void init_lua()
 {
     if (global_L == NULL)
     {
@@ -25,7 +31,7 @@ __attribute__((export_name("init_lua"))) void init_lua()
     }
 }
 
-__attribute__((export_name("run_lua"))) int run_lua(const char *code)
+WASM_EXPORT("run_lua") int run_lua(const char *code)
 {
     if (global_L == NULL)
         init_lua();

@@ -30,7 +30,8 @@ static void PrintFunction(const Proto* f, int full);
 #define luaU_print	PrintFunction
 
 #define PROGNAME	"luac"		/* default program name */
-#define OUTPUT		PROGNAME ".out"	/* default output file */
+#define OUTPUT		PROGNAME ".o"	/* default output file */
+#define REPORT_OUTPUT	PROGNAME ".out"	/* default report output file */
 
 static int listing=0;			/* list bytecodes? */
 static int dumping=1;			/* dump bytecodes? */
@@ -173,10 +174,17 @@ static int writer(lua_State* L, const void* p, size_t size, void* u)
 static void Report(lua_State* L, const Proto* f)
 {
 	InterfaceReport* rep = analyze_proto(f);
-	FILE* out = (output==NULL) ? stdout : fopen(output,"w");
+	/*
+	 * If the user explicitly set -o, honour it for the report too.
+	 * Otherwise use the dedicated report filename so we never clobber
+	 * the bytecode output.
+	 */
+	int using_explicit_output = (output != Output); /* Output is the default array */
+	const char* report_path = using_explicit_output ? output : REPORT_OUTPUT;
+	FILE* out = (report_path==NULL) ? stdout : fopen(report_path,"w");
 	if (out==NULL) cannot("open");
 	print_report_json(rep, out);
-	if (output) fclose(out);
+	if (report_path) fclose(out);
 	free_report(rep);
 }
 
@@ -195,7 +203,7 @@ static int pmain(lua_State* L)
  }
  f=combine(L,argc);
  if (listing) luaU_print(f,listing>1);
- if (dumping)
+ if (dumping && !report)
  {
   FILE* D= (output==NULL) ? stdout : fopen(output,"wb");
   if (D==NULL) cannot("open");

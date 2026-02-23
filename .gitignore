@@ -16,3 +16,9 @@ temp
 lua
 dist
 .vscode
+.xtrpatch
+.xtrshow
+x.md
+x.patch
+.nogit
+
