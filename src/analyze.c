@@ -49,6 +49,46 @@
 **     RETURN_KIND_MULTI    = 6;   // multiple values / vararg
 **   }
 */
+/*
+** ConstantKind classifies entries in the constant pool.
+** Maps directly to a proto enum:
+**
+**   enum ConstantKind {
+**     CONST_KIND_STRING  = 0;
+**     CONST_KIND_INTEGER = 1;
+**     CONST_KIND_FLOAT   = 2;
+**     CONST_KIND_BOOL    = 3;
+**     CONST_KIND_NULL    = 4;
+**   }
+*/
+typedef enum {
+  CONST_KIND_STRING  = 0,
+  CONST_KIND_INTEGER = 1,
+  CONST_KIND_FLOAT   = 2,
+  CONST_KIND_BOOL    = 3,
+  CONST_KIND_NULL    = 4
+} ConstantKind;
+
+/*
+** ConstantEntry — one entry per slot in f->k.
+** Maps to a proto message:
+**
+**   message ConstantEntry {
+**     ConstantKind kind    = 1;
+**     string       s_val   = 2;  // CONST_KIND_STRING
+**     int64        i_val   = 3;  // CONST_KIND_INTEGER
+**     double       f_val   = 4;  // CONST_KIND_FLOAT
+**     bool         b_val   = 5;  // CONST_KIND_BOOL
+**   }
+*/
+typedef struct {
+  ConstantKind kind;
+  const char  *s_val;   /* owned; non-NULL iff kind == CONST_KIND_STRING */
+  lua_Integer  i_val;
+  lua_Number   f_val;
+  int          b_val;   /* bool */
+} ConstantEntry;
+
 typedef enum {
   RETURN_KIND_UNKNOWN  = 0,
   RETURN_KIND_VOID     = 1,
@@ -56,7 +96,8 @@ typedef enum {
   RETURN_KIND_CALL     = 3,
   RETURN_KIND_UPVALUE  = 4,
   RETURN_KIND_CONSTANT = 5,
-  RETURN_KIND_MULTI    = 6
+  RETURN_KIND_MULTI    = 6,
+  RETURN_KIND_MIXED    = 7   /* multiple return sites with different kinds */
 } ReturnKind;
 
 /*
@@ -92,21 +133,79 @@ typedef struct {
 } ClosureInfo;
 
 /*
+** CallKind classifies how a call site was resolved.
+**
+**   enum CallKind {
+**     CALL_KIND_UNKNOWN  = 0;  // could not resolve callee name
+**     CALL_KIND_GLOBAL   = 1;  // _ENV.name  (GETTABUP upvalue 0)
+**     CALL_KIND_FIELD    = 2;  // table.method (GETFIELD, one level)
+**     CALL_KIND_METHOD   = 3;  // obj:method   (SELF)
+**     CALL_KIND_LOCAL    = 4;  // local variable / register
+**   }
+*/
+typedef enum {
+  CALL_KIND_UNKNOWN = 0,
+  CALL_KIND_GLOBAL  = 1,
+  CALL_KIND_FIELD   = 2,
+  CALL_KIND_METHOD  = 3,
+  CALL_KIND_LOCAL   = 4
+} CallKind;
+
+/*
+** CallSite — one entry per OP_CALL or OP_TAILCALL.
+** Maps to a proto message:
+**
+**   message CallSite {
+**     int32    line        = 1;
+**     CallKind kind        = 2;
+**     string   callee      = 3;  // e.g. "print", "ego.emit", "obj:method"
+**     int32    arg_count   = 4;  // -1 = variable
+**     bool     is_tail     = 5;
+**   }
+*/
+typedef struct {
+  int       line;
+  CallKind  kind;
+  const char *callee;   /* owned */
+  int       arg_count;  /* -1 = variable (B==0) */
+  int       is_tail;    /* bool */
+} CallSite;
+
+/*
+** ReadEntry — one entry per OP_GETTABUP or OP_GETFIELD that reads from
+** _ENV or a known table register.
+**
+**   message ReadEntry {
+**     string table_name  = 1;  // "_ENV" for globals, or upvalue/register name
+**     string field_name  = 2;
+**   }
+*/
+typedef struct {
+  const char *table_name;  /* owned */
+  const char *field_name;  /* owned */
+} ReadEntry;
+
+/*
 ** FunctionInfo — one entry per Proto, including nested ones.
 ** Maps to a proto message:
 **
 **   message FunctionInfo {
-**     string         source          = 1;
-**     int32          line_defined    = 2;
-**     int32          last_line       = 3;
-**     int32          param_count     = 4;
-**     bool           is_vararg       = 5;
-**     bool           is_method       = 6;
-**     repeated string param_names    = 7;
-**     repeated string upvalue_names  = 8;
-**     ReturnKind     return_kind     = 9;
-**     TableInfo      table_info      = 10;  // present iff return_kind==TABLE
-**     repeated ClosureInfo closures  = 11;
+**     string         source              = 1;
+**     int32          line_defined        = 2;
+**     int32          last_line           = 3;
+**     int32          param_count         = 4;
+**     bool           is_vararg           = 5;
+**     bool           is_vararg_used      = 6;
+**     bool           is_method           = 7;
+**     repeated string param_names        = 8;
+**     repeated string upvalue_names      = 9;
+**     ReturnKind     return_kind         = 10;
+**     TableInfo      table_info          = 11;
+**     repeated ClosureInfo closures      = 12;
+**     repeated ConstantEntry constants   = 13;
+**     repeated int32 child_proto_indices = 14;
+**     repeated CallSite call_sites       = 15;
+**     repeated ReadEntry reads           = 16;
 **   }
 */
 typedef struct {
@@ -118,6 +217,7 @@ typedef struct {
   /* signature */
   int         param_count;
   int         is_vararg;
+  int         is_vararg_used;     /* OP_VARARG actually appears in bytecode */
   int         is_method;          /* first param is "self" */
   const char **param_names;       /* [param_count] */
   int         upvalue_count;
@@ -126,11 +226,35 @@ typedef struct {
   /* return analysis */
   ReturnKind  return_kind;
   TableInfo   table_info;         /* valid iff return_kind == RETURN_KIND_TABLE */
+  int had_real_return;
 
   /* closure tracking */
   ClosureInfo *closures;
   int          num_closures;
   int          cap_closures;
+
+  /* constant pool */
+  ConstantEntry *constants;
+  int            num_constants;
+
+  /* sub-proto hierarchy: indices into report->functions[] of direct children */
+  int  *child_proto_indices;
+  int   num_children;
+  int   cap_children;
+
+  /* call site tracking */
+  CallSite *call_sites;
+  int       num_call_sites;
+  int       cap_call_sites;
+
+  /* global/field reads (_ENV and one-level GETFIELD) */
+  ReadEntry *reads;
+  int        num_reads;
+  int        cap_reads;
+
+  /* pending resolution: proto pointers needing function_index after recursion */
+  const Proto **pending_proto;   /* parallel to globals, indexed by global slot */
+  int           num_pending;     /* always == report->num_globals at resolution time */
 } FunctionInfo;
 
 /*
@@ -138,13 +262,15 @@ typedef struct {
 ** Maps to a proto message:
 **
 **   message GlobalEntry {
-**     string name        = 1;
-**     bool   is_function = 2;
+**     string name           = 1;
+**     bool   is_function    = 2;
+**     int32  function_index = 3;  // index into report.functions[], -1 if unknown
 **   }
 */
 typedef struct {
   const char *name;
-  int         is_function;   /* bool */
+  int         is_function;
+  int         function_index;  /* -1 = not resolved */
 } GlobalEntry;
 
 /*
@@ -262,6 +388,44 @@ static FunctionInfo *push_function(InterfaceReport *report) {
   return f;
 }
 
+static void push_child_index(FunctionInfo *fi, int idx) {
+  if (fi->num_children >= fi->cap_children) {
+    int nc = fi->cap_children == 0 ? 4 : fi->cap_children * 2;
+    fi->child_proto_indices = (int *)realloc(fi->child_proto_indices,
+                                              nc * sizeof(int));
+    fi->cap_children = nc;
+  }
+  fi->child_proto_indices[fi->num_children++] = idx;
+}
+
+static CallSite *push_call_site(FunctionInfo *fi) {
+  if (fi->num_call_sites >= fi->cap_call_sites) {
+    int nc = fi->cap_call_sites == 0 ? 8 : fi->cap_call_sites * 2;
+    fi->call_sites = (CallSite *)realloc(fi->call_sites, nc * sizeof(CallSite));
+    fi->cap_call_sites = nc;
+  }
+  CallSite *cs = &fi->call_sites[fi->num_call_sites++];
+  memset(cs, 0, sizeof(CallSite));
+  return cs;
+}
+
+static void push_read(FunctionInfo *fi, const char *tbl, const char *field) {
+  /* Deduplicate — identical table.field pairs are noise when read in a loop */
+  for (int i = 0; i < fi->num_reads; i++) {
+    if (strcmp(fi->reads[i].table_name, tbl) == 0 &&
+        strcmp(fi->reads[i].field_name, field) == 0)
+      return;
+  }
+  if (fi->num_reads >= fi->cap_reads) {
+    int nc = fi->cap_reads == 0 ? 8 : fi->cap_reads * 2;
+    fi->reads = (ReadEntry *)realloc(fi->reads, nc * sizeof(ReadEntry));
+    fi->cap_reads = nc;
+  }
+  fi->reads[fi->num_reads].table_name = str_dup(tbl);
+  fi->reads[fi->num_reads].field_name = str_dup(field);
+  fi->num_reads++;
+}
+
 static void push_closure(FunctionInfo *fi, int line, int nupvals) {
   if (fi->num_closures >= fi->cap_closures) {
     int nc = fi->cap_closures == 0 ? 4 : fi->cap_closures * 2;
@@ -277,12 +441,13 @@ static void push_closure(FunctionInfo *fi, int line, int nupvals) {
 ** Add a global entry, deduplicating by name.
 ** Later assignments win (is_function may be promoted from variable→function).
 */
-static void upsert_global(InterfaceReport *report, const char *name, int is_fn) {
-  /* Check for existing entry */
+static void upsert_global(InterfaceReport *report, const char *name,
+                           int is_fn, int function_index) {
   for (int i = 0; i < report->num_globals; i++) {
     if (strcmp(report->globals[i].name, name) == 0) {
-      /* Promote to function if we now know it is one */
       if (is_fn) report->globals[i].is_function = 1;
+      if (function_index >= 0)
+        report->globals[i].function_index = function_index;
       return;
     }
   }
@@ -292,8 +457,9 @@ static void upsert_global(InterfaceReport *report, const char *name, int is_fn) 
                                               nc * sizeof(GlobalEntry));
     report->cap_globals = nc;
   }
-  report->globals[report->num_globals].name        = str_dup(name);
-  report->globals[report->num_globals].is_function = is_fn;
+  report->globals[report->num_globals].name           = str_dup(name);
+  report->globals[report->num_globals].is_function    = is_fn;
+  report->globals[report->num_globals].function_index = function_index;
   report->num_globals++;
 }
 
@@ -434,6 +600,8 @@ static ReturnKind classify_return(const Proto *f, int pc,
       if (GETARG_A(prev) != reg) continue;
       if (pop == OP_CALL || pop == OP_TAILCALL) return RETURN_KIND_CALL;
       if (pop == OP_GETUPVAL)                   return RETURN_KIND_UPVALUE;
+      if (pop == OP_GETTABUP || pop == OP_GETTABLE ||
+          pop == OP_GETFIELD || pop == OP_GETI)  return RETURN_KIND_UPVALUE;
       if (pop == OP_CLOSURE)                    return RETURN_KIND_UNKNOWN;
       if (pop == OP_LOADK   || pop == OP_LOADI  ||
           pop == OP_LOADF   || pop == OP_LOADTRUE ||
@@ -461,6 +629,116 @@ static ReturnKind classify_return(const Proto *f, int pc,
   }
 }
 
+
+/* -------------------------------------------------------------------------
+** Resolve the callee name for a CALL/TAILCALL at `call_pc`.
+** The callee is in R[callee_reg].  Walk back to find what loaded it.
+**
+** Sets *kind_out and writes a heap-allocated name string into *name_out
+** (caller owns it).  name_out may be set to NULL for CALL_KIND_UNKNOWN.
+**
+** Resolution rules:
+**   GETTABUP  upv=0, K[C]=string  → CALL_KIND_GLOBAL,  name = K[C]
+**   GETTABUP  upv!=0, K[C]=string → CALL_KIND_FIELD,   name = upvname.K[C]
+**   GETFIELD  -, K[C]=string      → CALL_KIND_FIELD,   name = ?.K[C]
+**   SELF      -, K[C]=string      → CALL_KIND_METHOD,  name = ?:K[C]
+**   MOVE / other                  → CALL_KIND_LOCAL,   name = NULL
+** ------------------------------------------------------------------------- */
+static void resolve_callee(const Proto *f, int call_pc, int callee_reg,
+                           CallKind *kind_out, const char **name_out) {
+  *kind_out = CALL_KIND_UNKNOWN;
+  *name_out = NULL;
+
+  int limit = (call_pc - 32 < 0) ? 0 : call_pc - 32;
+
+  for (int i = call_pc - 1; i >= limit; i--) {
+    Instruction ins = f->code[i];
+    OpCode op = GET_OPCODE(ins);
+    int a = GETARG_A(ins);
+
+    if (a != callee_reg) continue;
+
+    if (op == OP_GETTABUP) {
+      int upv     = GETARG_B(ins);
+      int key_idx = GETARG_C(ins);
+      if (key_idx >= f->sizek) break;
+      TValue *kv = &f->k[key_idx];
+      if (!ttisstring(kv)) break;
+      const char *field = getstr(tsvalue(kv));
+
+      if (upv == 0) {
+        /* Direct _ENV access → global call */
+        *kind_out = CALL_KIND_GLOBAL;
+        *name_out = str_dup(field);
+      } else {
+        /* Named upvalue → "upvname.field" */
+        const char *upvname = "?";
+        if (upv < f->sizeupvalues && f->upvalues[upv].name)
+          upvname = getstr(f->upvalues[upv].name);
+        size_t len = strlen(upvname) + 1 + strlen(field) + 1;
+        char *buf = (char *)malloc(len);
+        snprintf(buf, len, "%s.%s", upvname, field);
+        *kind_out = CALL_KIND_FIELD;
+        *name_out = buf;
+      }
+      return;
+    }
+
+    if (op == OP_GETFIELD) {
+      int key_idx = GETARG_C(ins);
+      if (key_idx >= f->sizek) break;
+      TValue *kv = &f->k[key_idx];
+      if (!ttisstring(kv)) break;
+      const char *field = getstr(tsvalue(kv));
+
+      /* Try to identify the source register (B) as an upvalue name */
+      int src_reg = GETARG_B(ins);
+      const char *src_name = "?";
+      /* Walk back a little further to see if src_reg came from GETTABUP */
+      int limit2 = (i - 16 < 0) ? 0 : i - 16;
+      for (int j = i - 1; j >= limit2; j--) {
+        Instruction prev = f->code[j];
+        if (GET_OPCODE(prev) == OP_GETTABUP && GETARG_A(prev) == src_reg) {
+          int cidx = GETARG_C(prev);
+          if (cidx < f->sizek && ttisstring(&f->k[cidx]))
+            src_name = getstr(tsvalue(&f->k[cidx]));
+          break;
+        }
+        if (GETARG_A(prev) == src_reg) break; /* overwritten, give up */
+      }
+
+      size_t len = strlen(src_name) + 1 + strlen(field) + 1;
+      char *buf = (char *)malloc(len);
+      snprintf(buf, len, "%s.%s", src_name, field);
+      *kind_out = CALL_KIND_FIELD;
+      *name_out = buf;
+      return;
+    }
+
+    if (op == OP_SELF) {
+      int key_idx = GETARG_C(ins);
+      if (key_idx >= f->sizek) break;
+      TValue *kv = &f->k[key_idx];
+      if (!ttisstring(kv)) break;
+      *kind_out = CALL_KIND_METHOD;
+      *name_out = str_dup(getstr(tsvalue(kv)));
+      return;
+    }
+
+    if (op == OP_MOVE || op == OP_GETUPVAL) {
+      *kind_out = CALL_KIND_LOCAL;
+      return;
+    }
+
+    if (op == OP_CLOSURE) {
+      *kind_out = CALL_KIND_LOCAL;
+      return;
+    }
+
+    /* Any other writer — unknown */
+    break;
+  }
+}
 
 /* -------------------------------------------------------------------------
 ** Core analysis pass over a single Proto
@@ -502,6 +780,35 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
     }
   }
 
+  /* --- Constant pool ---------------------------------------------------- */
+  fi->num_constants = f->sizek;
+  if (f->sizek > 0) {
+    fi->constants = (ConstantEntry *)calloc(f->sizek, sizeof(ConstantEntry));
+    for (int i = 0; i < f->sizek; i++) {
+      TValue *tv = &f->k[i];
+      ConstantEntry *ce = &fi->constants[i];
+      if (ttisstring(tv)) {
+        ce->kind  = CONST_KIND_STRING;
+        ce->s_val = str_dup(getstr(tsvalue(tv)));
+      } else if (ttisinteger(tv)) {
+        ce->kind  = CONST_KIND_INTEGER;
+        ce->i_val = ivalue(tv);
+      } else if (ttisfloat(tv)) {
+        ce->kind  = CONST_KIND_FLOAT;
+        ce->f_val = fltvalue(tv);
+      } else if (ttistrue(tv) && ttisboolean(tv)) {
+        ce->kind  = CONST_KIND_BOOL;
+        ce->b_val = 1;
+      } else if (ttisboolean(tv)) {
+        ce->kind  = CONST_KIND_BOOL;
+        ce->b_val = 0;
+      } else {
+        /* LUA_TNIL or anything unrecognised */
+        ce->kind  = CONST_KIND_NULL;
+      }
+    }
+  }
+
   /* --- Bytecode scan ---------------------------------------------------- */
   int last_newtable_pc  = -1;
   int last_newtable_arr = 0;
@@ -525,18 +832,38 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
       case OP_RETURN0:
       case OP_RETURN1: {
         ReturnKind kind = classify_return(f, pc, last_newtable_pc);
-        /* Priority: TABLE beats everything; VOID (compiler guard RETURN0)
-        ** must not clobber a TABLE or CALL already recorded. */
-        int should_update = 0;
-        if (fi->return_kind == RETURN_KIND_UNKNOWN)
-          should_update = 1;
-        else if (kind == RETURN_KIND_TABLE)
-          should_update = 1;
-        else if (kind != RETURN_KIND_UNKNOWN && kind != RETURN_KIND_VOID
-                 && fi->return_kind == RETURN_KIND_VOID)
-          should_update = 1;
-        if (should_update)
-          fi->return_kind = kind;
+
+        /* Update return_kind:
+        **   - UNKNOWN / VOID are weak: any stronger kind overwrites them.
+        **   - If we already have a non-weak kind and see a *different*
+        **     non-weak kind, the function has mixed return types → MIXED.
+        **   - Once MIXED, stop updating.
+        **   - VOID produced by the compiler's trailing RETURN0 guard must
+        **     not clobber a real kind already recorded. */
+        if (fi->return_kind != RETURN_KIND_MIXED) {
+          int cur_weak = (fi->return_kind == RETURN_KIND_UNKNOWN ||
+                          fi->return_kind == RETURN_KIND_VOID);
+          int new_weak = (kind == RETURN_KIND_UNKNOWN ||
+                          kind == RETURN_KIND_VOID);
+
+          if (cur_weak && !new_weak) {
+            /* Real return kind found — always take it */
+            fi->return_kind = kind;
+          } else if (!cur_weak && !new_weak && kind != fi->return_kind) {
+            /* Two different real return kinds — mixed */
+            fi->return_kind = RETURN_KIND_MIXED;
+          } else if (fi->return_kind == RETURN_KIND_UNKNOWN && new_weak
+                     && kind == RETURN_KIND_VOID) {
+            /* Only promote UNKNOWN→VOID if we haven't seen any real return
+            ** site yet; tracked via a flag so the trailing RETURN0 guard
+            ** doesn't erase legitimate UNKNOWN from a real return path */
+            if (!fi->had_real_return)
+              fi->return_kind = RETURN_KIND_VOID;
+          }
+        }
+        /* Track whether any non-void, non-unknown return site was seen */
+        if (kind != RETURN_KIND_UNKNOWN && kind != RETURN_KIND_VOID)
+          fi->had_real_return = 1;
 
         if (kind == RETURN_KIND_TABLE) {
           /* Use the specific NEWTABLE for the returned register so sizes
@@ -573,19 +900,133 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
 
       case OP_SETTABUP: {
         /* UpValue[A][K[B]] := RK(C)
-        ** We only care about _ENV (upvalue 0) assignments at the top level. */
+        ** We only care about _ENV (upvalue 0) assignments at the top level.
+        ** When k==1, C is a constant index (not a register) — the value is
+        ** a literal, never a closure. */
         if (GETARG_A(ins) != 0) break;
 
         int key_idx = GETARG_B(ins);
         int val_reg = GETARG_C(ins);
+        int k_flag  = GETARG_k(ins);
 
         if (key_idx >= f->sizek) break;
-        TValue *k = &f->k[key_idx];
-        if (!ttisstring(k)) break;
+        TValue *kv = &f->k[key_idx];
+        if (!ttisstring(kv)) break;
 
-        const char *name = getstr(tsvalue(k));
-        int is_fn = (find_reg_source(f, pc, val_reg) == 1) ? 1 : 0;
-        upsert_global(report, name, is_fn);
+        const char *name = getstr(tsvalue(kv));
+
+        int         is_fn      = 0;
+        const Proto *child_proto = NULL;
+
+        if (!k_flag) {
+          int limit2 = (pc - 16 < 0) ? 0 : pc - 16;
+          for (int j = pc - 1; j >= limit2; j--) {
+            Instruction prev = f->code[j];
+            if (GET_OPCODE(prev) == OP_CLOSURE && GETARG_A(prev) == val_reg) {
+              is_fn = 1;
+              int bx = GETARG_Bx(prev);
+              if (bx < f->sizep)
+                child_proto = f->p[bx];
+              break;
+            }
+            if (GETARG_A(prev) == val_reg) break;
+          }
+        }
+
+        /* Record the global now; function_index resolved after recursion */
+        int global_slot = report->num_globals;
+        upsert_global(report, name, is_fn, -1);
+
+        /* If this was a new entry (not a duplicate) and we have a proto
+        ** pointer, stash it for post-recursion resolution */
+        if (child_proto && report->num_globals > global_slot) {
+          /* grow pending_proto to match globals array */
+          fi->pending_proto = (const Proto **)realloc(fi->pending_proto,
+                                report->num_globals * sizeof(const Proto *));
+          /* fill any gap for entries added without a proto */
+          for (int g = fi->num_pending; g < global_slot; g++)
+            fi->pending_proto[g] = NULL;
+          fi->pending_proto[global_slot] = child_proto;
+          fi->num_pending = report->num_globals;
+        }
+        break;
+      }
+
+      case OP_VARARG: {
+        fi->is_vararg_used = 1;
+        break;
+      }
+
+      case OP_GETTABUP: {
+        /* R[A] := UpValue[B][K[C]:shortstring]
+        ** Record reads from any upvalue where C is a string constant.
+        ** Upvalue 0 is _ENV (globals); others are named captures. */
+        int upv     = GETARG_B(ins);
+        int key_idx = GETARG_C(ins);
+        if (key_idx < f->sizek) {
+          TValue *kv = &f->k[key_idx];
+          if (ttisstring(kv)) {
+            const char *field = getstr(tsvalue(kv));
+            const char *tbl   = "_ENV";
+            if (upv != 0 && upv < f->sizeupvalues && f->upvalues[upv].name)
+              tbl = getstr(f->upvalues[upv].name);
+            push_read(fi, tbl, field);
+          }
+        }
+        break;
+      }
+
+      case OP_GETFIELD: {
+        /* R[A] := R[B][K[C]:shortstring]
+        ** Record one-level field reads where K[C] is a string. */
+        int key_idx = GETARG_C(ins);
+        if (key_idx < f->sizek) {
+          TValue *kv = &f->k[key_idx];
+          if (ttisstring(kv)) {
+            push_read(fi, "?", getstr(tsvalue(kv)));
+          }
+        }
+        break;
+      }
+
+      case OP_CALL:
+      case OP_TAILCALL: {
+        int callee_reg = GETARG_A(ins);
+        int b          = GETARG_B(ins);
+        int is_tail    = (op == OP_TAILCALL) ? 1 : 0;
+
+        CallSite *cs = push_call_site(fi);
+        cs->is_tail  = is_tail;
+        /* arg_count: B-1 args when B>0, variable when B==0 */
+        cs->arg_count = (b == 0) ? -1 : (b - 1);
+
+        /* Best-effort line number: use the absolute line info table if
+        ** present (stripped bytecode omits it, in which case we emit 0). */
+        cs->line = 0;
+        if (f->abslineinfo && f->sizeabslineinfo > 0) {
+          /* abslineinfo is a sorted array of {pc, line} checkpoints.
+          ** Find the last entry with pc <= current pc. */
+          int lo = 0, hi = f->sizeabslineinfo - 1, best = 0;
+          while (lo <= hi) {
+            int mid = (lo + hi) / 2;
+            if (f->abslineinfo[mid].pc <= pc) {
+              best = f->abslineinfo[mid].line;
+              lo = mid + 1;
+            } else {
+              hi = mid - 1;
+            }
+          }
+          cs->line = best;
+        } else if (f->lineinfo && pc < f->sizecode) {
+          /* Compact delta encoding: lineinfo[i] is a signed byte offset
+          ** from the previous line. Walk from the start. */
+          int line = f->linedefined;
+          for (int k = 0; k <= pc && k < f->sizecode; k++)
+            line += (signed char)f->lineinfo[k];
+          cs->line = line;
+        }
+
+        resolve_callee(f, pc, callee_reg, &cs->kind, &cs->callee);
         break;
       }
 
@@ -606,8 +1047,38 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
   }
 
   /* --- Recurse into nested protos --------------------------------------- */
-  for (int i = 0; i < f->sizep; i++)
+  int my_index = report->num_functions - 1;
+
+  for (int i = 0; i < f->sizep; i++) {
+    int child_index = report->num_functions;
+    push_child_index(&report->functions[my_index], child_index);
     analyze_proto_recursive(f->p[i], report);
+  }
+
+  /* --- Resolve pending global → function_index mappings ---------------- */
+  /* Now that all child protos have been pushed into report->functions,
+  ** match each stashed Proto pointer against the recorded FunctionInfo
+  ** entries by pointer identity on line_defined + source. Direct pointer
+  ** comparison against f->p[bx] would be ideal but FunctionInfo doesn't
+  ** store the Proto*; matching on linedefined is unambiguous for any
+  ** well-formed script (two sibling functions on the same line is
+  ** pathological). */
+  fi = &report->functions[my_index]; /* re-fetch: may have moved due to realloc */
+  if (fi->num_pending > 0) {
+    for (int g = 0; g < fi->num_pending && g < report->num_globals; g++) {
+      if (!fi->pending_proto[g]) continue;
+      int target_line = fi->pending_proto[g]->linedefined;
+      for (int k = 0; k < report->num_functions; k++) {
+        if (report->functions[k].line_defined == target_line) {
+          report->globals[g].function_index = k;
+          break;
+        }
+      }
+    }
+    free(fi->pending_proto);
+    fi->pending_proto = NULL;
+    fi->num_pending   = 0;
+  }
 }
 
 static void analyze_proto_recursive(const Proto *f, InterfaceReport *report) {
@@ -664,12 +1135,96 @@ static void write_table_info(FILE *out, const TableInfo *ti, int depth) {
   fputc('}', out);
 }
 
+static void write_constant_array(FILE *out, const ConstantEntry *arr, int n, int depth) {
+  fprintf(out, "[\n");
+  for (int i = 0; i < n; i++) {
+    const ConstantEntry *ce = &arr[i];
+    write_indent(out, depth + 1);
+    fprintf(out, "{\"kind\": %d, ", (int)ce->kind);
+    switch (ce->kind) {
+      case CONST_KIND_STRING:
+        fprintf(out, "\"s_val\": ");
+        json_write_string(out, ce->s_val);
+        fprintf(out, ", \"i_val\": 0, \"f_val\": 0.0, \"b_val\": false");
+        break;
+      case CONST_KIND_INTEGER:
+        fprintf(out, "\"s_val\": null, \"i_val\": " LUA_INTEGER_FMT
+                     ", \"f_val\": 0.0, \"b_val\": false",
+                (LUAI_UACINT)ce->i_val);
+        break;
+      case CONST_KIND_FLOAT:
+        fprintf(out, "\"s_val\": null, \"i_val\": 0, \"f_val\": %.17g"
+                     ", \"b_val\": false",
+                (double)ce->f_val);
+        break;
+      case CONST_KIND_BOOL:
+        fprintf(out, "\"s_val\": null, \"i_val\": 0, \"f_val\": 0.0"
+                     ", \"b_val\": %s", ce->b_val ? "true" : "false");
+        break;
+      default: /* CONST_KIND_NULL */
+        fprintf(out, "\"s_val\": null, \"i_val\": 0, \"f_val\": 0.0"
+                     ", \"b_val\": false");
+        break;
+    }
+    fputc('}', out);
+    if (i < n - 1) fputc(',', out);
+    fputc('\n', out);
+  }
+  write_indent(out, depth);
+  fputc(']', out);
+}
+
+static void write_int_array(FILE *out, const int *arr, int n, int depth) {
+  fprintf(out, "[\n");
+  for (int i = 0; i < n; i++) {
+    write_indent(out, depth + 1);
+    fprintf(out, "%d", arr[i]);
+    if (i < n - 1) fputc(',', out);
+    fputc('\n', out);
+  }
+  write_indent(out, depth);
+  fputc(']', out);
+}
+
 static void write_closure_array(FILE *out, const ClosureInfo *arr, int n, int depth) {
   fprintf(out, "[\n");
   for (int i = 0; i < n; i++) {
     write_indent(out, depth + 1);
     fprintf(out, "{\"line_defined\": %d, \"upvalue_count\": %d}",
             arr[i].line_defined, arr[i].upvalue_count);
+    if (i < n - 1) fputc(',', out);
+    fputc('\n', out);
+  }
+  write_indent(out, depth);
+  fputc(']', out);
+}
+
+static void write_call_site_array(FILE *out, const CallSite *arr, int n, int depth) {
+  fprintf(out, "[\n");
+  for (int i = 0; i < n; i++) {
+    const CallSite *cs = &arr[i];
+    write_indent(out, depth + 1);
+    fprintf(out, "{\"line\": %d, \"kind\": %d, \"callee\": ",
+            cs->line, (int)cs->kind);
+    json_write_string(out, cs->callee ? cs->callee : "");
+    fprintf(out, ", \"arg_count\": %d, \"is_tail\": %s}",
+            cs->arg_count, cs->is_tail ? "true" : "false");
+    if (i < n - 1) fputc(',', out);
+    fputc('\n', out);
+  }
+  write_indent(out, depth);
+  fputc(']', out);
+}
+
+static void write_read_array(FILE *out, const ReadEntry *arr, int n, int depth) {
+  fprintf(out, "[\n");
+  for (int i = 0; i < n; i++) {
+    write_indent(out, depth + 1);
+    fprintf(out, "{\"table_name\": ");
+    json_write_string(out, arr[i].table_name);
+    fprintf(out, ", \"field_name\": ");
+    json_write_string(out, arr[i].field_name);
+    fputc('}', out);
     if (i < n - 1) fputc(',', out);
     fputc('\n', out);
   }
@@ -723,8 +1278,31 @@ static void write_function_info(FILE *out, const FunctionInfo *fi, int depth) {
   fprintf(out, ",\n");
 
   write_indent(out, depth + 1);
+  fprintf(out, "\"is_vararg_used\": %s,\n", fi->is_vararg_used ? "true" : "false");
+
+  write_indent(out, depth + 1);
   fprintf(out, "\"closures\": ");
   write_closure_array(out, fi->closures, fi->num_closures, depth + 1);
+  fprintf(out, ",\n");
+
+  write_indent(out, depth + 1);
+  fprintf(out, "\"constants\": ");
+  write_constant_array(out, fi->constants, fi->num_constants, depth + 1);
+  fprintf(out, ",\n");
+
+  write_indent(out, depth + 1);
+  fprintf(out, "\"child_proto_indices\": ");
+  write_int_array(out, fi->child_proto_indices, fi->num_children, depth + 1);
+  fprintf(out, ",\n");
+
+  write_indent(out, depth + 1);
+  fprintf(out, "\"call_sites\": ");
+  write_call_site_array(out, fi->call_sites, fi->num_call_sites, depth + 1);
+  fprintf(out, ",\n");
+
+  write_indent(out, depth + 1);
+  fprintf(out, "\"reads\": ");
+  write_read_array(out, fi->reads, fi->num_reads, depth + 1);
   fprintf(out, "\n");
 
   write_indent(out, depth); fputc('}', out);
@@ -750,8 +1328,9 @@ void print_report_json(InterfaceReport *report, FILE *out) {
   for (int i = 0; i < report->num_globals; i++) {
     fprintf(out, "    {\"name\": ");
     json_write_string(out, report->globals[i].name);
-    fprintf(out, ", \"is_function\": %s}",
-            report->globals[i].is_function ? "true" : "false");
+    fprintf(out, ", \"is_function\": %s, \"function_index\": %d}",
+            report->globals[i].is_function ? "true" : "false",
+            report->globals[i].function_index);
     if (i < report->num_globals - 1) fputc(',', out);
     fputc('\n', out);
   }
@@ -787,6 +1366,19 @@ void free_report(InterfaceReport *report) {
       free((void *)fi->upvalue_names[j]);
     free(fi->upvalue_names);
     free(fi->closures);
+    for (int j = 0; j < fi->num_constants; j++)
+      free((void *)fi->constants[j].s_val);
+    free(fi->constants);
+    free(fi->child_proto_indices);
+    free(fi->pending_proto);
+    for (int j = 0; j < fi->num_call_sites; j++)
+      free((void *)fi->call_sites[j].callee);
+    free(fi->call_sites);
+    for (int j = 0; j < fi->num_reads; j++) {
+      free((void *)fi->reads[j].table_name);
+      free((void *)fi->reads[j].field_name);
+    }
+    free(fi->reads);
   }
   free(report->functions);
 
