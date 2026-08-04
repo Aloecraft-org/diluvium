@@ -1030,11 +1030,6 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
         break;
       }
 
-      /* OP_2Q (Diluvium null-coalescing): writes R[A], treat like a normal
-      ** register-producing instruction. No special analysis needed here. */
-      case OP_2Q:
-        break;
-
       default:
         break;
     }

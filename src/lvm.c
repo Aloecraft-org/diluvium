@@ -1892,18 +1892,6 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         lua_assert(0);
         vmbreak;
       }
-      vmcase(OP_2Q) {
-        StkId ra = RA(i);
-        TValue *rb = vRB(i);
-        TValue *rc = vRC(i);
-        /* If 'rb' is NOT nil */
-        if (!ttisnil(rb)) {
-          setobj(L, s2v(ra), rb);
-        } else {
-          setobj(L, s2v(ra), rc);
-        }
-        vmbreak;
-      }
     }
   }
 }

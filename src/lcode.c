@@ -1647,6 +1647,14 @@ void luaK_infix (FuncState *fs, BinOpr op, expdesc *v) {
       luaK_goiffalse(fs, v);  /* go ahead only if 'v' is false */
       break;
     }
+    case OPR_2Q: {  /* 'v ?? b': short-circuits like 'or', but on nil only */
+      if (v->k == VNIL)
+        break;  /* 'nil ?? b' is just 'b'; fold in luaK_posfix */
+      luaK_exp2nextreg(fs, v);  /* result register; rhs reuses it */
+      /* skip the rhs when 'v' is not nil */
+      luaK_concat(fs, &v->t, condjump(fs, OP_EQK, v->u.info, nilK(fs), 0, 0));
+      break;
+    }
     case OPR_CONCAT: {
       luaK_exp2nextreg(fs, v);  /* operand must be on the stack */
       break;
@@ -1724,17 +1732,22 @@ void luaK_posfix (FuncState *fs, BinOpr opr,
       break;
     }
     case OPR_2Q: {
-        luaK_exp2nextreg(fs, e1); /* Ensure e1 is a value */
-        luaK_exp2nextreg(fs, e2); /* Ensure e2 is a value */
-        /* Generate the VM OpCode OP_QQ */
-        luaK_codeABC(fs, OP_2Q, 0, e1->u.info, e2->u.info);
-        /* Update the expression descriptor 'e1' to point to new instruction */
-        freeexp(fs, e2); /* Free the right operand's register */
-        freeexp(fs, e1); /* Free the left operand (IF it was a temp register) */
-        
-        e1->u.info = fs->pc - 1;
-        e1->k = VRELOC; /* relocatable instruction result */
-        break;
+      if (e1->k == VNIL) {  /* folded 'nil ?? b': result is just 'b' */
+        luaK_dischargevars(fs, e2);
+        *e1 = *e2;
+      }
+      else {
+        /* lhs is in a register with the skip-rhs jump on its 't' list
+           (see luaK_infix); evaluate rhs into that same register */
+        int reg = e1->u.info;
+        lua_assert(e1->k == VNONRELOC && e1->f == NO_JUMP);
+        luaK_dischargevars(fs, e2);
+        freeexp(fs, e2);
+        exp2reg(fs, e2, reg);
+        luaK_patchtohere(fs, e1->t);  /* non-nil lhs skips to here */
+        e1->t = NO_JUMP;
+      }
+      break;
     }
     case OPR_CONCAT: {  /* e1 .. e2 */
       luaK_exp2nextreg(fs, e2);
