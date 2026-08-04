@@ -168,11 +168,6 @@ jobs:
     needs: resolve
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Advisory only. This currently reports known findings 3 and 4 from the
-    # handoff document (byte-count bug in scramble_bytes, and is_encrypted not
-    # propagating to nested closures). Once both are fixed, drop
-    # continue-on-error so the check starts guarding the fix.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
         with:
@@ -187,6 +182,14 @@ jobs:
             -std=c99 -DMAKE_LUAC -lm
 
       - name: Check that a ~function leaks nothing in plaintext
+        env:
+          # A leak is currently expected: it is handoff findings 3 (scramble
+          # length is an instruction count where a byte count is needed) and 4
+          # (is_encrypted does not propagate to nested closures). Until those
+          # land, report the leak as a warning rather than painting the job
+          # red for a known-open issue. Flip to 'true' once both are fixed and
+          # this becomes a real regression guard.
+          STRICT: 'false'
         run: |
           set -eu
           cat > /tmp/secure_probe.lua <<'LUA'
@@ -219,4 +222,11 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
-          exit $leaked
+          if [ "$leaked" -eq 0 ]; then
+            echo "no plaintext leaked"
+          elif [ "$STRICT" = true ]; then
+            echo "::error::secure chunk contains plaintext constants"
+            exit 1
+          else
+            echo "::warning::secure chunk contains plaintext constants (known: handoff findings 3 and 4)"
+          fi

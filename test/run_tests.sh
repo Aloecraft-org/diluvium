@@ -118,6 +118,19 @@ if [ "$MODE" = list ] || [ "$MODE" = list-skipped ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# Tests run with the cwd set to test/, so a relative --bin would be resolved
+# against the wrong directory. Pin it to an absolute path against the cwd we
+# were invoked from, before anything changes directory.
+case "$BIN" in
+  /*) ;;
+  *)
+    bin_dir=$(dirname -- "$BIN")
+    if [ -d "$bin_dir" ]; then
+      BIN="$(CDPATH= cd -- "$bin_dir" && pwd)/$(basename -- "$BIN")"
+    fi
+    ;;
+esac
+
 if [ ! -x "$BIN" ]; then
   echo "run_tests.sh: test binary not found or not executable: $BIN" >&2
   echo "              build it first with: make test_build" >&2
