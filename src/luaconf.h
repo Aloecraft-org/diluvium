@@ -753,6 +753,20 @@
 
 
 /*
+@@ luai_makeseed (Diluvium) fixes the string hash seed instead of
+** deriving it from ASLR addresses and the clock (stock behavior), so
+** iteration order over string keys is identical on every run and every
+** platform. Diluvium is a contract runtime: consensus requires that
+** independent nodes executing the same chunk observe the same 'pairs'
+** order. The stock seed exists to harden against hash-flooding DoS;
+** contract gas metering bounds that instead.
+*/
+#if !defined(luai_makeseed)
+#define luai_makeseed(L)	((void)(L), 0x44494C55u)  /* "DILU" */
+#endif
+
+
+/*
 @@ LUA_EXTRASPACE defines the size of a raw memory area associated with
 ** a Lua state with very fast access.
 ** CHANGE it if you need a different size.
