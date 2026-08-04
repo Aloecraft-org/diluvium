@@ -522,7 +522,7 @@ static int llex (LexState *ls, SemInfo *seminfo) {
         return '?'; 
       }
       case '$': {
-          save_and_next(ls);
+          next(ls);  /* skip '$' */
           int sep = ls->current;
           if (sep == '"' || sep == '\'') {
               ls->fstring_del = sep;
@@ -530,18 +530,8 @@ static int llex (LexState *ls, SemInfo *seminfo) {
               luaX_read_fstring(ls, sep);
               return ls->t.token;
           }
-          else {
-              /* It is NOT a $-string */
-              /* We are now in the middle of an identifier. Continue reading it. */
-              while (lislalnum(ls->current) || ls->current == '_') {
-                  save_and_next(ls);
-              }
-              /* Finalize the token as a Name (Identifier) */
-              ls->t.seminfo.ts = luaX_newstring(ls, luaZ_buffer(ls->buff),
-                                                  luaZ_bufflen(ls->buff));
-              /* Note: No keywords start with $, so we don't need check_reserved */
-              return TK_NAME;
-          }
+          /* '$' is only valid introducing an interpolated string */
+          luaX_lexerror(ls, "expected string literal after '$'", TK_STRING);
       }
       case '\n': case '\r': {  /* line breaks */
         inclinenumber(ls);

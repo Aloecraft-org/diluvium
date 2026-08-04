@@ -23,7 +23,13 @@
 */
 #define LUAC_VERSION  (((LUA_VERSION_NUM / 100) * 16) + LUA_VERSION_NUM % 100)
 
-#define LUAC_FORMAT	0	/* this is the official format */
+/*
+** Diluvium bytecode is not loadable by stock Lua (extra is_encrypted
+** byte per function, optional XOR-scrambled code/constants), so it
+** carries its own format byte: stock Lua rejects Diluvium chunks at the
+** header instead of misparsing them, and vice versa. 'D' for Diluvium.
+*/
+#define LUAC_FORMAT	0x44	/* Diluvium format ('D'); stock Lua uses 0 */
 
 /* load one chunk; from lundump.c */
 LUAI_FUNC LClosure* luaU_undump (lua_State* L, ZIO* Z, const char* name);

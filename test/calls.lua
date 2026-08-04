@@ -455,7 +455,7 @@ do
   local header = string.pack("c4BBc6BBB",
     "\27Lua",                                  -- signature
     0x54,                                      -- version 5.4 (0x54)
-    0,                                         -- format
+    0x44,                                      -- format ('D': Diluvium; stock Lua is 0)
     "\x19\x93\r\n\x1a\n",                      -- data
     4,                                         -- size of instruction
     string.packsize("j"),                      -- sizeof(lua integer)

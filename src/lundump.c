@@ -285,7 +285,7 @@ static void loadFunction (LoadState *S, Proto *f, TString *psource) {
   f->maxstacksize = loadByte(S);
   loadCode(S, f);
   if (f->is_encrypted)
-    unscramble_bytes(f->code, f->sizecode);
+    unscramble_bytes(f->code, f->sizecode * sizeof(Instruction));
   loadConstants(S, f);
   loadUpvalues(S, f);
   loadProtos(S, f);

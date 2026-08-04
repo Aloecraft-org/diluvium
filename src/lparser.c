@@ -713,6 +713,10 @@ static Proto *addprototype (LexState *ls) {
     clp->is_encrypted = 1;
     ls->encrypted_flag = 0;
   }
+  else if (f->is_encrypted) {
+    /* everything lexically inside a secure function is also secure */
+    clp->is_encrypted = 1;
+  }
 
   return clp;
 }
@@ -1924,8 +1928,9 @@ static void statement (LexState *ls) {
         if (ls->t.token != TK_FUNCTION) {
           luaX_syntaxerror(ls, "expected 'function' after '~'");
         }
+        luaX_next(ls);  /* skip FUNCTION */
         ls->encrypted_flag = 1;
-        funcstat(ls, ls->linenumber);
+        localfunc(ls);
       }
       else
       {

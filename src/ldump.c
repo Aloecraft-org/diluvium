@@ -114,7 +114,7 @@ static void dumpCode (DumpState *D, const Proto *f) {
   if (f->is_encrypted) {
       Instruction *buff = luaM_newvector(D->L, f->sizecode, Instruction);
       memcpy(buff, f->code, f->sizecode * sizeof(Instruction));
-      scramble_bytes(buff, f->sizecode);
+      scramble_bytes(buff, f->sizecode * sizeof(Instruction));
       dumpVector(D, buff, f->sizecode);
       luaM_freearray(D->L, buff, f->sizecode);
   } else {
