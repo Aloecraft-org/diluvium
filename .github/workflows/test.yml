@@ -1,0 +1,222 @@
+name: Tests
+
+# Runs the Lua test suite plus a few Diluvium-specific smoke checks.
+#
+# Three ways in:
+#   * automatically on every push and pull request
+#   * manually, against any commit, branch or tag  (Actions -> Tests -> Run workflow)
+#   * called by release.yml as a gate before publishing
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit SHA, branch or tag to test (blank = the branch selected above)'
+        type: string
+        required: false
+        default: ''
+      include_skipped:
+        description: 'Also run the normally-skipped tests (api, attrib, big, heavy, literals, main)'
+        type: boolean
+        required: false
+        default: false
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+        default: ''
+      include_skipped:
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      sha:
+        description: 'The exact commit that was tested'
+        value: ${{ jobs.resolve.outputs.sha }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tests-${{ inputs.ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Pin the exact commit once, so every job below tests the same tree even if
+  # the branch moves mid-run. This is what makes a manual run commit-specific
+  # rather than branch-specific.
+  resolve:
+    name: Resolve commit
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.info.outputs.sha }}
+      short_sha: ${{ steps.info.outputs.short_sha }}
+      version: ${{ steps.info.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - id: info
+        run: |
+          set -eu
+          SHA=$(git rev-parse HEAD)
+          {
+            echo "sha=$SHA"
+            echo "short_sha=$(git rev-parse --short=12 HEAD)"
+            echo "version=$(tr -d '[:space:]' < VERSION)"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Commit under test"
+            echo ""
+            echo "| | |"
+            echo "| :--- | :--- |"
+            echo "| Version | \`$(tr -d '[:space:]' < VERSION)\` |"
+            echo "| Commit | \`$SHA\` |"
+            echo "| Subject | $(git log -1 --pretty=%s) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  suite:
+    name: Suite (${{ matrix.name }})
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # macOS is advisory for now: the debug build has never been exercised there,
+    # so a failure should surface without blocking the pipeline. Flip
+    # experimental to false once it has been green for a few runs.
+    continue-on-error: ${{ matrix.experimental }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            experimental: false
+          - name: macos-arm64
+            os: macos-latest
+            experimental: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Build debug binary (with ltests.h assertions)
+        run: make test_build
+
+      - name: Run suite
+        run: |
+          ./test/run_tests.sh \
+            --bin dist/diluvium_debug \
+            --timeout 300 \
+            ${{ inputs.include_skipped && '--include-skipped' || '' }}
+
+  analyzer:
+    name: Analysis report
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Build luac
+        run: |
+          set -eu
+          mkdir -p .data dist
+          cp -r src/* .data/
+          gcc -o dist/luac .data/onelua.c .data/analyze.c .data/diluvium_api.c \
+            -std=c99 -DMAKE_LUAC -lm
+
+      - name: Generate and validate the report
+        run: |
+          set -eu
+          # `luac -r <file>` writes the JSON report to luac.out.
+          ./dist/luac -r test/analyze.lua
+          python3 - <<'PY'
+          import json, sys
+          with open("luac.out") as fh:
+              report = json.load(fh)
+          for key in ("lua_version", "functions"):
+              if key not in report:
+                  sys.exit(f"analysis report is missing top-level key {key!r}")
+          fns = report["functions"]
+          if not isinstance(fns, list) or not fns:
+              sys.exit("analysis report contains no functions")
+          print(f"report OK: {len(fns)} functions, lua_version={report['lua_version']}")
+          PY
+
+      - name: Compile every test file (parser smoke check)
+        run: |
+          set -eu
+          fail=0
+          for f in test/*.lua; do
+            if ! ./dist/luac -p "$f" >/dev/null 2>&1; then
+              echo "parse failed: $f"
+              fail=1
+            fi
+          done
+          exit $fail
+
+  obfuscation-audit:
+    name: Obfuscation audit (advisory)
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Advisory only. This currently reports known findings 3 and 4 from the
+    # handoff document (byte-count bug in scramble_bytes, and is_encrypted not
+    # propagating to nested closures). Once both are fixed, drop
+    # continue-on-error so the check starts guarding the fix.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Build luac
+        run: |
+          set -eu
+          mkdir -p .data dist
+          cp -r src/* .data/
+          gcc -o dist/luac .data/onelua.c .data/analyze.c .data/diluvium_api.c \
+            -std=c99 -DMAKE_LUAC -lm
+
+      - name: Check that a ~function leaks nothing in plaintext
+        run: |
+          set -eu
+          cat > /tmp/secure_probe.lua <<'LUA'
+          ~function probe()
+            local direct = "MARKER_DIRECT_CONSTANT"
+            local nested = function() return "MARKER_NESTED_CONSTANT" end
+            return direct, nested
+          end
+          LUA
+          ./dist/luac -s -o /tmp/secure_probe.out /tmp/secure_probe.lua
+
+          leaked=0
+          for marker in MARKER_DIRECT_CONSTANT MARKER_NESTED_CONSTANT; do
+            if grep -qa "$marker" /tmp/secure_probe.out; then
+              echo "LEAKED   $marker  (present in plaintext in the dumped chunk)"
+              leaked=1
+            else
+              echo "obscured $marker"
+            fi
+          done
+
+          {
+            echo "### Obfuscation audit"
+            echo ""
+            if [ "$leaked" -eq 0 ]; then
+              echo "No plaintext markers found in the dumped secure chunk."
+            else
+              echo "Plaintext markers found in the dumped secure chunk."
+              echo "Expected while handoff findings 3 and 4 are open."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          exit $leaked

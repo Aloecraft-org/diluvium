@@ -1,0 +1,272 @@
+name: Build
+
+# Produces the full set of platform artifacts for one specific commit, without
+# publishing anything.
+#
+# Two ways in:
+#   * manually  (Actions -> Build -> Run workflow), to get artifacts for any
+#     commit, branch or tag without creating a release
+#   * called by release.yml, which then attaches the same artifacts to a release
+#
+# Every artifact name carries the short commit SHA, so downloads from different
+# runs never get confused with one another.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Commit SHA, branch or tag to build (blank = the branch selected above)'
+        type: string
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+        default: ''
+    outputs:
+      sha:
+        description: 'The exact commit that was built'
+        value: ${{ jobs.resolve.outputs.sha }}
+      short_sha:
+        description: 'Short form of the built commit'
+        value: ${{ jobs.resolve.outputs.short_sha }}
+      version:
+        description: 'Contents of the VERSION file at that commit'
+        value: ${{ jobs.resolve.outputs.version }}
+      bundle_artifact:
+        description: 'Name of the artifact holding every platform binary plus checksums'
+        value: ${{ jobs.bundle.outputs.artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  # Pin the exact commit once so every platform builds the identical tree.
+  resolve:
+    name: Resolve commit
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.info.outputs.sha }}
+      short_sha: ${{ steps.info.outputs.short_sha }}
+      version: ${{ steps.info.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+
+      - id: info
+        run: |
+          set -eu
+          {
+            echo "sha=$(git rev-parse HEAD)"
+            echo "short_sha=$(git rev-parse --short=12 HEAD)"
+            echo "version=$(tr -d '[:space:]' < VERSION)"
+          } >> "$GITHUB_OUTPUT"
+
+  build-linux-and-wasm:
+    name: Linux static + WASM
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Install Podman
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install podman
+
+      - name: Install QEMU (for ARM support)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build WASM
+        run: make build_wasm
+
+      # The browser target is not currently exercised by any release, so treat
+      # it as advisory: a regression here should be visible but must not block
+      # shipping the other artifacts. Make it blocking once it has been green.
+      - name: Build wasm32-unknown-unknown (browser, advisory)
+        continue-on-error: true
+        run: make _wasm_unknown_build
+
+      - name: Build Linux static (x86_64)
+        run: make build_linux_static ARCHl=x86_64
+
+      - name: Build Linux static (aarch64 / Raspberry Pi 3-5)
+        run: |
+          # --platform triggers QEMU emulation; ARCHl names the output file.
+          make build_linux_static \
+            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm64 -v $(pwd)/.data:/data -w /data alpine:latest" \
+            ARCHl=aarch64
+
+      - name: Build Linux static (armv7l / Pi Zero)
+        run: |
+          make build_linux_static \
+            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm/v7 -v $(pwd)/.data:/data -w /data alpine:latest" \
+            ARCHl=armv7l
+
+      - name: Smoke test the x86_64 static binary
+        run: |
+          set -eu
+          ./dist/diluvium_linux_static_x86_64 -v
+          ./dist/diluvium_linux_static_x86_64 -e 'assert((nil ?? "ok") == "ok"); print("null coalescing ok")'
+          ./dist/diluvium_linux_static_x86_64 -e 'local w="world"; assert($"hello {w}" == "hello world"); print("f-strings ok")'
+          ./dist/diluvium_compiler_linux_static_x86_64 -v
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diluvium-${{ needs.resolve.outputs.short_sha }}-linux-wasm
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  build-macos:
+    name: macOS (${{ matrix.os }})
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Install dependencies
+        run: brew install readline
+
+      - name: Build native
+        run: |
+          # Help clang find readline in its non-standard brew location.
+          export CPATH="$(brew --prefix readline)/include:$CPATH"
+          export LIBRARY_PATH="$(brew --prefix readline)/lib:$LIBRARY_PATH"
+          make build_platform
+
+      - name: Smoke test
+        run: |
+          set -eu
+          BIN=$(ls dist/diluvium_darwin_* | grep -v '\.a$' | grep -v compiler | head -1)
+          "$BIN" -v
+          "$BIN" -e 'assert((nil ?? "ok") == "ok"); print("null coalescing ok")'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diluvium-${{ needs.resolve.outputs.short_sha }}-${{ matrix.os }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  build-windows:
+    name: Windows (MSYS2 MINGW64)
+    needs: resolve
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-x86_64-gcc
+
+      - name: Build
+        shell: msys2 {0}
+        run: |
+          # Set these explicitly: the MSYS uname is long and ugly
+          # ("mingw64_nt-10.0..."), which would leak into the filenames.
+          make build_platform UNAME_Sl=windows ARCHl=x86_64
+          ls -l dist/
+
+      - name: Smoke test
+        shell: msys2 {0}
+        run: |
+          set -eu
+          ./dist/diluvium_windows_x86_64.exe -v
+          ./dist/diluvium_windows_x86_64.exe -e 'assert((nil ?? "ok") == "ok"); print("null coalescing ok")'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diluvium-${{ needs.resolve.outputs.short_sha }}-windows
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  # Collect every platform artifact into one bundle with a build manifest and
+  # checksums. This is what release.yml attaches to the release, and what you
+  # want to download after a manual build.
+  bundle:
+    name: Bundle + checksums
+    needs: [resolve, build-linux-and-wasm, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    outputs:
+      artifact: diluvium-${{ needs.resolve.outputs.short_sha }}-all
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: diluvium-${{ needs.resolve.outputs.short_sha }}-*
+          merge-multiple: true
+          path: release_dist
+
+      - name: Write build manifest and checksums
+        run: |
+          set -eu
+          cd release_dist
+          # Keep the manifest and checksum file out of their own checksums.
+          rm -f BUILDINFO.txt SHA256SUMS.txt
+          find . -maxdepth 1 -type f ! -name SHA256SUMS.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            | sed 's| \./| |' > SHA256SUMS.txt
+          cd ..
+
+          {
+            echo "Diluvium build manifest"
+            echo "======================="
+            echo "version    : ${{ needs.resolve.outputs.version }}"
+            echo "commit     : ${{ needs.resolve.outputs.sha }}"
+            echo "subject    : $(git log -1 --pretty=%s ${{ needs.resolve.outputs.sha }})"
+            echo "committed  : $(git log -1 --pretty=%cI ${{ needs.resolve.outputs.sha }})"
+            echo "built      : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "run        : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "Artifacts"
+            echo "---------"
+            cat release_dist/SHA256SUMS.txt
+          } > release_dist/BUILDINFO.txt
+
+          cat release_dist/BUILDINFO.txt
+
+      - name: Job summary
+        run: |
+          {
+            echo "### Build ${{ needs.resolve.outputs.version }} @ \`${{ needs.resolve.outputs.short_sha }}\`"
+            echo ""
+            echo "| Artifact | SHA256 |"
+            echo "| :--- | :--- |"
+            awk '{ printf "| `%s` | `%s` |\n", $2, substr($1,1,16) "..." }' release_dist/SHA256SUMS.txt
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: diluvium-${{ needs.resolve.outputs.short_sha }}-all
+          path: release_dist/*
+          if-no-files-found: error
+          retention-days: 90

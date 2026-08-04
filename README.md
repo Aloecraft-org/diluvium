@@ -202,3 +202,39 @@ Example Output:
   }
 }
 ```
+## Testing
+
+The suite lives in `test/`. `test/run_tests.sh` is the single source of truth
+for which tests run, which are skipped and why — add new tests there, not to
+the Makefile.
+
+``` sh
+make test_cases                        # build the debug binary, run everything
+make test_one T="strings test_fstrings"  # run named tests
+make failing_test_cases                # show what is skipped, and why
+./test/run_tests.sh --include-skipped   # run the skipped ones anyway
+```
+
+The runner keeps going after a failure and prints a summary, so one broken
+test does not hide the state of the rest. It exits non-zero if anything failed.
+
+## Continuous integration
+
+Three workflows, all runnable by hand against **any commit** — enter a SHA in
+the `ref` box and every job builds that exact tree.
+
+| Workflow | Fires on | Does |
+| :--- | :--- | :--- |
+| **Tests** | every push and PR, or manually | Test suite on Linux and macOS, analysis-report validation, obfuscation audit |
+| **Build** | manually, or called by Release | Every platform artifact plus `SHA256SUMS.txt` and `BUILDINFO.txt`, uploaded to the run |
+| **Release** | a `v*` tag push, or manually | Tests, then a full build, then optionally publishes |
+
+**Releases are opt-in.** A manual Release run defaults to `publish: false`, so
+it is a full rehearsal — tests, every platform, checksums — that leaves the
+Releases page untouched. Flip `publish` on when you actually want it out; it
+creates the tag at the commit you named, so you can cut from any commit
+without moving a branch first. Pushing a `v*` tag publishes as before.
+
+Artifact names carry the short commit SHA, and `BUILDINFO.txt` records the
+commit, build time and workflow run, so a downloaded binary can always be
+traced back to its source.

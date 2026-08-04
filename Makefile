@@ -35,9 +35,17 @@ endif
 # TODO: Test `BUILD_WASM_OPT` without `-Wl,--export-all` to reduce binary size
 # TODO: Add this later: -include script/platform.mk
 
-# Special flags required by the test suite
-TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_LINUX -Wl,-E -ldl -lreadline
+# Special flags required by the test suite.
+# The debug binary does not use readline (no -DLUA_USE_READLINE), so it does
+# not link it either -- that keeps the test build dependency-free on CI runners.
+TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_LINUX -Wl,-E -ldl
+
+ifeq ($(UNAME_S),Darwin)
+    TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_MACOSX
+endif
+
 TEST_BIN:=$(CURDIR)/dist/diluvium_debug
+TEST_RUNNER:=$(CURDIR)/test/run_tests.sh
 
 _build_step0:
 	@echo '=== Step 0: Clean & Gather ==='
@@ -232,135 +240,25 @@ test_build: _build_step0
 	gcc $(TEST_CFLAGS) -o $(TEST_BIN) $(CURDIR)/.data/onelua.c -lm
 
 failing_test_cases:
-	echo "skipping: main.lua (fails on static binary)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) main.lua         )
-	echo "skipping: literals.lua (musl vs glibc conversion)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) literals.lua     )
-	echo "skipping: heavy.lua (designed to consume 2GB–16GB of RAM)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) heavy.lua        )
-	echo "skipping: big.lua (designed to consume 2GB–16GB of RAM)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) big.lua          )
-	echo "skipping: attrib.lua (c-api/ltests.c missing)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) attrib.lua       )
-	echo "skipping: api.lua (c-api/ltests.c missing)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) api.lua          )
+	@echo 'Tests excluded from the default run (see test/run_tests.sh):'
+	@$(TEST_RUNNER) --list-skipped
 
+# Run the suite. Keeps going after a failure and prints a summary, so one
+# broken test does not mask the state of the rest. The list of tests and the
+# skip reasons live in test/run_tests.sh -- add new tests there, not here.
 test_cases: test_build
-	@echo "Running Test: api.lua"
-	@echo "============================================="
-# 	(cd $(CURDIR)/test && $(TEST_BIN) api.lua          )
-	@echo "(skipping)"
-	@echo "Running Test: attrib.lua"
-	@echo "============================================="
-# 	(cd $(CURDIR)/test && $(TEST_BIN) attrib.lua       )
-	@echo "(skipping)"
-	@echo "Running Test: benchmark.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) benchmark.lua    )
-	@echo "Running Test: big.lua"
-	@echo "============================================="
-# 	(cd $(CURDIR)/test && $(TEST_BIN) big.lua          )
-	@echo "(skipping)"
-	@echo "Running Test: bitwise.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) bitwise.lua      )
-	@echo "Running Test: bwcoercion.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) bwcoercion.lua   )
-	@echo "Running Test: calls.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) calls.lua        )
-	@echo "Running Test: closure.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) closure.lua      )
-	@echo "Running Test: code.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) code.lua         )
-	@echo "Running Test: constructs.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) constructs.lua   )
-	@echo "Running Test: coroutine.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) coroutine.lua    )
-	@echo "Running Test: cstack.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) cstack.lua       )
-	@echo "Running Test: db.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) db.lua           )
-	@echo "Running Test: errors.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) errors.lua       )
-	@echo "Running Test: events.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) events.lua       )
-	@echo "Running Test: files.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) files.lua        )
-	@echo "Running Test: gc.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) gc.lua           )
-	@echo "Running Test: gengc.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) gengc.lua        )
-	@echo "Running Test: goto.lua"
-	@echo "============================================="
-	@echo "(skipping)"
-	(cd $(CURDIR)/test && $(TEST_BIN) goto.lua         )
-	@echo "Running Test: heavy.lua"
-	@echo "============================================="
-	@echo "(skipping)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) heavy.lua        )
-	@echo "Running Test: literals.lua"
-	@echo "============================================="
-	@echo "(skipping)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) literals.lua     )
-	@echo "Running Test: locals.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) locals.lua       )
-	@echo "Running Test: main.lua"
-	@echo "============================================="
-	@echo "(skipping)"
-# 	(cd $(CURDIR)/test && $(TEST_BIN) main.lua         )
-	@echo "Running Test: math.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) math.lua         )
-	@echo "Running Test: nextvar.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) nextvar.lua      )
-	@echo "Running Test: pm.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) pm.lua           )
-	@echo "Running Test: secure_function.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) secure_function.lua)
-	@echo "Running Test: sort.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) sort.lua         )
-	@echo "Running Test: strings.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) strings.lua      )
-	@echo "Running Test: test_analysis.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) test_analysis.lua)
-	@echo "Running Test: test_fstrings.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) test_fstrings.lua)
-	@echo "Running Test: tpack.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) tpack.lua        )
-	@echo "Running Test: tracegc.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) tracegc.lua      )
-	@echo "Running Test: utf8.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) utf8.lua         )
-	@echo "Running Test: vararg.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) vararg.lua       )
-	@echo "Running Test: verybig.lua"
-	@echo "============================================="
-	(cd $(CURDIR)/test && $(TEST_BIN) verybig.lua      )
+	@$(TEST_RUNNER) --bin $(TEST_BIN)
+
+# Same suite, for CI. Separate target so the workflow has a stable entry point
+# even if the local convenience target changes.
+test_ci: test_build
+	@$(TEST_RUNNER) --bin $(TEST_BIN) --timeout 300
+
+# Run one or more named tests, e.g. `make test_one T="strings gc"`.
+test_one: test_build
+	@$(TEST_RUNNER) --bin $(TEST_BIN) $(T)
+
+.PHONY: test_build test_cases test_ci test_one failing_test_cases
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua

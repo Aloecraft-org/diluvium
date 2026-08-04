@@ -22,3 +22,5 @@ x.md
 x.patch
 .nogit
 
+luac.out
+release_dist

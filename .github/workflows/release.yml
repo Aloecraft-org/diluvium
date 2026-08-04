@@ -1,155 +1,260 @@
-name: Build and Release
+name: Release
+
+# Builds and (optionally) publishes a release for one specific commit.
+#
+# Two ways in:
+#
+#   1. Push a tag matching v*  -- builds that tag and publishes it.
+#
+#   2. Actions -> Release -> Run workflow. Pick the commit, the tag name, and
+#      whether to publish. `publish` defaults to false, so a manual run is a
+#      full release rehearsal by default: it runs the tests, builds every
+#      platform, and leaves the artifacts on the run without touching the
+#      Releases page. Set publish=true when you actually want it out.
+#
+# The tag is created at the resolved commit, so you can cut a release from any
+# commit without checking it out or moving a branch first.
 
 on:
   push:
     tags:
-      - 'v*' # Trigger only on tags like v1.0, v2.3.4, etc.
-      
+      - 'v*'
+
   workflow_dispatch:
     inputs:
-      reason:
-        description: 'Reason for manual run'
-        required: true
-        default: 'Manual test run'
+      ref:
+        description: 'Commit SHA, branch or tag to release (blank = the branch selected above)'
+        type: string
+        required: false
+        default: ''
+      tag:
+        description: 'Tag name for the release, e.g. v5.4.7_rc5 (required when publishing)'
+        type: string
+        required: false
+        default: ''
+      publish:
+        description: 'Publish to the Releases page. Leave off for a build-only rehearsal.'
+        type: boolean
+        required: false
+        default: false
+      draft:
+        description: 'Create the release as a draft'
+        type: boolean
+        required: false
+        default: true
+      prerelease:
+        description: 'Mark as a pre-release'
+        type: boolean
+        required: false
+        default: true
+      run_tests:
+        description: 'Run the test suite before building'
+        type: boolean
+        required: false
+        default: true
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  # Job 1: Build Linux Static + WASM
-  build-linux-and-wasm:
+  # Fail fast on bad input rather than after a 40-minute cross-platform build.
+  preflight:
+    name: Preflight
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.check.outputs.tag }}
+      publish: ${{ steps.check.outputs.publish }}
+      draft: ${{ steps.check.outputs.draft }}
+      prerelease: ${{ steps.check.outputs.prerelease }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Podman
-        run: |
-          sudo apt-get update
-          sudo apt-get -y install podman
-
-      - name: Install QEMU (for ARM64 support)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Build WASM
-        run: make build_wasm
-
-      - name: Build Linux Static (x86_64)
-        run: make build_linux_static ARCHl=x86_64
-
-      - name: Build Linux Static (ARM64 / Raspberry Pi)
-        run: |
-          # Pass the --platform flag to podman to trigger QEMU emulation
-          # We define ARCHl=aarch64 so the output file is named correctly
-          make build_linux_static \
-            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm64 -v $(pwd)/.data:/data -w /data alpine:latest" \
-            ARCHl=aarch64
-
-      - name: Build Linux Static (ARM32 / Pi Zero)
-        run: |
-          # --platform linux/arm/v7 targets 32-bit ARM
-          # We manually set ARCHl=armv7l so the file is named 'diluvium_linux_static_armv7l'
-          make build_linux_static \
-            PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm/v7 -v $(pwd)/.data:/data -w /data alpine:latest" \
-            ARCHl=armv7l
-
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          name: linux-wasm-artifacts
-          path: dist/*
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
 
-  # Job 2: Build macOS (Native)
-  build-macos:
-    strategy:
-        matrix:
-          os: [macos-latest, macos-15-intel]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Dependencies
-        run: brew install lua readline
-
-      - name: Build macOS Native
+      - id: check
+        env:
+          EVENT: ${{ github.event_name }}
+          IN_TAG: ${{ inputs.tag }}
+          IN_PUBLISH: ${{ inputs.publish }}
+          IN_DRAFT: ${{ inputs.draft }}
+          IN_PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          # Help clang find readline if it's in a non-standard brew location
-          export CPATH="$(brew --prefix readline)/include:$CPATH"
-          export LIBRARY_PATH="$(brew --prefix readline)/lib:$LIBRARY_PATH"
-          make build_platform
+          set -eu
+          VERSION=$(tr -d '[:space:]' < VERSION)
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-artifacts-${{ matrix.os }}
-          path: dist/*
+          if [ "$EVENT" = push ]; then
+            # The tag already exists -- that is what triggered this run.
+            TAG="${GITHUB_REF#refs/tags/}"
+            PUBLISH=true
+            DRAFT=false
+            case "$VERSION" in *rc*|*alpha*|*beta*) PRERELEASE=true ;; *) PRERELEASE=false ;; esac
+          else
+            TAG="$IN_TAG"
+            PUBLISH="${IN_PUBLISH:-false}"
+            DRAFT="${IN_DRAFT:-true}"
+            PRERELEASE="${IN_PRERELEASE:-true}"
 
-  # Job 3: Build Windows (via MSYS2)
-  build-windows:
-    runs-on: windows-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+            if [ "$PUBLISH" = true ] && [ -z "$TAG" ]; then
+              echo "::error::publish=true requires a tag name."
+              exit 1
+            fi
 
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            git
-            make
-            mingw-w64-x86_64-gcc
+            if [ -n "$TAG" ] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+              echo "::error::tag '$TAG' already exists. Pick a new tag, or delete the old one first."
+              exit 1
+            fi
+          fi
 
-      - name: Build Windows
-        shell: msys2 {0}
-        run: |
-          # We manually set the variables to control the ugly default filename
-          # Default MSYS uname is long like "mingw64_nt-10.0..."
-          make build_platform UNAME_Sl=windows ARCHl=x86_64
-          
-          # Optional: Verify it built and rename if needed
-          ls -l dist/
+          # Advisory only: the tag and the VERSION file drifting apart is
+          # usually a mistake, but not always (hotfix tags, re-cuts).
+          if [ -n "$TAG" ] && [ "$TAG" != "v$VERSION" ]; then
+            echo "::warning::tag '$TAG' does not match the VERSION file ('v$VERSION')."
+          fi
 
-      - name: Upload Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-artifacts
-          path: dist/*          
+          {
+            echo "tag=$TAG"
+            echo "publish=$PUBLISH"
+            echo "draft=$DRAFT"
+            echo "prerelease=$PRERELEASE"
+          } >> "$GITHUB_OUTPUT"
 
-  # Job 4: Create Release
-  release:
-    needs: [build-linux-and-wasm, build-macos, build-windows]
+          {
+            echo "### Release preflight"
+            echo ""
+            echo "| | |"
+            echo "| :--- | :--- |"
+            echo "| VERSION file | \`$VERSION\` |"
+            echo "| Tag | \`${TAG:-(none)}\` |"
+            echo "| Publish | \`$PUBLISH\` |"
+            echo "| Draft / pre-release | \`$DRAFT\` / \`$PRERELEASE\` |"
+            echo "| Commit | \`$(git rev-parse HEAD)\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  test:
+    name: Tests
+    needs: preflight
+    # Tag pushes always test; manual runs test unless explicitly told not to.
+    if: github.event_name == 'push' || inputs.run_tests
+    uses: ./.github/workflows/test.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+
+  build:
+    name: Build
+    needs: [preflight, test]
+    # `always()` lets the build proceed when the test job was skipped by the
+    # run_tests=false toggle, while still stopping on an actual test failure.
+    if: always() && needs.preflight.result == 'success' && needs.test.result != 'failure' && needs.test.result != 'cancelled'
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ inputs.ref || github.sha }}
+
+  publish:
+    name: Publish release
+    needs: [preflight, build]
+    if: needs.preflight.outputs.publish == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/checkout@v4
         with:
-          pattern: "*-artifacts"
-          merge-multiple: true
+          ref: ${{ needs.build.outputs.sha }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.bundle_artifact }}
           path: release_dist
 
-      - name: Generate Release Notes
+      - name: Generate release notes
+        env:
+          TAG: ${{ needs.preflight.outputs.tag }}
+          VERSION: ${{ needs.build.outputs.version }}
+          SHA: ${{ needs.build.outputs.sha }}
         run: |
-          # Create a temporary file with the table
-          echo "## 📥 Download Guide" > release_notes.md
-          echo "" >> release_notes.md
-          echo "| Platform | File to Download | Notes |" >> release_notes.md
-          echo "| :--- | :--- | :--- |" >> release_notes.md
-          echo "| **Linux (Standard)** | \`diluvium_linux_static_x86_64\` | Works on Ubuntu, Fedora, CentOS, Arch |" >> release_notes.md
-          echo "| **Raspberry Pi 3/4/5** | \`diluvium_linux_static_aarch64\` | 64-bit OS only |" >> release_notes.md
-          echo "| **macOS (M1/M2/M3)** | \`diluvium_darwin_arm64\` | Apple Silicon |" >> release_notes.md
-          echo "| **Windows** | \`diluvium_windows_x86_64.exe\` | Standard 64-bit Windows |" >> release_notes.md
-          echo "" >> release_notes.md
-          echo "---" >> release_notes.md
-          echo "" >> release_notes.md
+          set -eu
+          have() { [ -f "release_dist/$1" ]; }
+          row() { have "$1" && printf '| %s | `%s` | %s |\n' "$2" "$1" "$3" >> release_notes.md || true; }
 
-      - name: Create Release
-        uses: softprops/action-gh-release@v1
+          {
+            echo "Diluvium \`$VERSION\` — a fork of Lua 5.4.7 with string"
+            echo "interpolation, null coalescing, obfuscated functions and a"
+            echo "bytecode analysis report."
+            echo ""
+            echo "Built from commit [\`$(echo "$SHA" | cut -c1-12)\`](${{ github.server_url }}/${{ github.repository }}/commit/$SHA)."
+            echo ""
+            echo "## Download guide"
+            echo ""
+            echo "| Platform | File | Notes |"
+            echo "| :--- | :--- | :--- |"
+          } > release_notes.md
+
+          row diluvium_linux_static_x86_64     "**Linux (standard)**"    "Static; works on Ubuntu, Fedora, CentOS, Arch"
+          row diluvium_linux_static_aarch64    "**Raspberry Pi 3/4/5**"  "64-bit OS only"
+          row diluvium_linux_static_armv7l     "**Raspberry Pi Zero**"   "32-bit ARM"
+          row diluvium_darwin_arm64            "**macOS (Apple silicon)**" "M1/M2/M3/M4"
+          row diluvium_darwin_x86_64           "**macOS (Intel)**"       ""
+          row diluvium_windows_x86_64.exe      "**Windows**"             "64-bit"
+          row diluvium_wasi.wasm               "**WASI**"                "Run with wasmtime or another WASI runtime"
+          row libdiluvium_wasm_unknown.a       "**Browser**"             "wasm32-unknown-unknown static library"
+
+          {
+            echo ""
+            echo "Each platform also ships a \`diluvium_compiler_*\` binary (\`luac\`"
+            echo "with the \`-r\` analysis report flag) and a \`libdiluvium_*.a\` static"
+            echo "library for embedding."
+            echo ""
+            echo "## Verifying a download"
+            echo ""
+            echo '```'
+            echo "sha256sum -c SHA256SUMS.txt --ignore-missing"
+            echo '```'
+            echo ""
+            echo "\`BUILDINFO.txt\` records the exact commit, build time and workflow run."
+            echo ""
+            echo "---"
+            echo ""
+          } >> release_notes.md
+
+          cat release_notes.md
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.preflight.outputs.tag }}
+          target_commitish: ${{ needs.build.outputs.sha }}
+          name: Diluvium ${{ needs.build.outputs.version }}
           files: release_dist/*
           body_path: release_notes.md
           generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          draft: ${{ needs.preflight.outputs.draft == 'true' }}
+          prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}
+          fail_on_unmatched_files: true
+
+  # Make the outcome of a rehearsal run obvious from the run page.
+  summary:
+    name: Summary
+    needs: [preflight, build, publish]
+    if: always() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          {
+            echo "### Release run complete"
+            echo ""
+            echo "- Version: \`${{ needs.build.outputs.version }}\`"
+            echo "- Commit: \`${{ needs.build.outputs.sha }}\`"
+            echo "- Artifact: \`${{ needs.build.outputs.bundle_artifact }}\`"
+            if [ "${{ needs.preflight.outputs.publish }}" = "true" ]; then
+              echo "- Published to the Releases page as \`${{ needs.preflight.outputs.tag }}\`."
+            else
+              echo "- **Not published.** This was a build-only rehearsal; download"
+              echo "  the artifact above, or re-run with \`publish\` enabled."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
