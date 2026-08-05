@@ -1,5 +1,8 @@
 BUILD_MNT:=-v $(CURDIR)/.data:/data
-WASI_IMG:=ghcr.io/webassembly/wasi-sdk
+# Pinned: an unpinned :latest tracks wasi-sdk's main branch and broke the
+# 2026-08 builds when the sysroot moved from lib/wasm32-wasi to
+# lib/wasm32-wasip1. Bump deliberately, not by surprise.
+WASI_IMG:=ghcr.io/webassembly/wasi-sdk:wasi-sdk-23
 WASI_CLANG:=cd /data && /opt/wasi-sdk/bin/clang -O3
 WASM_LLVM_OPT:=-mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false
 BUILD_WASM_OPT:=-lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export-all, -Wl,--export=malloc -Wl,--export=free
@@ -8,8 +11,10 @@ PODMAN_BUILD_WASM:=$(PODMAN_RUN_WASM) bash -c
 PODMAN_RUN_ALPINE := podman run --rm $(BUILD_MNT) -w /data alpine:latest
 WASI_AR:=/opt/wasi-sdk/bin/llvm-ar
 WASI_SYSROOT:=/opt/wasi-sdk/share/wasi-sysroot
-WASI_SYSROOT_LIBS:=/opt/wasi-sdk/share/wasi-sysroot/lib/wasm32-wasi
-WASI_INCLUDES:=-I$(WASI_SYSROOT)/include -I$(WASI_SYSROOT)/include/wasm32-wasi
+# wasi-sdk <=22 lays the sysroot out as wasm32-wasi, newer as wasm32-wasip1.
+# Lib paths are resolved inside the container (see _wasi_static_lib); for
+# includes, passing a -I that does not exist is harmless, so list both.
+WASI_INCLUDES:=-I$(WASI_SYSROOT)/include -I$(WASI_SYSROOT)/include/wasm32-wasi -I$(WASI_SYSROOT)/include/wasm32-wasip1
 
 UNAME_S := $(shell uname -s)
 UNAME_Sl := $(shell uname -s | tr 'A-Z' 'a-z')
@@ -100,10 +105,13 @@ _wasi_static_lib: _build_step0 _wasm_build_step1 _wasm_build_step2
 	@cp .data/libdiluvium_wasi.a dist/libdiluvium_wasi.a
 
 	@echo '=== Pulling WASI/C libs from container ==='
-	$(PODMAN_RUN_WASM) sh -c "cp $(WASI_SYSROOT_LIBS)/libwasi-emulated-signal.a /data/ && \
-								cp $(WASI_SYSROOT_LIBS)/libwasi-emulated-process-clocks.a /data/ && \
-								cp $(WASI_SYSROOT_LIBS)/libsetjmp.a /data/ && \
-								cp $(WASI_SYSROOT_LIBS)/libc.a /data/libwasic.a"
+	$(PODMAN_RUN_WASM) sh -c 'libs="$(WASI_SYSROOT)/lib/wasm32-wasip1"; \
+		[ -d "$$libs" ] || libs="$(WASI_SYSROOT)/lib/wasm32-wasi"; \
+		echo "using sysroot libs: $$libs"; \
+		cp "$$libs/libwasi-emulated-signal.a" /data/ && \
+		cp "$$libs/libwasi-emulated-process-clocks.a" /data/ && \
+		cp "$$libs/libsetjmp.a" /data/ && \
+		cp "$$libs/libc.a" /data/libwasic.a'
 	@cp .data/libwasi-emulated-signal.a dist/
 	@cp .data/libwasi-emulated-process-clocks.a dist/
 	@cp .data/libsetjmp.a dist/
