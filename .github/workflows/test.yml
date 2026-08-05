@@ -99,7 +99,7 @@ jobs:
             experimental: false
           - name: macos-arm64
             os: macos-latest
-            experimental: true
+            experimental: false
     steps:
       - uses: actions/checkout@v4
         with:
