@@ -2,7 +2,7 @@
 
 <div align="center">
 
-<img src="doc/icon.png" style="height:96px; width:96px;"/>
+<img src="doc/aloecraft_logo.png" style="height:96px; width:96px;"/>
 
 **Lua for Modern Development**
 
