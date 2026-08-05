@@ -25,7 +25,7 @@
 
 #define LUA_VERSION	"diluvium (lua) " LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
 #define LUA_RELEASE	LUA_VERSION "." LUA_VERSION_RELEASE
-#define LUA_COPYRIGHT	LUA_RELEASE " rc4  aloecraft.org (C) 2026\n(original copyright (c) 1994-2024 lua.org)"
+#define LUA_COPYRIGHT	LUA_RELEASE "  aloecraft.org (C) 2026\n(original copyright (c) 1994-2024 lua.org)"
 #define LUA_AUTHORS	"M. Godfrey, R. Ierusalimschy, L. H. de Figueiredo, W. Celes"
 
 

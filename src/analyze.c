@@ -6,7 +6,7 @@
 ** All fields are always present (no optional omissions), arrays are always
 ** arrays (never absent), and field names are snake_case throughout.
 **
-** Target: Lua 5.4.7_rc4 (Diluvium fork)
+** Target: Lua 5.4.x (Diluvium fork)
 */
 
 #define _POSIX_C_SOURCE 200809L
@@ -25,10 +25,11 @@
 #include "lopcodes.h"
 
 /* -------------------------------------------------------------------------
-** Version tag burned in at compile time.
-** Change this if the fork version string changes.
+** Version tag reported in the analysis JSON, derived from the core version
+** macros so it tracks lua.h instead of rotting separately.
 ** ------------------------------------------------------------------------- */
-#define DILUVIUM_LUA_VERSION "5.4.7_rc4"
+#define DILUVIUM_LUA_VERSION \
+	LUA_VERSION_MAJOR "." LUA_VERSION_MINOR "." LUA_VERSION_RELEASE
 
 
 /* -------------------------------------------------------------------------
