@@ -145,8 +145,11 @@ jobs:
       - name: Build native
         run: |
           # Help clang find readline in its non-standard brew location.
-          export CPATH="$(brew --prefix readline)/include:$CPATH"
-          export LIBRARY_PATH="$(brew --prefix readline)/lib:$LIBRARY_PATH"
+          # ${VAR:+:$VAR} avoids a trailing colon when the variable is unset:
+          # an empty entry in CPATH means "the current directory", which made
+          # in-tree headers shadow SDK headers during `cd .data && gcc`.
+          export CPATH="$(brew --prefix readline)/include${CPATH:+:$CPATH}"
+          export LIBRARY_PATH="$(brew --prefix readline)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}"
           make build_platform
 
       - name: Smoke test

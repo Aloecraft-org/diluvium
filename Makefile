@@ -1,8 +1,10 @@
 BUILD_MNT:=-v $(CURDIR)/.data:/data
-# Pinned: an unpinned :latest tracks wasi-sdk's main branch and broke the
-# 2026-08 builds when the sysroot moved from lib/wasm32-wasi to
-# lib/wasm32-wasip1. Bump deliberately, not by surprise.
-WASI_IMG:=ghcr.io/webassembly/wasi-sdk:wasi-sdk-23
+# Pinned by digest: an unpinned :latest tracks wasi-sdk's main branch and
+# broke the 2026-08 builds when the sysroot moved from lib/wasm32-wasi to
+# lib/wasm32-wasip1. The numbered tags (<= wasi-sdk-23) are too old for the
+# -mllvm -wasm-use-legacy-eh flag below, so this pins the :latest that the
+# 2026-08 builds compile cleanly against. Bump deliberately, not by surprise.
+WASI_IMG:=ghcr.io/webassembly/wasi-sdk@sha256:46e14a8323321ca68b92ead633fc3fb004e5fa4205dd4b77b8aa1197bfe1f07b
 WASI_CLANG:=cd /data && /opt/wasi-sdk/bin/clang -O3
 WASM_LLVM_OPT:=-mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false
 BUILD_WASM_OPT:=-lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export-all, -Wl,--export=malloc -Wl,--export=free
@@ -122,6 +124,7 @@ _wasm_unknown_build: _build_step0
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) --target=wasm32-unknown-unknown \
 		-c onelua.c -o onelua_wasm_unknown.o -O3 -fPIC \
 		-I/data \
+		-I/data/wasm-shim \
 		$(WASI_INCLUDES) \
 		-DDILUVIUM_AS_LIBRARY \
 		-DLUA_USE_C89 \

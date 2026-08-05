@@ -1336,6 +1336,27 @@ void print_report_json(InterfaceReport *report, FILE *out) {
 }
 
 char *report_to_json_string(InterfaceReport *report) {
+#if defined(_WIN32)
+  /* MinGW/MSVC have no open_memstream; render through a temp file. */
+  FILE *stream = tmpfile();
+  char *buf;
+  long size;
+  if (!stream) return NULL;
+  print_report_json(report, stream);
+  size = ftell(stream);
+  if (size < 0) { fclose(stream); return NULL; }
+  rewind(stream);
+  buf = (char *)malloc((size_t)size + 1);
+  if (buf == NULL) { fclose(stream); return NULL; }
+  if (fread(buf, 1, (size_t)size, stream) != (size_t)size) {
+    free(buf);
+    fclose(stream);
+    return NULL;
+  }
+  buf[size] = '\0';
+  fclose(stream);
+  return buf; /* caller must free() */
+#else
   char  *buf    = NULL;
   size_t size   = 0;
   FILE  *stream = open_memstream(&buf, &size);
@@ -1343,6 +1364,7 @@ char *report_to_json_string(InterfaceReport *report) {
   print_report_json(report, stream);
   fclose(stream);
   return buf; /* caller must free() */
+#endif
 }
 
 
