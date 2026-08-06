@@ -406,6 +406,63 @@ static int readdecesc (LexState *ls) {
 }
 
 
+/*
+** Read one escape sequence and save the character it denotes.  On entry
+** the '\\' is already in the buffer (kept for error messages) and
+** 'ls->current' is the character after it.
+**
+** Diluvium: shared by 'read_string' and 'read_fstring', so that turning a
+** plain string literal into an f-string leaves every escape meaning
+** exactly what it meant before.  'infs' additionally accepts '\{' and
+** '\}', which are how a literal brace is written inside an f-string;
+** they stay invalid in a plain string, where stock Lua rejects them.
+*/
+static void read_escape (LexState *ls, int infs) {
+  int c;  /* final character to be saved */
+  switch (ls->current) {
+    case 'a': c = '\a'; goto read_save;
+    case 'b': c = '\b'; goto read_save;
+    case 'f': c = '\f'; goto read_save;
+    case 'n': c = '\n'; goto read_save;
+    case 'r': c = '\r'; goto read_save;
+    case 't': c = '\t'; goto read_save;
+    case 'v': c = '\v'; goto read_save;
+    case 'x': c = readhexaesc(ls); goto read_save;
+    case 'u': utf8esc(ls);  goto no_save;
+    case '\n': case '\r':
+      inclinenumber(ls); c = '\n'; goto only_save;
+    case '\\': case '\"': case '\'':
+      c = ls->current; goto read_save;
+    case '{': case '}':  /* Diluvium: literal brace, f-strings only */
+      esccheck(ls, infs, "invalid escape sequence");
+      c = ls->current; goto read_save;
+    case EOZ: goto no_save;  /* will raise an error next loop */
+    case 'z': {  /* zap following span of spaces */
+      luaZ_buffremove(ls->buff, 1);  /* remove '\\' */
+      next(ls);  /* skip the 'z' */
+      while (lisspace(ls->current)) {
+        if (currIsNewline(ls)) inclinenumber(ls);
+        else next(ls);
+      }
+      goto no_save;
+    }
+    default: {
+      esccheck(ls, lisdigit(ls->current), "invalid escape sequence");
+      c = readdecesc(ls);  /* digital escape '\ddd' */
+      goto only_save;
+    }
+  }
+ read_save:
+   next(ls);
+   /* go through */
+ only_save:
+   luaZ_buffremove(ls->buff, 1);  /* remove '\\' */
+   save(ls, c);
+   /* go through */
+ no_save: return;
+}
+
+
 static void read_string (LexState *ls, int del, SemInfo *seminfo) {
   save_and_next(ls);  /* keep delimiter (for error messages) */
   while (ls->current != del) {
@@ -418,46 +475,9 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
         lexerror(ls, "unfinished string", TK_STRING);
         break;  /* to avoid warnings */
       case '\\': {  /* escape sequences */
-        int c;  /* final character to be saved */
         save_and_next(ls);  /* keep '\\' for error messages */
-        switch (ls->current) {
-          case 'a': c = '\a'; goto read_save;
-          case 'b': c = '\b'; goto read_save;
-          case 'f': c = '\f'; goto read_save;
-          case 'n': c = '\n'; goto read_save;
-          case 'r': c = '\r'; goto read_save;
-          case 't': c = '\t'; goto read_save;
-          case 'v': c = '\v'; goto read_save;
-          case 'x': c = readhexaesc(ls); goto read_save;
-          case 'u': utf8esc(ls);  goto no_save;
-          case '\n': case '\r':
-            inclinenumber(ls); c = '\n'; goto only_save;
-          case '\\': case '\"': case '\'':
-            c = ls->current; goto read_save;
-          case EOZ: goto no_save;  /* will raise an error next loop */
-          case 'z': {  /* zap following span of spaces */
-            luaZ_buffremove(ls->buff, 1);  /* remove '\\' */
-            next(ls);  /* skip the 'z' */
-            while (lisspace(ls->current)) {
-              if (currIsNewline(ls)) inclinenumber(ls);
-              else next(ls);
-            }
-            goto no_save;
-          }
-          default: {
-            esccheck(ls, lisdigit(ls->current), "invalid escape sequence");
-            c = readdecesc(ls);  /* digital escape '\ddd' */
-            goto only_save;
-          }
-        }
-       read_save:
-         next(ls);
-         /* go through */
-       only_save:
-         luaZ_buffremove(ls->buff, 1);  /* remove '\\' */
-         save(ls, c);
-         /* go through */
-       no_save: break;
+        read_escape(ls, 0);
+        break;
       }
       default:
         save_and_next(ls);
@@ -468,63 +488,43 @@ static void read_string (LexState *ls, int del, SemInfo *seminfo) {
                                    luaZ_bufflen(ls->buff) - 2);
 }
 
+/*
+** Diluvium: read one piece of an f-string ($"..."), stopping either at an
+** interpolation opener '{' -- token TK_FPART -- or at the closing
+** delimiter -- token TK_STRING.  Either way 'seminfo.ts' holds the
+** literal text that preceded the stop, escapes already resolved.  The
+** parser drives this, calling 'luaX_read_fstring' again after each
+** interpolated expression to pick up the piece that follows it.
+*/
 static void read_fstring (LexState *ls, int del) {
   while (ls->current != del) {
-    
     switch (ls->current) {
       case EOZ:
-        luaX_lexerror(ls, "unfinished string", TK_EOS);
-        break;
+        lexerror(ls, "unfinished string", TK_EOS);
+        break;  /* to avoid warnings */
       case '\n':
       case '\r':
-        luaX_lexerror(ls, "unfinished string", TK_STRING);
+        lexerror(ls, "unfinished string", TK_STRING);
+        break;  /* to avoid warnings */
+      case '\\': {  /* escape sequences */
+        save_and_next(ls);  /* keep '\\' for error messages */
+        read_escape(ls, 1);
         break;
-      case '\\': {
-        // Handle escape sequences
-        next(ls);
-        int c = ls->current;
-        
-        switch (c) {
-          case 'a': c = '\a'; break;
-          case 'b': c = '\b'; break;
-          case 'f': c = '\f'; break;
-          case 'n': c = '\n'; break;
-          case 'r': c = '\r'; break;
-          case 't': c = '\t'; break;
-          case 'v': c = '\v'; break;
-          
-          // Handle escaped delimiters and backslashes
-          case '\\': c = '\\'; break;
-          case '"':  c = '"';  break;
-          case '\'': c = '\''; break;
-          
-          /* Note: Full Lua supports \123 (decimal), \x (hex), \u (unicode), \z (skip) */
-          /* For now, we default to just saving the char if it's not special (e.g. \{ ) */
-          default: break; 
-        }
-        
-        save(ls, c); /* Save the converted byte (e.g., 10 for newline) */
-        next(ls);    /* Consume the 'n' (or whatever followed slash) */
-        continue;
       }
-      case '{': {
-        /* INTERPOLATION START */
-        next(ls); /* Consumes '{' */
+      case '{': {  /* start of an interpolated expression */
+        next(ls);  /* skip '{' */
         ls->t.token = TK_FPART;
-        goto end_read;
+        goto done;
       }
       default:
         save_and_next(ls);
     }
   }
-  
-  /* STRING END */
-  next(ls); /* Consumes the closing quote */
+  next(ls);  /* skip delimiter */
   ls->t.token = TK_STRING;
-
-end_read:
+ done:
   ls->t.seminfo.ts = luaX_newstring(ls, luaZ_buffer(ls->buff),
-                                   luaZ_bufflen(ls->buff));
+                                        luaZ_bufflen(ls->buff));
 }
 
 /* Expose this so the Parser can call it */

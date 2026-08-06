@@ -77,7 +77,9 @@ typedef struct LexState {
   TString *envn;  /* environment variable name */
   TString *brkn;  /* "break" name (used as a label) */
   TString *glbn;  /* "global" name (when not a reserved word) */
-  int fstring_del;  /* Diluvium: delimiter of the f-string being lexed */
+  int fstring_del;  /* Diluvium: delimiter of the f-string just opened
+                       (handed to the parser, which then keeps its own
+                       copy, so nested f-strings do not clobber it) */
   int encrypted_flag;  /* Diluvium: next function is a secure (~) function */
 } LexState;
 

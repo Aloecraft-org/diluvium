@@ -1264,6 +1264,73 @@ static void suffixedexp (LexState *ls, expdesc *v) {
 }
 
 
+/*
+** Diluvium: interpolated string, $"text{expr}text".
+**
+** The lexer hands over one piece at a time: TK_FPART for a literal that
+** ended at a '{', TK_STRING for the one that ended at the delimiter.
+** Each piece -- literal or interpolated -- is laid down in its own
+** register and a single OP_CONCAT folds the whole range, which is what
+** 'a .. b .. c' compiles to.  Empty literal pieces (adjacent
+** placeholders, or a string that starts or ends with one) are skipped
+** rather than concatenated as "".
+**
+** Interpolated expressions are wrapped in a call to _ENV.tostring, so
+** that nil, booleans and tables interpolate instead of raising a concat
+** error, and __tostring is honoured.  The lookup goes through _ENV and
+** not the enclosing scope on purpose: a local named 'tostring' must not
+** silently change what an f-string means, while a sandbox that installs
+** its own _ENV should.
+*/
+static void fstring (LexState *ls, expdesc *v) {
+  FuncState *fs = ls->fs;
+  int del = ls->fstring_del;  /* our delimiter; a nested f-string inside an
+                                 interpolation overwrites the shared field */
+  int base = fs->freereg;  /* first register of the concatenation range */
+  int n = 0;  /* pieces laid down so far */
+  for (;;) {
+    TString *lit = ls->t.seminfo.ts;
+    int last = (ls->t.token == TK_STRING);  /* piece ended the string? */
+    if (tsslen(lit) > 0) {  /* skip empty literal pieces */
+      expdesc piece;
+      codestring(&piece, lit);
+      luaK_exp2nextreg(fs, &piece);
+      n++;
+    }
+    if (last) break;
+    else {  /* an interpolated expression follows */
+      expdesc call, arg;
+      int line = ls->linenumber;
+      int freg;  /* holds 'tostring', then the result of calling it */
+      lua_assert(ls->t.token == TK_FPART);
+      buildglobal(ls, luaX_newstring(ls, "tostring", 8), &call);
+      luaK_exp2nextreg(fs, &call);
+      freg = call.u.info;
+      luaX_next(ls);  /* skip the piece; on to the expression itself */
+      expr(ls, &arg);
+      luaK_exp2nextreg(fs, &arg);  /* argument sits right after the function */
+      if (ls->t.token != '}')
+        luaX_syntaxerror(ls, "'}' expected in interpolated string");
+      init_exp(&call, VCALL, luaK_codeABC(fs, OP_CALL, freg, 2, 2));
+      luaK_fixline(fs, line);
+      fs->freereg = cast_byte(freg + 1);  /* the call leaves one result */
+      luaK_exp2nextreg(fs, &call);
+      n++;
+      /* the '}' is consumed by resuming the string, not by 'luaX_next' */
+      lua_assert(ls->lookahead.token == TK_EOS);
+      luaX_read_fstring(ls, del);
+    }
+  }
+  lua_assert(n > 0);  /* a TK_FPART always brings an interpolation with it */
+  if (n > 1) {  /* a single piece is already the whole value */
+    luaK_codeABC(fs, OP_CONCAT, base, n, 0);
+    fs->freereg = cast_byte(base + 1);
+  }
+  init_exp(v, VNONRELOC, base);
+  luaX_next(ls);  /* skip the final piece */
+}
+
+
 static void simpleexp (LexState *ls, expdesc *v) {
   /* simpleexp -> FLT | INT | STRING | NIL | TRUE | FALSE | ... |
                   constructor | FUNCTION body | suffixedexp */
@@ -1310,26 +1377,9 @@ static void simpleexp (LexState *ls, expdesc *v) {
       body(ls, v, 0, ls->linenumber);
       return;
     }
-    case TK_FPART: {
-        init_exp(v, VK, 0);
-        v->u.info = luaK_stringK(ls->fs, ls->t.seminfo.ts);
-        while (ls->t.token == TK_FPART) {
-            luaK_exp2nextreg(ls->fs, v);
-            expdesc e2;
-            luaX_next(ls);
-            expr(ls, &e2);
-            luaK_exp2nextreg(ls->fs, &e2);
-            luaK_posfix(ls->fs, OPR_CONCAT, v, &e2, ls->linenumber);
-            if (ls->t.token != '}') {
-                luaX_syntaxerror(ls, "expected '}' in f-string");
-            }
-            luaX_read_fstring(ls, ls->fstring_del);
-            init_exp(&e2, VK, 0);
-            e2.u.info = luaK_stringK(ls->fs, ls->t.seminfo.ts);
-            luaK_exp2nextreg(ls->fs, &e2);
-            luaK_posfix(ls->fs, OPR_CONCAT, v, &e2, ls->linenumber);
-        }   
-        break;
+    case TK_FPART: {  /* Diluvium: interpolated string */
+      fstring(ls, v);
+      return;  /* 'fstring' consumed the whole literal */
     }
     default: {
       suffixedexp(ls, v);

@@ -592,11 +592,6 @@ static int stringK (FuncState *fs, TString *s) {
   return k2proto(fs, &o, &o);  /* use string itself as key */
 }
 
-/* Diluvium: exposed for the parser (f-string constant segments) */
-int luaK_stringK (FuncState *fs, TString *s) {
-  return stringK(fs, s);
-}
-
 
 /*
 ** Add an integer to list of constants and return its index.

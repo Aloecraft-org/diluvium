@@ -88,7 +88,7 @@ _portable_static_lib: _build_step0
 		gcc -O3 -c wasm_stubs.c -o wasm_stubs.o -fPIC && \
 		gcc -O3 -c analyze.c -o analyze.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY  && \
 		gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY  && \
-		ar rcs /data/libdiluvium_musl_$(ARCHl).a onelua.o wasm_stubs.o analyze.o"
+		ar rcs /data/libdiluvium_musl_$(ARCHl).a onelua.o wasm_stubs.o diluvium_api.o analyze.o"
 	@cp .data/libdiluvium_musl_$(ARCHl).a dist/libdiluvium_musl_$(ARCHl).a
 
 _wasm_build_step0: _build_step0
