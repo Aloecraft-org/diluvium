@@ -2222,14 +2222,85 @@ static void funcstat (LexState *ls, int line) {
 }
 
 
+/*
+** Diluvium: the binary operator behind a compound assignment, or
+** OPR_NOBINOPR if this token starts none.
+**
+** A compound assignment is spelled as the ordinary binary token followed
+** by '=', and is recognised here rather than lexed as a token of its
+** own: 'x += 1' is '+' then '=', 'x ..= s' is '..' then '='.  That keeps
+** the operator set free and adds nothing to the lexer, at the cost of
+** also accepting a space between the two ('x + = 1'), which is not valid
+** Lua and which Lua's whitespace-insensitive lexing makes hard to reject
+** without a token per operator.
+**
+** Bitwise xor has no compound form: '~=' is already 'not equal', and
+** taking it would break every program that tests for inequality.
+*/
+static BinOpr getcompoundopr (int op) {
+  switch (op) {
+    case '+': return OPR_ADD;
+    case '-': return OPR_SUB;
+    case '*': return OPR_MUL;
+    case '/': return OPR_DIV;
+    case '%': return OPR_MOD;
+    case '^': return OPR_POW;
+    case '|': return OPR_BOR;
+    case '&': return OPR_BAND;
+    case TK_IDIV: return OPR_IDIV;
+    case TK_CONCAT: return OPR_CONCAT;
+    case TK_SHL: return OPR_SHL;
+    case TK_SHR: return OPR_SHR;
+    case TK_2Q: return OPR_2Q;
+    default: return OPR_NOBINOPR;
+  }
+}
+
+
+/*
+** Diluvium: compound assignment, 'v op= e'.
+**
+** The target is parsed once and used for both the read and the write, so
+** the prefix is evaluated exactly once: 't[f()] += 1' calls f once, and
+** the table and key it produced are reused by the store.
+**
+** Reading the current value discharges the target, which frees the
+** registers holding that table and key; freereg is restored straight
+** afterwards, because the store still needs them and the right-hand side
+** would otherwise be free to allocate over the top.
+*/
+static void compoundassign (LexState *ls, expdesc *v, BinOpr opr, int line) {
+  FuncState *fs = ls->fs;
+  expdesc val = *v;  /* a copy, to read the current value through */
+  expdesc rhs;
+  int oldfree = fs->freereg;
+  check_condition(ls, vkisvar(v->k), "syntax error");
+  check_readonly(ls, v);
+  luaX_next(ls);  /* skip the operator */
+  checknext(ls, '=');
+  luaK_dischargevars(fs, &val);  /* may free the target's registers... */
+  fs->freereg = cast_byte(oldfree);  /* ...which the store still needs */
+  luaK_infix(fs, opr, &val);
+  expr(ls, &rhs);
+  luaK_posfix(fs, opr, &val, &rhs, line);
+  luaK_storevar(fs, v, &val);
+}
+
+
 static void exprstat (LexState *ls) {
-  /* stat -> func | assignment */
+  /* stat -> func | assignment | compound assignment */
   FuncState *fs = ls->fs;
   struct LHS_assign v;
+  int line = ls->linenumber;
+  BinOpr opr;
   suffixedexp(ls, &v.v);
   if (ls->t.token == '=' || ls->t.token == ',') { /* stat -> assignment ? */
     v.prev = NULL;
     restassign(ls, &v, 1);
+  }
+  else if ((opr = getcompoundopr(ls->t.token)) != OPR_NOBINOPR &&
+           luaX_lookahead(ls) == '=') {  /* stat -> compound assignment? */
+    compoundassign(ls, &v.v, opr, line);
   }
   else {  /* stat -> func */
     Instruction *inst;

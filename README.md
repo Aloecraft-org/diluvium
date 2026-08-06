@@ -80,10 +80,27 @@ that a subject cannot start with `(`, a string or a table constructor --
 `switch x do` (the usual Lua shape, as in `if x then` and `while x do`),
 or bind the subject to a local first.
 
+**Compound Assignment**
+
+``` lua
+local total = 0
+total += 10        -- and -=  *=  /=  //=  %=  ^=
+total *= 2
+local name = "dil"
+name ..= "uvium"   -- concatenation
+local flags = 0
+flags |= 0x04      -- and &=  <<=  >>=
+local port = nil
+port ??= 8080      -- assign only when nil
+```
+
+The target's prefix is evaluated once, so `t[next_key()] += 1` calls
+`next_key` a single time. There is no `~=` form, because `~=` already
+means "not equal".
+
 **And coming soon:** 
 - match (switch as an expression)
 - defer/with
-- compound assignment
 - safe navigation
 - and more
 

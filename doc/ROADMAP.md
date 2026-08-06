@@ -11,7 +11,7 @@ work it describes.
 ## Verified state
 
 Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-33 passed / 0 failed / 6 skipped.
+34 passed / 0 failed / 6 skipped.
 
 ### Language
 
@@ -20,7 +20,7 @@ Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
 | String interpolation `$"...{expr}..."` | done |
 | Null coalescing `??` | done, short-circuits, no dedicated opcode |
 | Secure (obfuscated) functions `~function` | done |
-| Compound assignment `+=` etc. | not started |
+| Compound assignment `+=` etc. | done (no `~=`; see below) |
 | Safe navigation `?.` / `?[` | not started |
 | `switch` statement | done |
 | `match` (switch as an expression) | not started |
@@ -59,9 +59,7 @@ or an embedder file does not belong in `src/`.
 
 Ordered. Each item is independently shippable.
 
-1. **Compound assignment.** Contained `exprstat` / `restassign` change,
-   desugared with a single evaluation of the left prefix.
-2. **`defer`.** Desugars to a to-be-closed local with a `__close` wrapper,
+1. **`defer`.** Desugars to a to-be-closed local with a `__close` wrapper,
    so unwind ordering is inherited rather than implemented.
 3. **Safe navigation `?.` / `?[`.** Cheap now that `??` compiles as a
    branch; same test-nil-and-skip shape.
@@ -87,6 +85,18 @@ Any future contextual keyword needs the same treatment, plus a `luaC_fix`
 in `luaX_init`: recognition is pointer equality against an interned
 string, so an unfixed name can be collected and re-created, and the
 comparison then fails depending on when the collector ran.
+
+### Compound assignment
+
+Recognised in `exprstat` from the ordinary binary token plus `=`, rather
+than lexed as a token per operator, so the whole feature costs one file
+and no new tokens. The trade is that a space between the two is also
+accepted (`x + = 1`) — not valid Lua either way, and hard to reject
+without the tokens, since Lua's lexing is whitespace-insensitive
+throughout.
+
+There is no `~=` form: it is already "not equal", so bitwise xor has no
+compound spelling. `??=` exists and short-circuits.
 
 ## Analyzer
 
