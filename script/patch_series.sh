@@ -9,9 +9,9 @@
 # branched from -- which is permanently available in this repository's own
 # history, so no network access or vendored tarball is needed.
 #
-# The fork point predates the repo reorganization (files moved from the root
-# into src/, testes/ into test/), which is why plain `git diff` cannot see
-# these as modifications; this script maps the layouts.
+# The fork point is upstream lua-5.5.1 (root layout); the Diluvium tree lives
+# in src/, which is why plain `git diff` cannot see these as modifications --
+# this script maps the layouts.
 #
 # Usage:
 #   script/patch_series.sh generate [outfile]   write the unified patch series
@@ -30,9 +30,10 @@ set -eu
 REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$REPO_ROOT"
 
-# The last pure-upstream commit before Diluvium work began
-# ("'lua.h' back to redundancy in version definitions", lua-5.4.7 line).
-FORK_POINT=1ab3208a1fceb12fca8f24ba57d6e13c5bff15e3
+# Pristine upstream lua-5.5.1 (tag v5.5.1). The core patch series is the
+# delta between this and src/. Bump this (and re-run 'check') when rebasing
+# onto a newer upstream release.
+FORK_POINT=7579fc9d7ed90240487251dfb69168f8e64e9294
 
 # Core files that are allowed to differ from upstream, one per line:
 #   <file>  <reason>
@@ -44,12 +45,13 @@ lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_stringK export
 lcode.h     OPR_2Q enum entry, luaK_stringK export
 lobject.h   is_encrypted flag on Proto
 lfunc.c     is_encrypted initialization
-ldump.c     XOR scramble of code/constants for secure protos
-lundump.c   XOR unscramble of code/constants for secure protos
+ldump.c     XOR scramble of code/constant strings for secure protos
+lundump.c   XOR unscramble for secure protos; forced copy of fixed buffers
 lundump.h   LUAC_FORMAT 0x44 (Diluvium bytecode format byte)
 luaconf.h   fixed string hash seed (deterministic pairs order)
 lua.h       Diluvium version/branding strings
 lua.c       Diluvium branding in the REPL banner
+onelua.c    include analyze.c; rename ltests.c resetCI (amalgamation clash)
 '
 
 usage() { sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -95,7 +97,7 @@ case "$cmd" in
     : > "$out"
     {
       echo "# Diluvium core patch series"
-      echo "# upstream: lua-5.4.7 @ $FORK_POINT"
+      echo "# upstream: lua-5.5.1 @ $FORK_POINT"
       echo "# tree:     $(git rev-parse HEAD)$(git diff --quiet -- src/ 2>/dev/null || echo ' + uncommitted changes')"
       echo "#"
       echo "# Apply to a pristine upstream tree laid out as src/ with 'patch -p1'."

@@ -1,6 +1,6 @@
 /*
 ** analyze.c
-** Lua 5.4 bytecode analyzer for luac --report flag
+** Lua 5.5 bytecode analyzer for luac --report flag
 **
 ** JSON output is structured for direct deserialization into a protobuf message.
 ** All fields are always present (no optional omissions), arrays are always
@@ -504,7 +504,7 @@ static int find_reg_source(const Proto *f, int pc, int reg) {
       case OP_UNM:       case OP_BNOT:      case OP_NOT:
       case OP_LEN:       case OP_CONCAT:
       case OP_CALL:      case OP_TAILCALL:
-      case OP_VARARG:
+      case OP_VARARG:    case OP_GETVARG:  /* 5.5: writes R[A] */
         if (a == reg) return 0;
         break;
       default:
@@ -558,7 +558,7 @@ static int find_newtable_for_reg(const Proto *f, int pc, int reg) {
       case OP_UNM:       case OP_BNOT:      case OP_NOT:
       case OP_LEN:       case OP_CONCAT:
       case OP_CALL:      case OP_TAILCALL:
-      case OP_CLOSURE:   case OP_VARARG:
+      case OP_CLOSURE:   case OP_VARARG:   case OP_GETVARG:  /* 5.5 */
         if (a == reg) return -1;
         break;
       default:
@@ -756,7 +756,7 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
 
   /* --- Signature -------------------------------------------------------- */
   fi->param_count  = f->numparams;
-  fi->is_vararg    = f->is_vararg ? 1 : 0;
+  fi->is_vararg    = isvararg(f) ? 1 : 0;  /* 5.5: flag bits, not a field */
 
   if (f->numparams > 0) {
     fi->param_names = (const char **)malloc(f->numparams * sizeof(const char *));
@@ -953,7 +953,8 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
         break;
       }
 
-      case OP_VARARG: {
+      case OP_VARARG:
+      case OP_GETVARG: {  /* 5.5: indexing a vararg parameter also uses ... */
         fi->is_vararg_used = 1;
         break;
       }
