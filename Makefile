@@ -48,7 +48,11 @@ endif
 TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_LINUX -Wl,-E -ldl
 
 ifeq ($(UNAME_S),Darwin)
-    TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_MACOSX
+    # Use LUA_USE_POSIX, not LUA_USE_MACOSX: since 5.5 the latter defines
+    # LUA_USE_READLINE, which would make the REPL (compiled into the test
+    # binary) reference -lreadline symbols the test build never links.
+    # On Linux this does not arise -- 5.5 dlopens readline at run time.
+    TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_POSIX
 endif
 
 TEST_BIN:=$(CURDIR)/dist/diluvium_debug
@@ -67,8 +71,12 @@ _native_static_lib: _build_step0
 	# We use -DLUA_LIB and -UMAKE_LUA to ensure the standalone 'main' is NOT compiled
 	cd .data && gcc -O3 -c onelua.c -o onelua.o -fPIC $(PLAT_CFLAGS) -DDILUVIUM_AS_LIBRARY
 	cd .data && gcc -O3 -c wasm_stubs.c -o wasm_stubs.o -fPIC
-	cd .data && gcc -O3 -c analyze.c -o analyze.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY
-	cd .data && gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY
+	# analyze.c / diluvium_api.c set their own _POSIX_C_SOURCE and need no
+	# Lua platform config. Do NOT pass -DLUA_USE_LINUX here: on Windows,
+	# 5.5's luaconf auto-defines LUA_USE_C89, and LUA_USE_LINUX would then
+	# force LUA_USE_POSIX, tripping luaconf's "POSIX not compatible with C89".
+	cd .data && gcc -O3 -c analyze.c -o analyze.o -fPIC -std=gnu99 -DDILUVIUM_AS_LIBRARY
+	cd .data && gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=gnu99 -DDILUVIUM_AS_LIBRARY
 	ar rcs dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a .data/onelua.o .data/wasm_stubs.o .data/diluvium_api.o .data/analyze.o
 	@echo 'Native library built: dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a'
 

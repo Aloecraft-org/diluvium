@@ -12,6 +12,7 @@
 
 #include <limits.h>
 #include <stddef.h>
+#include <string.h>  /* Diluvium: memcpy in the secure-dump scramble path */
 
 #include "lua.h"
 
