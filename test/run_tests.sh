@@ -65,6 +65,7 @@ test_analysis|run||
 test_determinism|run||
 test_fstrings|run||
 test_nullco|run||
+test_switch|run||
 tpack|run||
 tracegc|run||
 utf8|run||

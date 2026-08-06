@@ -11,7 +11,7 @@ work it describes.
 ## Verified state
 
 Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-32 passed / 0 failed / 6 skipped.
+33 passed / 0 failed / 6 skipped.
 
 ### Language
 
@@ -22,7 +22,8 @@ Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
 | Secure (obfuscated) functions `~function` | done |
 | Compound assignment `+=` etc. | not started |
 | Safe navigation `?.` / `?[` | not started |
-| `switch` / `match` | not started |
+| `switch` statement | done |
+| `match` (switch as an expression) | not started |
 | `defer` / `with` | not started |
 | F-string format specs `{x:%.2f}` | not started |
 | Literal suffix registry (`1.23d`) | not started; gated on decQuad semantics |
@@ -58,20 +59,34 @@ or an embedder file does not belong in `src/`.
 
 Ordered. Each item is independently shippable.
 
-1. **`switch` / `match`.** Contextual keyword, so stock-Lua compatibility
-   holds and `switch` remains usable as an identifier. v1 is sugar over an
-   if-elseif chain with the subject evaluated once; jump tables only if
-   profiling justifies them.
-2. **Compound assignment.** Contained `exprstat` / `restassign` change,
+1. **Compound assignment.** Contained `exprstat` / `restassign` change,
    desugared with a single evaluation of the left prefix.
-3. **`defer`.** Desugars to a to-be-closed local with a `__close` wrapper,
+2. **`defer`.** Desugars to a to-be-closed local with a `__close` wrapper,
    so unwind ordering is inherited rather than implemented.
-4. **Safe navigation `?.` / `?[`.** Cheap now that `??` compiles as a
+3. **Safe navigation `?.` / `?[`.** Cheap now that `??` compiles as a
    branch; same test-nil-and-skip shape.
-5. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
+4. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
+
+`match` -- switch in expression position -- is deliberately separate from
+the statement form and unscheduled; the statement carries the README
+promise on its own.
 
 Every new construct needs analyzer support and a test in `test/`, and must
 be a syntax error in stock Lua.
+
+### Contextual keywords
+
+`switch` follows the precedent 5.5 set for its own `global`: it stays an
+ordinary name, and a statement only parses as a switch when the token
+after it cannot continue a call or an assignment. That deliberately
+excludes `(`, a string and `{`, because `switch (x)`, `switch "s"` and
+`switch {}` are all calls stock Lua accepts and they have to keep their
+meaning. Inside a switch body, `case` and `default` are keywords.
+
+Any future contextual keyword needs the same treatment, plus a `luaC_fix`
+in `luaX_init`: recognition is pointer equality against an interned
+string, so an unfixed name can be collected and re-created, and the
+comparison then fails depending on when the collector ran.
 
 ## Analyzer
 

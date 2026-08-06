@@ -81,6 +81,11 @@ void luaX_init (lua_State *L) {
     luaC_fix(L, obj2gco(ts));  /* reserved words are never collected */
     ts->extra = cast_byte(i+1);  /* reserved word */
   }
+  /* Diluvium: "switch" is recognised by comparing the name a statement
+     starts with against this one, so it has to be as permanent as a
+     reserved word even though it is not one -- if it were collected and
+     re-created, the pointers would stop matching. */
+  luaC_fix(L, obj2gco(luaS_newliteral(L, "switch")));
 }
 
 
@@ -193,6 +198,10 @@ void luaX_setinput (lua_State *L, LexState *ls, ZIO *z, TString *source,
      so they cannot be collected */
   ls->envn = luaS_newliteral(L, LUA_ENV);  /* get env string */
   ls->brkn = luaS_newliteral(L, "break");  /* get "break" string */
+  /* Diluvium: "switch" is contextual -- never reserved, so code using it
+     as an ordinary name keeps working -- but fixed in 'luaX_init', so
+     this returns the same string every time */
+  ls->swtn = luaS_newliteral(L, "switch");  /* get "switch" string */
 #if LUA_COMPAT_GLOBAL
   /* compatibility mode: "global" is not a reserved word */
   ls->glbn = luaS_newliteral(L, "global");  /* get "global" string */

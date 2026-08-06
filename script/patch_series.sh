@@ -38,9 +38,9 @@ FORK_POINT=7579fc9d7ed90240487251dfb69168f8e64e9294
 # Core files that are allowed to differ from upstream, one per line:
 #   <file>  <reason>
 CORE_PATCH_ALLOWLIST='
-llex.c      f-strings ($"..."), ?? token, $ must introduce a string
-llex.h      TK_2Q/TK_FPART tokens, fstring_del/encrypted_flag on LexState
-lparser.c   ~function statement forms, f-string codegen, ?? operator entry
+llex.c      f-strings ($"..."), ?? token, $ must introduce a string, "switch" name
+llex.h      TK_2Q/TK_FPART tokens, fstring_del/encrypted_flag/swtn on LexState
+lparser.c   ~function statement forms, f-string codegen, switch statement, ?? operator entry
 lcode.c     OPR_2Q branch compile (EQK-nil + jump)
 lcode.h     OPR_2Q enum entry
 lobject.h   is_encrypted flag on Proto

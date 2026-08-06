@@ -58,10 +58,33 @@ print(nil ?? "hello!")
 end
 ``` 
 
+**Switch**
+
+``` lua
+-- The subject is evaluated once, a case can list several values,
+-- and there is no fallthrough
+switch response_code do
+    case 200, 201, 204 then
+        print("ok")
+    case 301, 302 then
+        print("redirected")
+    default
+        print($"unexpected: {response_code}")
+end
+```
+
+`switch` is a contextual keyword, so existing code that uses it as a
+variable, field or function name keeps working. The one consequence is
+that a subject cannot start with `(`, a string or a table constructor --
+`switch (x)` is a function call in stock Lua and stays one. Write
+`switch x do` (the usual Lua shape, as in `if x then` and `while x do`),
+or bind the subject to a local first.
+
 **And coming soon:** 
-- switch/match
+- match (switch as an expression)
 - defer/with
 - compound assignment
+- safe navigation
 - and more
 
 ## Why Diluvium?

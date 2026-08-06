@@ -1850,6 +1850,146 @@ static void test_then_block (LexState *ls, int *escapelist) {
 }
 
 
+/*
+** Diluvium: is the current token the contextual keyword 'kw'?  Used for
+** 'case' and 'default', which are only ever looked for inside a switch
+** body, so they cannot collide with a name used anywhere else.
+*/
+static int testcasekw (LexState *ls, const char *kw) {
+  return ls->t.token == TK_NAME && strcmp(getstr(ls->t.seminfo.ts), kw) == 0;
+}
+
+
+/*
+** Diluvium: the body of one 'case' or 'default' clause.  Same as 'block',
+** except the statement list also ends at the next 'case' or 'default',
+** which 'block_follow' cannot recognise because both are ordinary names.
+** Inside a switch body they are effectively keywords, so a statement
+** there cannot begin with a call to a function named 'case' or
+** 'default'; nothing outside a switch body is affected.
+*/
+static void caseblock (LexState *ls) {
+  FuncState *fs = ls->fs;
+  BlockCnt bl;
+  enterblock(fs, &bl, 0);
+  while (!block_follow(ls, 1) &&
+         !testcasekw(ls, "case") && !testcasekw(ls, "default")) {
+    if (ls->t.token == TK_RETURN) {
+      statement(ls);  /* 'return' must be the last statement */
+      break;
+    }
+    statement(ls);
+  }
+  leaveblock(fs);
+}
+
+
+/*
+** Diluvium: parse one case value and leave 'e' holding 'subject == value'.
+** The subject lives in a register of its own for the whole statement, so
+** it is evaluated once no matter how many values are tested against it.
+*/
+static void caseeq (LexState *ls, expdesc *e, int subjreg, int line) {
+  expdesc v;
+  init_exp(e, VNONRELOC, subjreg);
+  expr(ls, &v);
+  luaK_infix(ls->fs, OPR_EQ, e);
+  luaK_posfix(ls->fs, OPR_EQ, e, &v, line);
+}
+
+
+/*
+** Diluvium: switch statement.
+**
+**   switchstat -> 'switch' expr 'do'
+**                   {'case' explist 'then' block}
+**                   ['default' block]
+**                 'end'
+**
+** Sugar over an if-elseif chain, with the subject evaluated exactly once
+** into an anonymous local.  A case listing several values matches any of
+** them ('case 1, 2 then' is 'subject == 1 or subject == 2'), values are
+** arbitrary expressions tested in order, and there is no fallthrough --
+** a matching block runs and the statement ends, as an if-elseif does.
+**
+** 'switch' is a contextual keyword, so existing code that uses it as a
+** name keeps working.  'statement' only routes here when the following
+** token cannot continue a call or an assignment, which is why a subject
+** cannot begin with '(', a string or a table constructor: 'switch (x)'
+** is a function call in stock Lua and has to stay one.  Bind such a
+** subject to a local, or drop the parentheses.
+*/
+static void switchstat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  BlockCnt bl;
+  expdesc subj;
+  int subjreg;  /* register holding the subject */
+  int escapelist = NO_JUMP;  /* jumps out of a finished case block */
+  luaX_next(ls);  /* skip 'switch' */
+  enterblock(fs, &bl, 0);  /* scope holding the subject */
+  new_localvarliteral(ls, "(switch)");
+  expr(ls, &subj);
+  luaK_exp2nextreg(fs, &subj);  /* subject gets a register of its own */
+  subjreg = subj.u.info;
+  adjustlocalvars(ls, 1);  /* ...and is a local, so cases cannot free it */
+  checknext(ls, TK_DO);
+  while (testcasekw(ls, "case")) {
+    expdesc cond;
+    int caseline = ls->linenumber;
+    int nomatch;  /* jumps taken when this case does not match */
+    luaX_next(ls);  /* skip 'case' */
+    caseeq(ls, &cond, subjreg, caseline);
+    while (testnext(ls, ',')) {  /* 'case a, b then' matches either */
+      expdesc alt;
+      luaK_infix(fs, OPR_OR, &cond);
+      caseeq(ls, &alt, subjreg, caseline);
+      luaK_posfix(fs, OPR_OR, &cond, &alt, caseline);
+    }
+    luaK_goiftrue(fs, &cond);  /* fall into the block when it matches */
+    nomatch = cond.f;
+    checknext(ls, TK_THEN);
+    caseblock(ls);
+    if (testcasekw(ls, "case") || testcasekw(ls, "default"))
+      luaK_concat(fs, &escapelist, luaK_jump(fs));  /* skip the rest */
+    luaK_patchtohere(fs, nomatch);
+  }
+  if (testcasekw(ls, "default")) {
+    luaX_next(ls);  /* skip 'default' */
+    caseblock(ls);
+  }
+  if (!testnext(ls, TK_END))
+    luaX_syntaxerror(ls, luaO_pushfstring(ls->L,
+        "'case', 'default' or 'end' expected (to close 'switch' at line %d)",
+        line));
+  luaK_patchtohere(fs, escapelist);
+  leaveblock(fs);
+}
+
+
+/*
+** Diluvium: does a 'switch' name at the start of a statement introduce a
+** switch statement?  Only when what follows cannot continue a call or an
+** assignment -- the same test 5.5 applies to its own contextual 'global'
+** keyword.  '(', a string and '{' are deliberately absent: each of them
+** makes 'switch ...' a function call that stock Lua accepts, and those
+** programs must keep their meaning.
+*/
+static int isswitchstat (LexState *ls) {
+  int lk;
+  if (ls->t.seminfo.ts != ls->swtn)
+    return 0;
+  lk = luaX_lookahead(ls);
+  switch (lk) {
+    case TK_NAME: case TK_INT: case TK_FLT: case TK_NIL:
+    case TK_TRUE: case TK_FALSE: case TK_FUNCTION: case TK_DOTS:
+    case TK_NOT: case '-': case '#': case '~':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+
 static void ifstat (LexState *ls, int line) {
   /* ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END */
   FuncState *fs = ls->fs;
@@ -2218,8 +2358,12 @@ static void statement (LexState *ls) {
       gotostat(ls, line);
       break;
     }
-#if LUA_COMPAT_GLOBAL
     case TK_NAME: {
+      if (isswitchstat(ls)) {  /* Diluvium: stat -> switchstat */
+        switchstat(ls, line);
+        break;
+      }
+#if LUA_COMPAT_GLOBAL
       /* compatibility code to parse global keyword when "global"
          is not reserved */
       if (ls->t.seminfo.ts == ls->glbn) {  /* current = "global"? */
@@ -2231,8 +2375,8 @@ static void statement (LexState *ls) {
           break;
         }
       }  /* else... */
-    }
 #endif
+    }
     /* FALLTHROUGH */
     default: {  /* stat -> func | assignment */
       exprstat(ls);
