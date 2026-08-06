@@ -471,12 +471,20 @@ do print("testing flush")
   assert(io.flush())        -- write to device
   assert(f:close())
 
-  local f = io.output("/dev/full")
-  assert(f:write("abcd"))   -- write to buffer
-  assert(not f:flush())     -- cannot write to device
-  assert(f:write("abcd"))   -- write to buffer
-  assert(not io.flush())    -- cannot write to device
-  assert(f:close())
+  -- '/dev/full' is a Linux-only device (writes always fail with ENOSPC).
+  -- It does not exist on macOS/BSD, where /dev is not user-writable, so
+  -- io.open returns nil rather than raising -- skip the sub-test there.
+  local probe = io.open("/dev/full", "w")
+  if probe then
+    probe:close()
+    local f = io.output("/dev/full")
+    assert(f:write("abcd"))   -- write to buffer
+    assert(not f:flush())     -- cannot write to device
+    assert(f:write("abcd"))   -- write to buffer
+    assert(not io.flush())    -- cannot write to device
+    assert(f:close())
+    io.output(io.stdout)      -- restore default output
+  end
 end
 
 
