@@ -67,6 +67,7 @@ test_defer|run||
 test_determinism|run||
 test_fstrings|run||
 test_nullco|run||
+test_safenav|run||
 test_switch|run||
 tpack|run||
 tracegc|run||

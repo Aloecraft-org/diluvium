@@ -101,6 +101,8 @@ LUAI_FUNC void luaK_settablesize (FuncState *fs, int pc,
 LUAI_FUNC void luaK_setlist (FuncState *fs, int base, int nelems, int tostore);
 LUAI_FUNC void luaK_finish (FuncState *fs);
 LUAI_FUNC l_noret luaK_semerror (LexState *ls, const char *fmt, ...);
+/* Diluvium: safe navigation -- jump taken when 'e' is nil */
+LUAI_FUNC int luaK_skipifnil (FuncState *fs, expdesc *e);
 
 
 #endif

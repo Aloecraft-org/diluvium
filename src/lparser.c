@@ -1227,10 +1227,26 @@ static void primaryexp (LexState *ls, expdesc *v) {
 }
 
 
-static void suffixedexp (LexState *ls, expdesc *v) {
-  /* suffixedexp ->
-       primaryexp { '.' NAME | '[' exp ']' | ':' NAME funcargs | funcargs } */
+/*
+** suffixedexp ->
+**    primaryexp { '.' NAME | '[' exp ']' | ':' NAME funcargs | funcargs
+**               | '?' ('.' NAME | '[' exp ']') }
+**
+** Diluvium: '?.' and '?[' are safe navigation.  When the value to their
+** left is nil the whole remaining chain is skipped and the result is nil,
+** so 'a?.b.c()' neither indexes nor calls anything once 'a' is nil -- the
+** same reach as C# and JavaScript, not a single-step check.
+**
+** Each '?' contributes a jump to 'nilexit'; they all land on a LOADNIL
+** into the register the finished chain occupies, which is why the result
+** is forced into a register whenever safe navigation was used.  That also
+** means such a chain is no longer an assignable variable or a bare call,
+** so 'a?.b = 1' is rejected, and 'safenav' lets 'exprstat' still accept
+** 'a?.b()' as a statement.
+*/
+static void suffixedexp (LexState *ls, expdesc *v, int *safenav) {
   FuncState *fs = ls->fs;
+  int nilexit = NO_JUMP;  /* jumps taken when a '?' met nil */
   primaryexp(ls, v);
   for (;;) {
     switch (ls->t.token) {
@@ -1258,8 +1274,26 @@ static void suffixedexp (LexState *ls, expdesc *v) {
         funcargs(ls, v);
         break;
       }
-      default: return;
+      case '?': {  /* Diluvium: safe navigation */
+        int nxt = luaX_lookahead(ls);
+        if (nxt != '.' && nxt != '[')
+          goto done;  /* a '?' that indexes nothing is not ours */
+        luaK_concat(fs, &nilexit, luaK_skipifnil(fs, v));
+        luaX_next(ls);  /* skip '?'; the '.' or '[' is handled next round */
+        break;
+      }
+      default: goto done;
     }
+  }
+ done:
+  if (nilexit != NO_JUMP) {  /* close the safe-navigation chain */
+    int over;
+    luaK_exp2nextreg(fs, v);  /* the chain's value needs a register... */
+    over = luaK_jump(fs);
+    luaK_patchtohere(fs, nilexit);  /* ...which a nil anywhere in it... */
+    luaK_nil(fs, v->u.info, 1);     /* ...leaves as nil instead */
+    luaK_patchtohere(fs, over);
+    if (safenav != NULL) *safenav = 1;
   }
 }
 
@@ -1382,7 +1416,7 @@ static void simpleexp (LexState *ls, expdesc *v) {
       return;  /* 'fstring' consumed the whole literal */
     }
     default: {
-      suffixedexp(ls, v);
+      suffixedexp(ls, v, NULL);
       return;
     }
   }
@@ -1588,7 +1622,7 @@ static void restassign (LexState *ls, struct LHS_assign *lh, int nvars) {
   if (testnext(ls, ',')) {  /* restassign -> ',' suffixedexp restassign */
     struct LHS_assign nv;
     nv.prev = lh;
-    suffixedexp(ls, &nv.v);
+    suffixedexp(ls, &nv.v, NULL);
     if (!vkisindexed(nv.v.k))
       check_conflict(ls, lh, &nv.v);
     enterlevel(ls);  /* control recursion depth */
@@ -2393,8 +2427,9 @@ static void exprstat (LexState *ls) {
   FuncState *fs = ls->fs;
   struct LHS_assign v;
   int line = ls->linenumber;
+  int safenav = 0;  /* Diluvium: did the expression use '?.' or '?[' ? */
   BinOpr opr;
-  suffixedexp(ls, &v.v);
+  suffixedexp(ls, &v.v, &safenav);
   if (ls->t.token == '=' || ls->t.token == ',') { /* stat -> assignment ? */
     v.prev = NULL;
     restassign(ls, &v, 1);
@@ -2402,6 +2437,11 @@ static void exprstat (LexState *ls) {
   else if ((opr = getcompoundopr(ls->t.token)) != OPR_NOBINOPR &&
            luaX_lookahead(ls) == '=') {  /* stat -> compound assignment? */
     compoundassign(ls, &v.v, opr, line);
+  }
+  else if (safenav) {
+    /* Diluvium: a safe-navigation chain is a value, not a call, because
+       the nil path has to leave one behind; 'a?.b()' is still a perfectly
+       good statement, so accept it and drop the value. */
   }
   else {  /* stat -> func */
     Instruction *inst;

@@ -1791,6 +1791,19 @@ static void codeconcat (FuncState *fs, expdesc *e1, expdesc *e2, int line) {
 
 
 /*
+** Diluvium: for safe navigation ('a?.b', 'a?[k]').  Put 'e' in a register
+** and return a jump taken when it is nil, so the parser can skip the rest
+** of the suffix chain.  This is the same EQK-against-nil test '??' uses in
+** 'luaK_infix', with the opposite sense: '??' jumps when the value is not
+** nil (k = 0), this jumps when it is (k = 1).
+*/
+int luaK_skipifnil (FuncState *fs, expdesc *e) {
+  luaK_exp2anyreg(fs, e);
+  return condjump(fs, OP_EQK, e->u.info, nilK(fs), 0, 1);
+}
+
+
+/*
 ** Finalize code for binary operation, after reading 2nd operand.
 */
 void luaK_posfix (FuncState *fs, BinOpr opr,

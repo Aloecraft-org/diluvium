@@ -11,7 +11,7 @@ work it describes.
 ## Verified state
 
 Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-35 passed / 0 failed / 6 skipped locally. CI last verified the tree at
+36 passed / 0 failed / 6 skipped locally. CI last verified the tree at
 `dba073e` (run 31144117057, 34 tests) on linux-x86_64 and macos-arm64;
 `defer` landed after that and is verified on the run for its own commit.
 
@@ -23,7 +23,7 @@ Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
 | Null coalescing `??` | done, short-circuits, no dedicated opcode |
 | Secure (obfuscated) functions `~function` | done |
 | Compound assignment `+=` etc. | done (no `~=`; see below) |
-| Safe navigation `?.` / `?[` | not started |
+| Safe navigation `?.` / `?[` | done |
 | `switch` statement | done |
 | `match` (switch as an expression) | not started |
 | `defer` | done (`with` not started) |
@@ -61,12 +61,7 @@ or an embedder file does not belong in `src/`.
 
 Ordered. Each item is independently shippable.
 
-1. **Safe navigation `?.` / `?[`.** No lexer change needed (`?.` lexes as
-   `?` then `.`, and a bare `?` is a syntax error in stock Lua), but a nil
-   head must short-circuit the *whole* remaining suffix chain, so it needs
-   a jump list threaded through `suffixedexp` rather than reusing the `??`
-   shape. More involved than it looks.
-2. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
+1. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
 
 `match` -- switch in expression position -- is deliberately separate from
 the statement form and unscheduled; the statement carries the README
@@ -116,6 +111,30 @@ Inherited semantics worth knowing: an error raised by deferred code while
 another error is already unwinding *replaces* the in-flight error. That is
 Lua's to-be-closed rule, not a Diluvium choice, and `test_defer.lua`
 asserts it so it stays known.
+
+### Safe navigation
+
+`a?.b` and `a?[k]` short-circuit the *whole* remaining chain, as in C# and
+JavaScript: once the value to the left of a `?` is nil, nothing further in
+the chain is indexed or called, and the result is nil. Each `?` adds a
+jump to one exit list; they all land on a `LOADNIL` into the register the
+finished chain occupies. Three extra instructions, and only the guarded
+head is tested rather than every step.
+
+It tests nil, not falsiness — `false?.x` still raises, matching `??`,
+which also short-circuits on nil alone. No lexer change: `?.` already
+lexes as `?` then `.`, and `suffixedexp` looks ahead for `.` or `[` before
+claiming the `?`. As with compound assignment, that means a space between
+them is accepted too.
+
+Because the nil path has to leave a value behind, such a chain is forced
+into a register, so it is neither an assignable variable nor a bare call:
+`a?.b = 1` is rejected, and `exprstat` takes a flag so `a?.b()` is still
+accepted as a statement.
+
+The one shared codegen addition is `luaK_skipifnil` in `lcode.c` — the
+same EQK-against-nil test `??` uses in `luaK_infix`, with the opposite
+sense, since `condjump` and `nilK` are static there.
 
 ### Compound assignment
 

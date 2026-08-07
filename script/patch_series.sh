@@ -40,9 +40,9 @@ FORK_POINT=7579fc9d7ed90240487251dfb69168f8e64e9294
 CORE_PATCH_ALLOWLIST='
 llex.c      f-strings ($"..."), ?? token, $ must introduce a string, contextual keyword names
 llex.h      TK_2Q/TK_FPART tokens, fstring_del/encrypted_flag/swtn/dfrn on LexState
-lparser.c   ~function forms, f-string codegen, switch, defer, compound assignment, ??
-lcode.c     OPR_2Q branch compile (EQK-nil + jump)
-lcode.h     OPR_2Q enum entry
+lparser.c   ~function forms, f-string codegen, switch, defer, compound assignment, ?? and ?.
+lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_skipifnil for ?.
+lcode.h     OPR_2Q enum entry, luaK_skipifnil export
 lobject.h   is_encrypted flag on Proto
 lfunc.c     is_encrypted initialization
 ldump.c     XOR scramble of code/constant strings for secure protos

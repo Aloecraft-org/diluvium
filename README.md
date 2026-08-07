@@ -117,10 +117,26 @@ Deferred statements run in reverse order when the block ends, and on
 `break`, `goto`, `return`, an error, or `coroutine.close`. `defer` is a
 contextual keyword, so existing code using it as a name keeps working.
 
+**Safe Navigation**
+
+``` lua
+-- Once something is nil, the rest of the chain is skipped entirely --
+-- nothing is indexed, and no call happens
+local city = user?.address?.city
+local name = config?.profile.display_name    -- plain '.' after '?.' is safe too
+handler?.on_event(payload)                   -- not called when handler is nil
+
+-- Pairs naturally with null coalescing
+local port = config?.server?.port ?? 8080
+```
+
+`?.` and `?[` test for `nil` specifically, not for falsiness, so
+`false?.x` still raises exactly as `false.x` does.
+
 **And coming soon:** 
 - match (switch as an expression)
 - with
-- safe navigation
+- f-string format specs
 - and more
 
 ## Why Diluvium?
