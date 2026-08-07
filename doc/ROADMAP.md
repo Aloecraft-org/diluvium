@@ -11,7 +11,8 @@ work it describes.
 ## Verified state
 
 Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-34 passed / 0 failed / 6 skipped.
+34 passed / 0 failed / 6 skipped, locally and in CI on both
+linux-x86_64 and macos-arm64 (run 31144117057 at `dba073e`).
 
 ### Language
 
@@ -61,9 +62,12 @@ Ordered. Each item is independently shippable.
 
 1. **`defer`.** Desugars to a to-be-closed local with a `__close` wrapper,
    so unwind ordering is inherited rather than implemented.
-3. **Safe navigation `?.` / `?[`.** Cheap now that `??` compiles as a
-   branch; same test-nil-and-skip shape.
-4. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
+2. **Safe navigation `?.` / `?[`.** No lexer change needed (`?.` lexes as
+   `?` then `.`, and a bare `?` is a syntax error in stock Lua), but a nil
+   head must short-circuit the *whole* remaining suffix chain, so it needs
+   a jump list threaded through `suffixedexp` rather than reusing the `??`
+   shape. More involved than it looks.
+3. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
 
 `match` -- switch in expression position -- is deliberately separate from
 the statement form and unscheduled; the statement carries the README
