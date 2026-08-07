@@ -21,6 +21,7 @@
 #include "lualib.h"
 #include "analyze.h"
 #include "drepl.h"
+#include "dline.h"
 #include "llimits.h"
 
 
@@ -30,11 +31,6 @@
 
 #if !defined(LUA_INIT_VAR)
 #define LUA_INIT_VAR		"LUA_INIT"
-#endif
-
-/* Name of the environment variable with the name of the readline library */
-#if !defined(LUA_RLLIB_VAR)
-#define LUA_RLLIB_VAR		"LUA_READLINELIB"
 #endif
 
 
@@ -449,103 +445,16 @@ static int handle_luainit (lua_State *L) {
 
 #endif				/* } */
 
-
 /*
-** * lua_initreadline initializes the readline system.
-** * lua_readline defines how to show a prompt and then read a line from
-**   the standard input.
-** * lua_saveline defines how to "save" a read line in a "history".
-** * lua_freeline defines how to free a line read by lua_readline.
+** Diluvium: line editing is dline.c rather than GNU readline. See
+** dline.h for why -- licence and size, and the fact that readline could
+** never be reached from the WASM build, so the native and browser REPLs
+** shared no editing code at all.
+**
+** Where there is no terminal, dline falls back to plain buffered input,
+** which is how stock Lua behaves when built without readline.
 */
-
-#if !defined(lua_readline)	/* { */
-/* Otherwise, all previously listed functions should be defined. */
-
-#if defined(LUA_USE_READLINE)	/* { */
-/* Lua will be linked with '-lreadline' */
-
-#include <readline/readline.h>
-#include <readline/history.h>
-
-#define lua_initreadline(L)	((void)L, rl_readline_name="lua")
-#define lua_readline(buff,prompt)	((void)buff, readline(prompt))
-#define lua_saveline(line)	add_history(line)
-#define lua_freeline(line)	free(line)
-
-#else		/* }{ */
-/* use dynamically loaded readline (or nothing) */
-
-/* pointer to 'readline' function (if any) */
-typedef char *(*l_readlineT) (const char *prompt);
-static l_readlineT l_readline = NULL;
-
-/* pointer to 'add_history' function (if any) */
-typedef void (*l_addhistT) (const char *string);
-static l_addhistT l_addhist = NULL;
-
-
-static char *lua_readline (char *buff, const char *prompt) {
-  if (l_readline != NULL)  /* is there a 'readline'? */
-    return (*l_readline)(prompt);  /* use it */
-  else {  /* emulate 'readline' over 'buff' */
-    fputs(prompt, stdout);
-    fflush(stdout);  /* show prompt */
-    return fgets(buff, LUA_MAXINPUT, stdin);  /* read line */
-  }
-}
-
-
-static void lua_saveline (const char *line) {
-  if (l_addhist != NULL)  /* is there an 'add_history'? */
-    (*l_addhist)(line);  /* use it */
-  /* else nothing to be done */
-}
-
-
-static void lua_freeline (char *line) {
-  if (l_readline != NULL)  /* is there a 'readline'? */
-    free(line);  /* free line created by it */
-  /* else 'lua_readline' used an automatic buffer; nothing to free */
-}
-
-
-#if defined(LUA_USE_DLOPEN) && defined(LUA_READLINELIB)		/* { */
-/* try to load 'readline' dynamically */
-
-#include <dlfcn.h>
-
-static void lua_initreadline (lua_State *L) {
-  const char *rllib = l_getenv(LUA_RLLIB_VAR);  /* name of readline library */
-  void *lib;  /* library handle */
-  if (rllib == NULL)  /* no environment variable? */
-    rllib = LUA_READLINELIB;  /* use default name */
-  lib = dlopen(rllib, RTLD_NOW | RTLD_LOCAL);
-  if (lib != NULL) {
-    const char **name = cast(const char**, dlsym(lib, "rl_readline_name"));
-    if (name != NULL)
-      *name = "lua";
-    l_readline = cast(l_readlineT, cast_func(dlsym(lib, "readline")));
-    l_addhist = cast(l_addhistT, cast_func(dlsym(lib, "add_history")));
-    if (l_readline != NULL)  /* could load readline function? */
-      return;  /* everything ok */
-    /* else emit a warning */
-  }
-  lua_warning(L, "unable to load readline library '", 1);
-  lua_warning(L, rllib, 1);
-  lua_warning(L, "'", 0);
-}
-
-#else		/* }{ */
-/* no dlopen or LUA_READLINELIB undefined */
-
-/* Leave pointers with NULL */
-#define lua_initreadline(L)	((void)L)
-
-#endif		/* } */
-
-#endif				/* } */
-
-#endif				/* } */
+#define lua_saveline(line)	diluvium_history_add(line)
 
 
 /*
@@ -569,10 +478,9 @@ static const char *get_prompt (lua_State *L, int firstline) {
 ** Prompt the user, read a line, and push it into the Lua stack.
 */
 static int pushline (lua_State *L, int firstline) {
-  char buffer[LUA_MAXINPUT];
   size_t l;
   const char *prmt = get_prompt(L, firstline);
-  char *b = lua_readline(buffer, prmt);
+  char *b = diluvium_readline(L, prmt);
   lua_pop(L, 1);  /* remove prompt */
   if (b == NULL)
     return 0;  /* no input */
@@ -580,7 +488,7 @@ static int pushline (lua_State *L, int firstline) {
   if (l > 0 && b[l-1] == '\n')  /* line ends with newline? */
     b[--l] = '\0';  /* remove it */
   lua_pushlstring(L, b, l);
-  lua_freeline(b);
+  diluvium_freeline(b);
   return 1;
 }
 
@@ -661,14 +569,17 @@ static void l_print (lua_State *L) {
 static void doREPL (lua_State *L) {
   int status;
   const char *oldprogname = progname;
+  const char *histfile = diluvium_history_path();
   progname = NULL;  /* no 'progname' on errors in interactive mode */
-  lua_initreadline(L);
+  diluvium_history_load(histfile);  /* absent or unreadable is fine */
   while ((status = loadline(L)) != -1) {
     if (status == LUA_OK)
       status = docall(L, 0, LUA_MULTRET);
     if (status == LUA_OK) l_print(L);
     else report(L, status);
   }
+  diluvium_history_save(histfile);
+  diluvium_history_free();
   lua_settop(L, 0);  /* clear stack */
   lua_writeline();
   progname = oldprogname;

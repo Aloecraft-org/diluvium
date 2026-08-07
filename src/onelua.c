@@ -124,6 +124,7 @@
    amalgamation so the interpreter and the WASM host share it. */
 #ifndef MAKE_LUAC
 #include "drepl.c"
+#include "dline.c"
 #endif
 
 /* test library -- used only for internal development */
