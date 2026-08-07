@@ -217,6 +217,29 @@ wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/dilu
 ./diluvium
 ```
 
+## Interactive Mode
+
+``` sh
+diluvium          # syntax highlighting, tab completion, persistent history
+diluvium -h       # the options
+```
+
+Tab completes names, including through tables and metatable `__index`, so
+`string.f` offers `find` and `format`. The arrow keys walk history kept in
+`~/.diluvium_history`. Type `help()` for what Diluvium adds to Lua and what
+the editor'''s keys do. Set `NO_COLOR` to turn highlighting off.
+
+Line editing is built in — Diluvium links no readline and depends on
+nothing but libc.
+
+## Embedding a REPL
+
+`doc/repl-reference.html` is a working Diluvium REPL in a browser
+terminal, and the reference for driving the WASM build: load
+`libdiluvium_wasi.wasm`, call `__wasm_call_ctors`, then `repl_eval` for
+evaluation (it reports whether input is merely unfinished) and
+`repl_complete` for completion.
+
 ## Compiler Features
 
 **Bytecode analysis report**

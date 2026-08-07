@@ -1,0 +1,318 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Diluvium REPL — browser reference</title>
+
+<!--
+  A working Diluvium REPL in a browser terminal, and a reference for the
+  glue the website's panel needs.
+
+  Everything specific to Diluvium is in loadDiluvium() and Repl below;
+  the rest is a WASI shim and xterm.js wiring.
+
+  Three things about the WASM build are not guessable from outside, and
+  each one costs an afternoon if you get it wrong:
+
+    1. Use libdiluvium_wasi.wasm. diluvium_wasi.wasm is a command module
+       whose _start runs the interpreter against stdin, and
+       diluvium_compiler_wasi.wasm is luac.
+
+    2. Call __wasm_call_ctors() before anything else. The module exports
+       that rather than _initialize, so it is not a WASI reactor and
+       nothing initialises libc for you -- init_lua's setvbuf is the
+       first thing to touch uninitialised stdio if you skip it.
+
+    3. Drive it with repl_eval, not run_lua. run_lua cannot tell you that
+       input is merely unfinished, and does not echo the value of a bare
+       expression, so a front end built on it has to decide when to show a
+       continuation prompt by matching the text of Lua's error messages,
+       and "1 + 1" prints nothing. repl_eval returns 0 ok / 1 unfinished /
+       2 error, and repl_complete gives completion candidates.
+-->
+
+<!-- xterm.js, served alongside this file rather than from a CDN, so the
+     page works offline and adds no third-party origin. Fetch them with
+       npm pack @xterm/xterm
+     and copy lib/xterm.js and css/xterm.css next to this file. -->
+<link rel="stylesheet" href="./xterm.css">
+<script src="./xterm.js"></script>
+
+<style>
+  body { margin: 0; background: #14161a; color: #d7dae0;
+         font: 14px/1.5 system-ui, sans-serif; }
+  header { padding: 10px 14px; border-bottom: 1px solid #2a2e36;
+           display: flex; gap: 12px; align-items: center; }
+  h1 { font-size: 14px; font-weight: 600; margin: 0; }
+  button { background: #2a2e36; color: #d7dae0; border: 1px solid #3a404a;
+           border-radius: 5px; padding: 4px 10px; font: inherit;
+           cursor: pointer; }
+  button:hover { background: #343945; }
+  #status { margin-left: auto; color: #8a919e; font-size: 12px; }
+  #term { padding: 8px; }
+</style>
+
+<header>
+  <h1>Diluvium</h1>
+  <button id="reset">Restart kernel</button>
+  <span id="status">loading…</span>
+</header>
+<div id="term"></div>
+
+<script type="module">
+const WASM_URL = './libdiluvium_wasi.wasm';
+
+/* ------------------------------------------------------------------ *
+ * WASI
+ *
+ * The module imports the whole of wasi_snapshot_preview1 -- 45 entries,
+ * because that is what wasi-libc pulls in -- but only a handful are ever
+ * called. Everything else returns ENOSYS so an unexpected call fails
+ * loudly rather than trapping on a missing import.
+ * ------------------------------------------------------------------ */
+const ENOSYS = 52, EBADF = 8;
+
+function makeWasi(getMemory, onOutput) {
+  const u8 = () => new Uint8Array(getMemory().buffer);
+  const dv = () => new DataView(getMemory().buffer);
+  const decoder = new TextDecoder();
+
+  const wasi = new Proxy({}, {
+    get: (target, name) => target[name] ?? (() => ENOSYS),
+    has: () => true,
+  });
+
+  /* stdout and stderr arrive here, as iovecs. This is the whole of
+     output: Diluvium's print, io.write and error messages all land in
+     fd_write, so nothing else has to be captured. */
+  wasi.fd_write = (fd, iovs, iovsLen, nwritten) => {
+    if (fd !== 1 && fd !== 2) return EBADF;
+    const view = dv();
+    let written = 0, bytes = [];
+    for (let i = 0; i < iovsLen; i++) {
+      const ptr = view.getUint32(iovs + i * 8, true);
+      const len = view.getUint32(iovs + i * 8 + 4, true);
+      bytes.push(u8().slice(ptr, ptr + len));
+      written += len;
+    }
+    const total = bytes.reduce((n, b) => n + b.length, 0);
+    const flat = new Uint8Array(total);
+    let o = 0;
+    for (const b of bytes) { flat.set(b, o); o += b.length; }
+    onOutput(decoder.decode(flat), fd);
+    view.setUint32(nwritten, written, true);
+    return 0;
+  };
+
+  wasi.fd_read = (fd, iovs, iovsLen, nread) => {  /* no stdin in a panel */
+    dv().setUint32(nread, 0, true);
+    return 0;
+  };
+  wasi.fd_close = () => 0;
+  wasi.fd_seek = () => ENOSYS;
+  wasi.fd_fdstat_get = (fd, buf) => {
+    const view = dv();
+    view.setUint8(buf, 2);           /* character device */
+    view.setUint16(buf + 2, 0, true);
+    view.setBigUint64(buf + 8, 0n, true);
+    view.setBigUint64(buf + 16, 0n, true);
+    return 0;
+  };
+  wasi.random_get = (buf, len) => {
+    crypto.getRandomValues(u8().subarray(buf, buf + len));
+    return 0;
+  };
+  wasi.clock_time_get = (id, prec, out) => {
+    dv().setBigUint64(out, BigInt(Date.now()) * 1000000n, true);
+    return 0;
+  };
+  wasi.environ_sizes_get = (c, s) => {
+    const view = dv(); view.setUint32(c, 0, true); view.setUint32(s, 0, true);
+    return 0;
+  };
+  wasi.environ_get = () => 0;
+  wasi.args_sizes_get = (c, s) => {
+    const view = dv(); view.setUint32(c, 0, true); view.setUint32(s, 0, true);
+    return 0;
+  };
+  wasi.args_get = () => 0;
+  wasi.proc_exit = (code) => { throw new Error('exit(' + code + ')'); };
+  wasi.sched_yield = () => 0;
+
+  return wasi;
+}
+
+/* ------------------------------------------------------------------ *
+ * The runtime
+ * ------------------------------------------------------------------ */
+async function loadDiluvium(url, onOutput) {
+  let instance;
+  const wasi = makeWasi(() => instance.exports.memory, onOutput);
+  const src = await WebAssembly.instantiateStreaming(
+    fetch(url), { wasi_snapshot_preview1: wasi });
+  instance = src.instance;
+  const x = instance.exports;
+
+  /* Not a WASI reactor: it exports __wasm_call_ctors, not _initialize.
+     Without this, libc's stdio is never set up. */
+  x.__wasm_call_ctors?.();
+  x.init_lua();
+
+  const enc = new TextEncoder();
+  const withCString = (s, fn) => {           /* copy in, call, free */
+    const bytes = enc.encode(s);
+    const p = x.malloc(bytes.length + 1);
+    const mem = new Uint8Array(x.memory.buffer);
+    mem.set(bytes, p);
+    mem[p + bytes.length] = 0;
+    try { return fn(p); } finally { x.free(p); }
+  };
+  const readCString = (p) => {
+    const mem = new Uint8Array(x.memory.buffer);
+    let end = p;
+    while (mem[end] !== 0) end++;
+    return new TextDecoder().decode(mem.slice(p, end));
+  };
+
+  return {
+    hasRepl: typeof x.repl_eval === 'function',
+    /* 0 ok, 1 unfinished, 2 error */
+    eval: (code) => withCString(code, (p) =>
+      x.repl_eval ? x.repl_eval(p) : (x.run_lua(p) === 0 ? 0 : 2)),
+    complete: (buf, cursor) => {
+      if (!x.repl_complete) return { offset: cursor, items: [] };
+      return withCString(buf, (p) => {
+        const r = x.repl_complete(p, cursor);
+        if (!r) return { offset: cursor, items: [] };
+        const parts = readCString(r).split('\t');
+        x.free(r);
+        return { offset: parseInt(parts[0], 10), items: parts.slice(1) };
+      });
+    },
+    reset: () => x.reset_lua?.(),
+  };
+}
+
+/* ------------------------------------------------------------------ *
+ * The terminal
+ * ------------------------------------------------------------------ */
+class Repl {
+  constructor(term, rt) {
+    this.term = term; this.rt = rt;
+    this.line = ''; this.pos = 0;
+    this.pending = '';        /* lines of an unfinished statement */
+    this.history = []; this.hindex = 0;
+  }
+  get prompt() { return this.pending ? '>> ' : '> '; }
+  write(s) { this.term.write(s.replace(/\n/g, '\r\n')); }
+  redraw() {
+    this.term.write('\r\x1b[K' + this.prompt + this.line);
+    const back = this.line.length - this.pos;
+    if (back > 0) this.term.write(`\x1b[${back}D`);
+  }
+  prompt_() { this.write('\n'); this.redraw(); }
+
+  submit() {
+    this.write('\n');
+    const source = this.pending + this.line;
+    if (this.line.trim() !== '') {
+      this.history.push(this.line);
+      this.hindex = this.history.length;
+    }
+    const status = source.trim() === '' ? 0 : this.rt.eval(source);
+    if (status === 1) {                 /* unfinished: keep collecting */
+      this.pending = source + '\n';
+    } else {
+      this.pending = '';
+    }
+    this.line = ''; this.pos = 0;
+    this.redraw();
+  }
+
+  tab() {
+    const { offset, items } = this.rt.complete(this.line, this.pos);
+    if (items.length === 0) return;
+    const typed = this.line.slice(offset, this.pos);
+    let common = items[0];
+    for (const it of items)
+      while (!it.startsWith(common)) common = common.slice(0, -1);
+    if (common.length > typed.length) {   /* extend as far as they agree */
+      const add = common.slice(typed.length);
+      this.line = this.line.slice(0, this.pos) + add + this.line.slice(this.pos);
+      this.pos += add.length;
+    } else if (items.length > 1) {        /* already there: show them */
+      this.write('\n' + items.join('  '));
+      this.write('\n');
+    }
+    this.redraw();
+  }
+
+  key(data) {
+    for (const ch of data) {
+      const c = ch.charCodeAt(0);
+      if (ch === '\r') { this.submit(); }
+      else if (ch === '\t') { this.tab(); }
+      else if (c === 127) {               /* backspace */
+        if (this.pos > 0) {
+          this.line = this.line.slice(0, this.pos - 1) + this.line.slice(this.pos);
+          this.pos--; this.redraw();
+        }
+      }
+      else if (ch === '\x03') {           /* Ctrl-C */
+        this.write('^C\n'); this.line = ''; this.pos = 0;
+        this.pending = ''; this.redraw();
+      }
+      else if (ch === '\x01') { this.pos = 0; this.redraw(); }          /* ^A */
+      else if (ch === '\x05') { this.pos = this.line.length; this.redraw(); } /* ^E */
+      else if (ch === '\x15') { this.line = this.line.slice(this.pos);
+                                this.pos = 0; this.redraw(); }          /* ^U */
+      else if (ch === '\x1b') { /* handled by the sequences below */ }
+      else if (c >= 32) {
+        this.line = this.line.slice(0, this.pos) + ch + this.line.slice(this.pos);
+        this.pos++; this.redraw();
+      }
+    }
+  }
+
+  seq(data) {                             /* arrow keys */
+    if (data === '\x1b[A' || data === '\x1b[B') {
+      if (this.history.length === 0) return true;
+      this.hindex += (data === '\x1b[A') ? -1 : 1;
+      this.hindex = Math.max(0, Math.min(this.history.length, this.hindex));
+      this.line = this.history[this.hindex] ?? '';
+      this.pos = this.line.length; this.redraw();
+      return true;
+    }
+    if (data === '\x1b[D') { if (this.pos > 0) { this.pos--; this.redraw(); } return true; }
+    if (data === '\x1b[C') { if (this.pos < this.line.length) { this.pos++; this.redraw(); } return true; }
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+const status = document.getElementById('status');
+const term = new Terminal({
+  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+  fontSize: 13, cursorBlink: true, convertEol: false,
+  theme: { background: '#14161a', foreground: '#d7dae0' },
+});
+term.open(document.getElementById('term'));
+
+let repl;
+try {
+  const rt = await loadDiluvium(WASM_URL, (text) => term.write(text.replace(/\n/g, '\r\n')));
+  repl = new Repl(term, rt);
+  status.textContent = rt.hasRepl
+    ? 'ready'
+    : 'ready — this build predates repl_eval, so no continuation prompts or completion';
+  term.write('Diluvium\r\n');
+  repl.redraw();
+  term.onData((d) => { if (!repl.seq(d)) repl.key(d); });
+  document.getElementById('reset').onclick = () => {
+    rt.reset(); term.write('\r\n-- kernel restarted --\r\n'); repl.pending = '';
+    repl.line = ''; repl.pos = 0; repl.redraw(); term.focus();
+  };
+  term.focus();
+} catch (err) {
+  status.textContent = 'failed';
+  term.write('\r\ncould not load ' + WASM_URL + '\r\n' + err + '\r\n');
+}
+</script>

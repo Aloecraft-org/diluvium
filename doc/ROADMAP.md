@@ -179,6 +179,34 @@ throughout.
 There is no `~=` form: it is already "not equal", so bitwise xor has no
 compound spelling. `??=` exists and short-circuits.
 
+## CLI and REPL
+
+The intelligence a REPL needs -- unfinished versus broken input,
+expression echo, completion -- is in `drepl.c`, on-top code using only the
+public C API, compiled into the amalgamation so the interpreter and the
+WASM host share one implementation. Before that it was static inside
+`lua.c`, and a browser front end could only tell "keep typing" from
+"that's wrong" by matching the text of Lua's error messages.
+
+Line editing is `dline.c`, written rather than vendored so the repository
+stays under one licence. GNU readline is gone: it was GPLv3 and, linked
+statically, larger than the whole runtime. The binary now links only libm
+and libc, and gained 13 KB. It highlights as you type, with Diluvium's own
+syntax in its own colour; `NO_COLOR`, `DILUVIUM_NO_COLOR` and `TERM=dumb`
+all turn that off.
+
+`wasm_stubs.c` exports `repl_eval`, `repl_complete` and `reset_lua` over
+the same persistent state `run_lua` uses. `doc/repl-reference.html` is a
+working browser REPL against those, verified in Chromium against a real
+released artifact, and it records the three things about the WASM build
+that are not guessable from outside: which artifact to load, that
+`__wasm_call_ctors` must be called because the module is not a WASI
+reactor, and why `run_lua` alone cannot drive a REPL.
+
+Not done: `-r` on the main binary. Emitting the analysis report there
+needs `analyze.c` in the amalgamation, since the debug build is a single
+translation unit that does not link it. `luac` still has it.
+
 ## Analyzer
 
 The determinism verdict (three-valued: deterministic / nondeterministic /
