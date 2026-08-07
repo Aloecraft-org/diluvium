@@ -2239,6 +2239,54 @@ static void deferstat (LexState *ls, int line) {
 
 
 /*
+** Diluvium: with statement.
+**
+**   withstat -> 'with' NAME '=' expr {',' NAME '=' expr} 'do' block 'end'
+**
+** Each binding becomes a to-be-closed local scoped to the block, so
+**
+**   with f = io.open(p) do ... end
+**
+** is 'do local f <close> = io.open(p) ... end' with the shape named. The
+** value must have a __close metamethod, exactly as <close> requires; a
+** non-closable one raises there rather than here.
+**
+** Lua allows only one to-be-closed variable per local statement, so
+** several bindings are emitted as consecutive locals -- which is also
+** what gives them the right closing order, last declared first closed.
+*/
+static void withstat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  BlockCnt bl;
+  luaX_next(ls);  /* skip 'with' */
+  enterblock(fs, &bl, 0);
+  do {
+    expdesc e;
+    TString *name = str_checkname(ls);
+    int toclose;
+    checknext(ls, '=');
+    new_varkind(ls, name, RDKTOCLOSE);  /* declared, not yet in scope... */
+    toclose = fs->nactvar;
+    expr(ls, &e);                       /* ...so it cannot see itself */
+    luaK_exp2nextreg(fs, &e);
+    adjustlocalvars(ls, 1);
+    checktoclose(fs, toclose);
+  } while (testnext(ls, ','));
+  checknext(ls, TK_DO);
+  statlist(ls);
+  if (!testnext(ls, TK_END))
+    luaX_syntaxerror(ls, luaO_pushfstring(ls->L,
+        "'end' expected (to close 'with' at line %d)", line));
+  leaveblock(fs);
+}
+
+
+static int iswithstat (LexState *ls) {
+  return ls->t.seminfo.ts == ls->wthn && luaX_lookahead(ls) == TK_NAME;
+}
+
+
+/*
 ** Diluvium: does a 'defer' name at the start of a statement introduce a
 ** defer statement?  Same test as 'switch': only when what follows cannot
 ** continue a call or an assignment, which excludes '(', a string and '{'
@@ -2614,6 +2662,10 @@ static void statement (LexState *ls) {
       }
       if (isdeferstat(ls)) {  /* Diluvium: stat -> deferstat */
         deferstat(ls, line);
+        break;
+      }
+      if (iswithstat(ls)) {  /* Diluvium: stat -> withstat */
+        withstat(ls, line);
         break;
       }
 #if LUA_COMPAT_GLOBAL

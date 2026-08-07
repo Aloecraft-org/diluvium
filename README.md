@@ -146,9 +146,19 @@ Everything after `::` is handed to `string.format`. It is `::` rather
 than `:` because `:` already means a method call, and `$"{obj:method()}"`
 keeps meaning exactly that.
 
+**With**
+
+``` lua
+with f = assert(io.open("data.txt")) do
+    for line in f:lines() do process(line) end
+end                      -- f is closed here, however the block is left
+```
+
+Each binding is a to-be-closed local scoped to the block, so the value
+must have a `__close` metamethod. Several bindings close in reverse order.
+
 **And coming soon:** 
-- match (switch as an expression)
-- with
+- decimal literals and a literal-suffix registry
 - and more
 
 ## Why Diluvium?

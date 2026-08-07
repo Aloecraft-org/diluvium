@@ -69,6 +69,7 @@ test_fstrings|run||
 test_nullco|run||
 test_safenav|run||
 test_switch|run||
+test_with|run||
 tpack|run||
 tracegc|run||
 utf8|run||

@@ -11,7 +11,7 @@ work it describes.
 ## Verified state
 
 Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-36 passed / 0 failed / 6 skipped locally. CI last verified the tree at
+37 passed / 0 failed / 6 skipped locally. CI last verified the tree at
 `dba073e` (run 31144117057, 34 tests) on linux-x86_64 and macos-arm64;
 `defer` landed after that and is verified on the run for its own commit.
 
@@ -25,8 +25,8 @@ Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
 | Compound assignment `+=` etc. | done (no `~=`; see below) |
 | Safe navigation `?.` / `?[` | done |
 | `switch` statement | done |
-| `match` (switch as an expression) | not started |
-| `defer` | done (`with` not started) |
+| `match` (switch as an expression) | **dropped** -- see below |
+| `defer` / `with` | done |
 | F-string format specs `{x::%.2f}` | done |
 | Literal suffix registry (`1.23d`) | not started; gated on decQuad semantics |
 
