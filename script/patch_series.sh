@@ -50,7 +50,7 @@ lundump.c   XOR unscramble for secure protos; forced copy of fixed buffers
 lundump.h   LUAC_FORMAT 0x44 (Diluvium bytecode format byte)
 luaconf.h   fixed string hash seed (deterministic pairs order)
 lua.h       Diluvium version/branding strings
-lua.c       Diluvium branding in the REPL banner
+lua.c       Diluvium branding; REPL input handling moved to drepl.c
 onelua.c    include analyze.c; rename ltests.c resetCI (amalgamation clash)
 '
 

@@ -20,6 +20,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "analyze.h"
+#include "drepl.h"
 #include "llimits.h"
 
 
@@ -562,25 +563,6 @@ static const char *get_prompt (lua_State *L, int firstline) {
   }
 }
 
-/* mark in error messages for incomplete statements */
-#define EOFMARK		"<eof>"
-#define marklen		(sizeof(EOFMARK)/sizeof(char) - 1)
-
-
-/*
-** Check whether 'status' signals a syntax error and the error
-** message at the top of the stack ends with the above mark for
-** incomplete statements.
-*/
-static int incomplete (lua_State *L, int status) {
-  if (status == LUA_ERRSYNTAX) {
-    size_t lmsg;
-    const char *msg = lua_tolstring(L, -1, &lmsg);
-    if (lmsg >= marklen && strcmp(msg + lmsg - marklen, EOFMARK) == 0)
-      return 1;
-  }
-  return 0;  /* else... */
-}
 
 
 /*
@@ -603,22 +585,6 @@ static int pushline (lua_State *L, int firstline) {
 }
 
 
-/*
-** Try to compile line on the stack as 'return <line>;'; on return, stack
-** has either compiled chunk or original line (if compilation failed).
-*/
-static int addreturn (lua_State *L) {
-  const char *line = lua_tostring(L, -1);  /* original line */
-  const char *retline = lua_pushfstring(L, "return %s;", line);
-  int status = luaL_loadbufferx(L, retline, strlen(retline), "=stdin", "t");
-  if (status == LUA_OK)
-    lua_remove(L, -2);  /* remove modified line */
-  else
-    lua_pop(L, 2);  /* pop result from 'luaL_loadbufferx' and modified line */
-  return status;
-}
-
-
 static void checklocal (const char *line) {
   static const size_t szloc = sizeof("local") - 1;
   static const char space[] = " \t";
@@ -632,47 +598,43 @@ static void checklocal (const char *line) {
 
 
 /*
-** Read multiple lines until a complete Lua statement or an error not
-** for an incomplete statement. Start with first line already read in
-** the stack.
-*/
-static int multiline (lua_State *L) {
-  size_t len;
-  const char *line = lua_tolstring(L, 1, &len);  /* get first line */
-  checklocal(line);
-  for (;;) {  /* repeat until gets a complete statement */
-    int status = luaL_loadbufferx(L, line, len, "=stdin", "t");  /* try it */
-    if (!incomplete(L, status) || !pushline(L, 0))
-      return status;  /* should not or cannot try to add continuation line */
-    lua_remove(L, -2);  /* remove error message (from incomplete line) */
-    lua_pushliteral(L, "\n");  /* add newline... */
-    lua_insert(L, -2);  /* ...between the two lines */
-    lua_concat(L, 3);  /* join them */
-    line = lua_tolstring(L, 1, &len);  /* get what is has */
-  }
-}
-
-
-/*
-** Read a line and try to load (compile) it first as an expression (by
-** adding "return " in front of it) and second as a statement. Return
-** the final status of load/call with the resulting function (if any)
-** in the top of the stack.
+** Read a line, and keep reading while it is an unfinished statement.
+**
+** Diluvium: what to make of each attempt -- a value, more input needed,
+** or a real error -- comes from 'diluvium_repl_load', which every other
+** front end shares (see drepl.h). What is left here is only the part
+** specific to a terminal: prompting for the next line and joining it on.
+**
+** Returns LUA_OK with the compiled chunk at index 1, or an error status
+** with the message there.
 */
 static int loadline (lua_State *L) {
   const char *line;
+  size_t len;
   int status;
   lua_settop(L, 0);
   if (!pushline(L, 1))
     return -1;  /* no input */
-  if ((status = addreturn(L)) != LUA_OK)  /* 'return ...' did not work? */
-    status = multiline(L);  /* try as command, maybe with continuation lines */
+  checklocal(lua_tostring(L, 1));
+  for (;;) {
+    line = lua_tolstring(L, 1, &len);
+    status = diluvium_repl_load(L, line, len, "=stdin");
+    if (status != DILUVIUM_REPL_INCOMPLETE)
+      break;
+    if (!pushline(L, 0)) {  /* input ended inside an unfinished statement */
+      status = luaL_loadbufferx(L, line, len, "=stdin", "t");
+      break;  /* report it as the syntax error it is */
+    }
+    lua_pushliteral(L, "\n");  /* join the lines... */
+    lua_insert(L, -2);          /* ...with a newline between them */
+    lua_concat(L, 3);
+  }
   line = lua_tostring(L, 1);
   if (line[0] != '\0')  /* non empty? */
     lua_saveline(line);  /* keep history */
   lua_remove(L, 1);  /* remove line from the stack */
   lua_assert(lua_gettop(L) == 1);
-  return status;
+  return (status == DILUVIUM_REPL_OK) ? LUA_OK : status;
 }
 
 
