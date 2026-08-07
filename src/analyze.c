@@ -6,7 +6,7 @@
 ** All fields are always present (no optional omissions), arrays are always
 ** arrays (never absent), and field names are snake_case throughout.
 **
-** Target: Lua 5.4.x (Diluvium fork)
+** Target: Lua 5.5.1 (Diluvium fork)
 */
 
 #define _POSIX_C_SOURCE 200809L
