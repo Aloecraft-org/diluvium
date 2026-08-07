@@ -97,6 +97,7 @@ LUAI_FUNC const char *luaX_token2str (LexState *ls, int token);
 /* Diluvium: exposed for the parser (f-strings) */
 LUAI_FUNC l_noret luaX_lexerror (LexState *ls, const char *msg, int token);
 LUAI_FUNC void luaX_read_fstring (LexState *ls, int del);
+LUAI_FUNC void luaX_read_fspec (LexState *ls);
 
 
 #endif

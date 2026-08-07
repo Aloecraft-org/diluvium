@@ -1334,23 +1334,60 @@ static void fstring (LexState *ls, expdesc *v) {
     if (last) break;
     else {  /* an interpolated expression follows */
       expdesc call, arg;
+      TString *spec = NULL;  /* the '::%.2f' part, when there is one */
       int line = ls->linenumber;
-      int freg;  /* holds 'tostring', then the result of calling it */
+      int freg = fs->freereg;  /* the call's function register */
+      int saved;
       lua_assert(ls->t.token == TK_FPART);
-      buildglobal(ls, luaX_newstring(ls, "tostring", 8), &call);
-      luaK_exp2nextreg(fs, &call);
-      freg = call.u.info;
       luaX_next(ls);  /* skip the piece; on to the expression itself */
+      /* The function cannot be emitted yet: whether this is a call to
+         tostring or to string.format is only known once the expression
+         has been read and a specification either follows or does not.
+         Reserve its register now and fill it in below -- instructions are
+         emitted in execution order, and the call comes last either way. */
+      luaK_reserveregs(fs, 1);
       expr(ls, &arg);
-      luaK_exp2nextreg(fs, &arg);  /* argument sits right after the function */
-      if (ls->t.token != '}')
+      luaK_exp2nextreg(fs, &arg);  /* the value, at 'freg + 1' */
+      if (ls->t.token == TK_DBCOLON) {  /* '::' introduces a format spec */
+        expdesc s;
+        luaX_read_fspec(ls);  /* raw text of the spec, and the '}' */
+        spec = ls->t.seminfo.ts;
+        /* string.format takes the spec first, so the value moves up one */
+        luaK_reserveregs(fs, 1);
+        luaK_codeABC(fs, OP_MOVE, freg + 2, freg + 1, 0);
+        codestring(&s, spec);
+        saved = fs->freereg;
+        fs->freereg = cast_byte(freg + 1);
+        luaK_exp2nextreg(fs, &s);  /* the spec, at 'freg + 1' */
+        fs->freereg = cast_byte(saved);
+      }
+      else if (ls->t.token != '}')
         luaX_syntaxerror(ls, "'}' expected in interpolated string");
-      init_exp(&call, VCALL, luaK_codeABC(fs, OP_CALL, freg, 2, 2));
+      /* Now the function, for the slot reserved above.  It is built at the
+         top of the stack and moved down rather than emitted straight into
+         that slot: indexing a global by a constant whose index does not
+         fit an operand needs a scratch register, and at the top that lands
+         safely above the arguments instead of on one of them. */
+      if (spec == NULL)
+        buildglobal(ls, luaX_newstring(ls, "tostring", 8), &call);
+      else {  /* string.format */
+        expdesc key;
+        buildglobal(ls, luaX_newstring(ls, "string", 6), &call);
+        luaK_exp2anyregup(fs, &call);
+        codestring(&key, luaX_newstring(ls, "format", 6));
+        luaK_indexed(fs, &call, &key);
+      }
+      saved = luaK_exp2anyreg(fs, &call);
+      luaK_codeABC(fs, OP_MOVE, freg, saved, 0);
+      fs->freereg = cast_byte(freg + ((spec == NULL) ? 2 : 3));
+      init_exp(&call, VCALL,
+               luaK_codeABC(fs, OP_CALL, freg, (spec == NULL) ? 2 : 3, 2));
       luaK_fixline(fs, line);
       fs->freereg = cast_byte(freg + 1);  /* the call leaves one result */
       luaK_exp2nextreg(fs, &call);
       n++;
-      /* the '}' is consumed by resuming the string, not by 'luaX_next' */
+      /* the '}' was consumed by resuming the string or by 'read_fspec',
+         never by 'luaX_next' */
       lua_assert(ls->lookahead.token == TK_EOS);
       luaX_read_fstring(ls, del);
     }

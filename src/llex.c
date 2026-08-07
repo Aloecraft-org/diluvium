@@ -545,6 +545,31 @@ void luaX_read_fstring (LexState *ls, int del) {
   read_fstring(ls, del);
 }
 
+
+/*
+** Diluvium: read the format specification of an interpolation, the part
+** after '::' in $"{value::%.2f}".  It is a 'string.format' directive, not
+** Lua source, so it is taken raw up to the closing '}', which this also
+** consumes so the caller can resume the literal straight afterwards.
+**
+** '::' rather than a single ':' because ':' already introduces a method
+** call, and $"{obj:method()}" has to keep meaning that.  Deciding between
+** the two would need a token of lookahead, and taking it would consume
+** the very characters the specification is made of.
+*/
+void luaX_read_fspec (LexState *ls) {
+  luaZ_resetbuffer(ls->buff);
+  while (ls->current != '}') {
+    if (ls->current == EOZ || currIsNewline(ls))
+      lexerror(ls, "unfinished format specification", TK_STRING);
+    save_and_next(ls);
+  }
+  next(ls);  /* skip '}' */
+  ls->t.token = TK_STRING;
+  ls->t.seminfo.ts = luaX_newstring(ls, luaZ_buffer(ls->buff),
+                                        luaZ_bufflen(ls->buff));
+}
+
 static int llex (LexState *ls, SemInfo *seminfo) {
   luaZ_resetbuffer(ls->buff);
   for (;;) {

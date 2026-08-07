@@ -133,10 +133,22 @@ local port = config?.server?.port ?? 8080
 `?.` and `?[` test for `nil` specifically, not for falsiness, so
 `false?.x` still raises exactly as `false.x` does.
 
+**Format Specifications**
+
+``` lua
+local pi, items = 3.14159, 42
+print($"pi is {pi::%.2f}")           -- pi is 3.14
+print($"[{items::%5d}]")             -- [   42]
+print($"{items::%#x}")               -- 0x2a
+```
+
+Everything after `::` is handed to `string.format`. It is `::` rather
+than `:` because `:` already means a method call, and `$"{obj:method()}"`
+keeps meaning exactly that.
+
 **And coming soon:** 
 - match (switch as an expression)
 - with
-- f-string format specs
 - and more
 
 ## Why Diluvium?

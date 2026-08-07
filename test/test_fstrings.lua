@@ -174,4 +174,44 @@ assert_nocompile([[return $"unterminated]], "unterminated f-string")
 assert_nocompile("return $\"a\nb\"", "raw newline inside an f-string")
 assert_nocompile([[return $ident]], "'$' must introduce a string literal")
 
+print("-- 18. Format specifications")
+-- '::' introduces a string.format directive. It is '::' and not ':'
+-- because ':' already starts a method call, which must keep working.
+local pi, n, s = 3.14159, 42, "hi"
+assert_eq($"{pi::%.2f}", "3.14", "float precision")
+assert_eq($"{pi::%.3f}", "3.142", "...rounds like string.format")
+assert_eq($"[{n::%5d}]", "[   42]", "right-aligned width")
+assert_eq($"[{s::%-6s}]", "[hi    ]", "left-aligned width")
+assert_eq($"{n::%#x}", "0x2a", "hex with the alternate flag")
+assert_eq($"{n::%o}", "52", "octal")
+assert_eq($"{pi::%e}", string.format("%e", pi), "scientific matches string.format")
+assert_eq($"{n * 2::%d}", "84", "an expression before the spec")
+assert_eq($"{t.n and 7 or 0::%03d}", "007", "and/or before the spec")
+
+assert_eq($"pi={pi::%.1f} n={n} s={s::%s}", "pi=3.1 n=42 s=hi",
+          "specified and unspecified interpolations in one string")
+assert_eq($"{pi::%.1f}{n::%d}", "3.142", "adjacent specified interpolations")
+
+-- '%s' goes through the same conversion tostring does
+assert_eq($"{nothing::%s}", "nil", "'%s' on nil")
+assert_eq($"{true::%s}", "true", "'%s' on a boolean")
+assert_eq($"{withmeta::%s}", "META", "'%s' honours __tostring")
+
+-- The spec is taken raw, so it may contain anything but a newline or '}'
+assert_eq($"{n::%d items}", "42 items", "trailing text inside the spec")
+assert_eq($"{n::%5.1f}", string.format("%5.1f", n), "width and precision")
+
+-- ':' is still a method call, inside an interpolation as anywhere else
+assert_eq($"{("ab"):rep(2)}", "abab", "a method call in an interpolation")
+assert_eq($"{("ab"):rep(2)::%s}", "abab", "a method call with a spec after it")
+
+-- nesting and escapes still work alongside specs
+assert_eq($"{ $"{pi::%.1f}" }", "3.1", "a spec inside a nested f-string")
+assert_eq($"\{{n::%d}\}", "{42}", "escaped braces around a specified value")
+
+print("-- 19. Malformed format specifications")
+assert_nocompile([[return $"{1::%d"]], "unterminated spec")
+assert_nocompile("return $\"{1::%d\n}\"", "a newline inside a spec")
+assert_nocompile([[return $"{::%d}"]], "a spec with no expression")
+
 print("\n=== All Tests Passed! ===")

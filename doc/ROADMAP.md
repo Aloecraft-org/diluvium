@@ -27,7 +27,7 @@ Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
 | `switch` statement | done |
 | `match` (switch as an expression) | not started |
 | `defer` | done (`with` not started) |
-| F-string format specs `{x:%.2f}` | not started |
+| F-string format specs `{x::%.2f}` | done |
 | Literal suffix registry (`1.23d`) | not started; gated on decQuad semantics |
 
 ### Review findings
@@ -59,9 +59,12 @@ or an embedder file does not belong in `src/`.
 
 ## Next
 
-Ordered. Each item is independently shippable.
+Nothing from the original list is outstanding. Remaining, unscheduled:
 
-1. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
+- **`match`** -- switch in expression position.
+- **`with`** -- the other half of the `defer`/`with` pairing.
+- **Literal suffix registry** (`1.23d`), gated on decQuad semantics.
+- The analyzer work below.
 
 `match` -- switch in expression position -- is deliberately separate from
 the statement form and unscheduled; the statement carries the README
@@ -135,6 +138,34 @@ accepted as a statement.
 The one shared codegen addition is `luaK_skipifnil` in `lcode.c` — the
 same EQK-against-nil test `??` uses in `luaK_infix`, with the opposite
 sense, since `condjump` and `nilK` are static there.
+
+### F-string format specs
+
+`$"{value::%.2f}"` compiles to `string.format(spec, value)` instead of
+`tostring(value)`. The spec is read raw up to the closing `}`, since it is
+a `string.format` directive rather than Lua source.
+
+It is `::` and not the `:` every other language uses, because `:` already
+introduces a method call and `$"{obj:method()}"` has to keep meaning that.
+Choosing between the two would need a token of lookahead, and taking that
+lookahead consumes the very characters the spec is made of -- so `::`,
+which cannot start a method call, avoids the problem instead of fighting
+it. No change to `suffixedexp` and no new lexer state.
+
+Which function to call is only known after the expression has been read,
+so its register is reserved up front and filled in afterwards. The
+function is built at the top of the stack and moved down, not emitted
+straight into that slot: indexing a global by a constant whose index does
+not fit an operand needs a scratch register, and at the top that lands
+above the arguments rather than on one. That costs one `MOVE` per
+interpolation, which is noise next to the `GETTABUP` and `CALL` beside it,
+and is worth a single code path with no dead work.
+
+The debug build sets `MAXINDEXRK` to 1 (see `ltests.h`), which forces that
+scratch register on every constant past the second. It caught this; a
+release build would only have shown it in a function with enough
+constants. Anything that emits code into a reserved slot should be tested
+under the debug binary for that reason.
 
 ### Compound assignment
 
