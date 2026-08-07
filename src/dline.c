@@ -237,17 +237,147 @@ static size_t width (const char *s, size_t from, size_t to) {
 }
 
 
+/* ====================================================================== */
+/* Syntax highlighting                                                    */
+/* ====================================================================== */
+
+/*
+** Colour classes. The line is classified byte by byte into this small
+** set, then drawn as runs of one colour, which keeps the drawing code
+** from having to interleave with the scanner.
+*/
+#define HL_NONE		0
+#define HL_KEYWORD	1
+#define HL_STRING	2
+#define HL_NUMBER	3
+#define HL_COMMENT	4
+#define HL_DILUVIUM	5   /* what Diluvium adds to Lua: $, ??, ?., ~function */
+
+static const char *const hlcolour[] = {
+  "\x1b[0m",    /* none    */
+  "\x1b[35m",   /* keyword: magenta */
+  "\x1b[32m",   /* string:  green   */
+  "\x1b[36m",   /* number:  cyan    */
+  "\x1b[90m",   /* comment: grey    */
+  "\x1b[33m"    /* Diluvium: yellow, so its own syntax stands out */
+};
+
+
+static const char *const hlwords[] = {
+  "and", "break", "case", "default", "defer", "do", "else", "elseif",
+  "end", "false", "for", "function", "global", "goto", "if", "in",
+  "local", "nil", "not", "or", "repeat", "return", "switch", "then",
+  "true", "until", "while", NULL
+};
+
+
+static int iskeyword (const char *s, size_t len) {
+  const char *const *w;
+  for (w = hlwords; *w != NULL; w++)
+    if (strlen(*w) == len && strncmp(*w, s, len) == 0) return 1;
+  return 0;
+}
+
+
+static int isdigitc (char c) { return c >= '0' && c <= '9'; }
+static int isnamec (char c) {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+         (c >= '0' && c <= '9') || c == '_';
+}
+
+
+/*
+** Classify every byte of the line. The whole line is scanned even when
+** only part of it is on screen, because whether a byte sits inside a
+** string or a comment depends on everything before it.
+**
+** This is a display scanner, not the real lexer: it has to make sense of
+** half-typed input, where llex would simply raise an error.
+*/
+static void classify (const char *s, size_t len, unsigned char *cls) {
+  size_t i = 0;
+  memset(cls, HL_NONE, len);
+  while (i < len) {
+    if (s[i] == '-' && i + 1 < len && s[i + 1] == '-') {
+      while (i < len) cls[i++] = HL_COMMENT;  /* to end of line */
+    }
+    else if (s[i] == '"' || s[i] == '\'') {
+      char q = s[i];
+      cls[i++] = HL_STRING;
+      while (i < len) {
+        if (s[i] == '\\' && i + 1 < len) {   /* an escape, both bytes */
+          cls[i++] = HL_STRING;
+          cls[i++] = HL_STRING;
+          continue;
+        }
+        cls[i] = HL_STRING;
+        if (s[i++] == q) break;             /* closing quote */
+      }
+    }
+    else if (s[i] == '$' && i + 1 < len && (s[i+1] == '"' || s[i+1] == '\'')) {
+      cls[i++] = HL_DILUVIUM;               /* the '$' is Diluvium's */
+    }
+    else if (s[i] == '?' && i + 1 < len && (s[i+1] == '?' || s[i+1] == '.' ||
+                                            s[i+1] == '[')) {
+      cls[i++] = HL_DILUVIUM;               /* '??', '?.', '?[' */
+      if (i < len && s[i] != '[') cls[i++] = HL_DILUVIUM;
+    }
+    else if (s[i] == '~' && i + 1 + 8 <= len &&
+             strncmp(s + i + 1, "function", 8) == 0) {
+      cls[i++] = HL_DILUVIUM;               /* a secure '~function' -- and
+                                               only that, so '~x' stays the
+                                               bitwise operator it is */
+    }
+    else if (isdigitc(s[i]) ||
+             (s[i] == '.' && i + 1 < len && isdigitc(s[i + 1]))) {
+      while (i < len && (isnamec(s[i]) || s[i] == '.' ||
+                         ((s[i] == '-' || s[i] == '+') && i > 0 &&
+                          (s[i-1] == 'e' || s[i-1] == 'E'))))
+        cls[i++] = HL_NUMBER;
+    }
+    else if (isnamec(s[i])) {
+      size_t w = i;
+      while (i < len && isnamec(s[i])) i++;
+      if (iskeyword(s + w, i - w))
+        memset(cls + w, HL_KEYWORD, i - w);
+    }
+    else i++;
+  }
+}
+
+
+/* Colour is for a terminal that wants it, and nothing else. */
+static int wantcolour (void) {
+  static int cached = -1;
+  if (cached < 0) {
+    const char *term = getenv("TERM");
+    cached = isatty(STDOUT_FILENO) &&
+             getenv("NO_COLOR") == NULL &&
+             getenv("DILUVIUM_NO_COLOR") == NULL &&
+             !(term != NULL && strcmp(term, "dumb") == 0);
+  }
+  return cached;
+}
+
+
 /*
 ** Redraw the line. Long lines scroll horizontally rather than wrapping,
 ** which keeps the whole thing on one row and the cursor arithmetic
 ** honest no matter how the terminal handles the last column.
+**
+** Only the visible slice is ever emitted, so the colour escapes -- which
+** occupy bytes but no columns -- cannot overflow the buffer however long
+** the line grows, and the cursor column is counted in characters, so they
+** do not disturb it either.
 */
 static void refresh (EditState *e) {
-  char out[DLINE_MAXLINE + 128];
+  char out[4096];
+  unsigned char cls[DLINE_MAXLINE];
   size_t start = 0, end = e->len;
   size_t curcol = width(e->buf, 0, e->pos);
   size_t avail = (e->cols > e->plen + 1) ? e->cols - e->plen - 1 : 1;
   size_t n = 0;
+  int colour = wantcolour();
   /* scroll so the cursor stays visible */
   while (curcol >= avail) {
     start = nextchar(e->buf, e->len, start);
@@ -263,7 +393,23 @@ static void refresh (EditState *e) {
   }
   out[n++] = '\r';                       /* to column 0 */
   memcpy(out + n, e->prompt, e->plen); n += e->plen;
-  memcpy(out + n, e->buf + start, end - start); n += end - start;
+  if (!colour) {
+    memcpy(out + n, e->buf + start, end - start); n += end - start;
+  }
+  else {
+    size_t i = start;
+    unsigned char cur = 0xff;             /* no colour emitted yet */
+    classify(e->buf, e->len, cls);
+    while (i < end && n + 32 < sizeof(out)) {
+      if (cls[i] != cur) {
+        cur = cls[i];
+        n += (size_t)snprintf(out + n, 16, "%s", hlcolour[cur]);
+      }
+      out[n++] = e->buf[i++];
+    }
+    if (cur != HL_NONE)
+      n += (size_t)snprintf(out + n, 16, "%s", hlcolour[HL_NONE]);
+  }
   memcpy(out + n, "\x1b[0K", 4); n += 4; /* erase what used to be there */
   n += (size_t)snprintf(out + n, 32, "\r\x1b[%dC",
                         (int)(e->plen + curcol));

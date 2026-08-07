@@ -85,15 +85,30 @@ static void laction (int i) {
 }
 
 
+static void print_usage_body (void);
+
+
 static void print_usage (const char *badoption) {
   lua_writestringerror("%s: ", progname);
   if (badoption[1] == 'e' || badoption[1] == 'l')
     lua_writestringerror("'%s' needs argument\n", badoption);
   else
     lua_writestringerror("unrecognized option '%s'\n", badoption);
+  print_usage_body();
+}
+
+
+/*
+** Diluvium: the options, printed either because one was wrong or because
+** '-h' asked. Interactive-only settings are grouped separately: they mean
+** nothing when a script was named, and listing them together with the
+** rest hides that.
+*/
+static void print_usage_body (void) {
   lua_writestringerror(
   "usage: %s [options] [script [args]]\n"
-  "Available options are:\n"
+  "\n"
+  "Options:\n"
   "  -e stat   execute string 'stat'\n"
   "  -i        enter interactive mode after executing 'script'\n"
   "  -l mod    require library 'mod' into global 'mod'\n"
@@ -101,8 +116,13 @@ static void print_usage (const char *badoption) {
   "  -v        show version information\n"
   "  -E        ignore environment variables\n"
   "  -W        turn warnings on\n"
+  "  -h        this message\n"
   "  --        stop handling options\n"
   "  -         stop handling options and execute stdin\n"
+  "\n"
+  "Interactive mode:\n"
+  "  Tab completes names, and the arrow keys walk the history kept in\n"
+  "  ~/.diluvium_history. Set NO_COLOR to turn off syntax highlighting.\n"
   ,
   progname);
 }
@@ -173,6 +193,52 @@ static int docall (lua_State *L, int narg, int nres) {
 static void print_version (void) {
   lua_writestring(LUA_COPYRIGHT, strlen(LUA_COPYRIGHT));
   lua_writeline();
+}
+
+
+/*
+** Diluvium: what an interactive session prints before the first prompt.
+** The version line alone said nothing about how to get out again or what
+** the editor can do, which is the first thing anyone meeting a REPL
+** wants to know.
+**
+** 'help' is defined only for interactive sessions, and only when nothing
+** of that name exists already, so a script's own 'help' is never
+** shadowed.
+*/
+static int diluvium_help (lua_State *L) {
+  static const char msg[] =
+    "Diluvium extends Lua with:\n"
+    "  $\"text {expr}\"       string interpolation, {x::%.2f} to format\n"
+    "  a ?? b               b when a is nil\n"
+    "  a?.b   a?[k]         nil when a is nil, skipping the rest\n"
+    "  x += 1               and -= *= /= //= %= ^= ..= |= &= <<= >>= ?\?=\n"
+    "  switch x do ... end  case a, b then ... default ... end\n"
+    "  defer stat           runs however the block is left\n"
+    "  ~function f() end    obfuscated at rest\n"
+    "\n"
+    "In this REPL:\n"
+    "  Tab       complete a name\n"
+    "  Up/Down   history, kept in ~/.diluvium_history\n"
+    "  Ctrl-A/E  start/end of line     Ctrl-W  delete word\n"
+    "  Ctrl-C    abandon the line      Ctrl-D  exit\n"
+    "\n"
+    "Set NO_COLOR to turn off syntax highlighting.\n";
+  (void)L;
+  lua_writestring(msg, sizeof(msg) - 1);
+  return 0;
+}
+
+
+static void repl_intro (lua_State *L) {
+  lua_getglobal(L, "help");
+  if (lua_isnil(L, -1)) {  /* nothing called 'help' already? */
+    lua_pushcfunction(L, diluvium_help);
+    lua_setglobal(L, "help");
+    lua_writestringerror("%s\n", "type 'help()' for what Diluvium adds, "
+                                  "Ctrl-D to exit");
+  }
+  lua_pop(L, 1);
 }
 
 
@@ -279,6 +345,7 @@ static int handle_script (lua_State *L, char **argv) {
 #define has_v		4	/* -v */
 #define has_e		8	/* -e */
 #define has_E		16	/* -E */
+#define has_h		32	/* -h (Diluvium) */
 
 
 /*
@@ -320,6 +387,11 @@ static int collectargs (char **argv, int *first) {
       case 'W':
         if (argv[i][2] != '\0')  /* extra characters? */
           return has_error;  /* invalid option */
+        break;
+      case 'h':  /* Diluvium: print the options and stop */
+        if (argv[i][2] != '\0')  /* extra characters? */
+          return has_error;  /* invalid option */
+        args |= has_h;
         break;
       case 'i':
         args |= has_i;  /* (-i implies -v) *//* FALLTHROUGH */
@@ -613,6 +685,10 @@ static int pmain (lua_State *L) {
     print_usage(argv[script]);  /* 'script' has index of bad arg. */
     return 0;
   }
+  if (args & has_h) {  /* Diluvium: option '-h'? */
+    print_usage_body();
+    return 0;
+  }
   if (args & has_v)  /* option '-v'? */
     print_version();
   if (args & has_E) {  /* option '-E'? */
@@ -634,11 +710,14 @@ static int pmain (lua_State *L) {
     if (handle_script(L, argv + script) != LUA_OK)
       return 0;  /* interrupt in case of error */
   }
-  if (args & has_i)  /* -i option? */
+  if (args & has_i) {  /* -i option? */
+    repl_intro(L);  /* '-i' already printed the version, via has_v */
     doREPL(L);  /* do read-eval-print loop */
+  }
   else if (script < 1 && !(args & (has_e | has_v))) { /* no active option? */
     if (lua_stdin_is_tty()) {  /* running in interactive mode? */
       print_version();
+      repl_intro(L);
       doREPL(L);  /* do read-eval-print loop */
     }
     else dofile(L, NULL);  /* executes stdin as a file */
