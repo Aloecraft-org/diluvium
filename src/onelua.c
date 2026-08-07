@@ -120,6 +120,13 @@
 #include "linit.c"
 #endif
 
+/* Diluvium REPL support -- on-top code, public C API only. In the
+   amalgamation so the interpreter and the WASM host share it. */
+#ifndef MAKE_LUAC
+#include "drepl.c"
+#include "dline.c"
+#endif
+
 /* test library -- used only for internal development */
 #if defined(LUA_DEBUG)
 /* Since Lua 5.5, ltests.c and lstate.c each define a private static

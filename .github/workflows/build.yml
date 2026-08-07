@@ -257,14 +257,49 @@ jobs:
 
           cat release_dist/BUILDINFO.txt
 
+      # Sizes and timings, the two things BUILDINFO.txt never carried. It
+      # ships as a release asset, so every release is a permanent data
+      # point and history needs no branch to push to.
+      - name: Build statistics
+        run: |
+          set -eu
+          script/build_stats.sh record --dist release_dist --out release_dist/BUILDSTATS.json
+          cat release_dist/BUILDSTATS.json
+
+      # Against the last release, so a size jump is attributed while the
+      # change that caused it is still in hand. Best effort: the first
+      # release, or a run without one, simply has nothing to compare to.
+      - name: Compare with the previous release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          if gh release download --pattern BUILDSTATS.json --dir prev 2>/dev/null; then
+            {
+              echo "### Size against the previous release"
+              echo ""
+              echo '```'
+              script/build_stats.sh compare prev/BUILDSTATS.json release_dist/BUILDSTATS.json || true
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no previous BUILDSTATS.json to compare against" \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Job summary
         run: |
           {
             echo "### Build ${{ needs.resolve.outputs.version }} @ \`${{ needs.resolve.outputs.short_sha }}\`"
             echo ""
-            echo "| Artifact | SHA256 |"
-            echo "| :--- | :--- |"
-            awk '{ printf "| `%s` | `%s` |\n", $2, substr($1,1,16) "..." }' release_dist/SHA256SUMS.txt
+            echo "| Artifact | Size | SHA256 |"
+            echo "| :--- | ---: | :--- |"
+            while read -r sum name; do
+              bytes=$(wc -c < "release_dist/$name" | tr -d ' ')
+              printf "| \`%s\` | %s KB | \`%s\` |\n" \
+                "$name" "$(awk -v b="$bytes" 'BEGIN{printf "%.1f", b/1024}')" \
+                "$(printf '%s' "$sum" | cut -c1-16)..."
+            done < release_dist/SHA256SUMS.txt
           } >> "$GITHUB_STEP_SUMMARY"
 
       - uses: actions/upload-artifact@v4

@@ -22,14 +22,14 @@ UNAME_S := $(shell uname -s)
 UNAME_Sl := $(shell uname -s | tr 'A-Z' 'a-z')
 ARCHl := $(shell uname -m | tr 'A-Z' 'a-z')
 
-PLAT_CFLAGS  := -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE
+PLAT_CFLAGS  := -std=c99 -DLUA_USE_LINUX
 PLAT_LDFLAGS := -Wl,-E
-PLAT_LIBS    := -ldl -lreadline
+PLAT_LIBS    := -ldl
 
 ifeq ($(UNAME_S),Darwin)
-    PLAT_CFLAGS  := -std=c99 -DLUA_USE_MACOSX -DLUA_USE_READLINE
+    PLAT_CFLAGS  := -std=c99 -DLUA_USE_MACOSX
     PLAT_LDFLAGS := 
-    PLAT_LIBS    := -lreadline
+    PLAT_LIBS    :=
 endif
 
 ifneq (,$(findstring MINGW,$(UNAME_S)))
@@ -43,15 +43,12 @@ endif
 # TODO: Add this later: -include script/platform.mk
 
 # Special flags required by the test suite.
-# The debug binary does not use readline (no -DLUA_USE_READLINE), so it does
-# not link it either -- that keeps the test build dependency-free on CI runners.
+# Line editing is dline.c, which needs nothing but termios, so the test
+# build and the release build now use the same editor and neither links a
+# third-party library for it.
 TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_LINUX -Wl,-E -ldl
 
 ifeq ($(UNAME_S),Darwin)
-    # Use LUA_USE_POSIX, not LUA_USE_MACOSX: since 5.5 the latter defines
-    # LUA_USE_READLINE, which would make the REPL (compiled into the test
-    # binary) reference -lreadline symbols the test build never links.
-    # On Linux this does not arise -- 5.5 dlopens readline at run time.
     TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_POSIX
 endif
 
@@ -88,7 +85,7 @@ _portable_static_lib: _build_step0
 		gcc -O3 -c wasm_stubs.c -o wasm_stubs.o -fPIC && \
 		gcc -O3 -c analyze.c -o analyze.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY  && \
 		gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY  && \
-		ar rcs /data/libdiluvium_musl_$(ARCHl).a onelua.o wasm_stubs.o analyze.o"
+		ar rcs /data/libdiluvium_musl_$(ARCHl).a onelua.o wasm_stubs.o diluvium_api.o analyze.o"
 	@cp .data/libdiluvium_musl_$(ARCHl).a dist/libdiluvium_musl_$(ARCHl).a
 
 _wasm_build_step0: _build_step0
@@ -235,14 +232,14 @@ build_platform: _build_step0 _native_static_lib
 build_linux_static: _build_step0 _portable_static_lib
 	@echo '=== Building Static Alpine Binary ==='
 	$(PODMAN_RUN_ALPINE) sh -c "\
-		apk add --no-cache gcc make musl-dev ncurses-static readline-static readline-dev && \
+		apk add --no-cache gcc make musl-dev && \
 		sed -i 's/-march=native//g' makefile && \
 		make clean && \
 		make all \
 			CC=gcc \
-			MYCFLAGS='-static -Os -std=c99 -DLUA_USE_LINUX -DLUA_USE_READLINE -DMAKE_LUAC' \
+			MYCFLAGS='-static -Os -std=c99 -DLUA_USE_LINUX -DMAKE_LUAC' \
 			MYLDFLAGS='-static' \
-			MYLIBS='-lreadline -lncurses' && \
+			MYLIBS='' && \
 		echo '--- Building Compiler (luac) ---' && \
 		gcc -o /data/luac onelua.c analyze.c diluvium_api.c -static -Os -std=c99 -DMAKE_LUAC -lm"
 

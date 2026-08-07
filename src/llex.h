@@ -77,7 +77,12 @@ typedef struct LexState {
   TString *envn;  /* environment variable name */
   TString *brkn;  /* "break" name (used as a label) */
   TString *glbn;  /* "global" name (when not a reserved word) */
-  int fstring_del;  /* Diluvium: delimiter of the f-string being lexed */
+  TString *swtn;  /* Diluvium: "switch" name (a contextual keyword) */
+  TString *dfrn;  /* Diluvium: "defer" name (a contextual keyword) */
+  TString *wthn;  /* Diluvium: "with" name (a contextual keyword) */
+  int fstring_del;  /* Diluvium: delimiter of the f-string just opened
+                       (handed to the parser, which then keeps its own
+                       copy, so nested f-strings do not clobber it) */
   int encrypted_flag;  /* Diluvium: next function is a secure (~) function */
 } LexState;
 
@@ -93,6 +98,7 @@ LUAI_FUNC const char *luaX_token2str (LexState *ls, int token);
 /* Diluvium: exposed for the parser (f-strings) */
 LUAI_FUNC l_noret luaX_lexerror (LexState *ls, const char *msg, int token);
 LUAI_FUNC void luaX_read_fstring (LexState *ls, int del);
+LUAI_FUNC void luaX_read_fspec (LexState *ls);
 
 
 #endif

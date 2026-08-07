@@ -20,6 +20,8 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "analyze.h"
+#include "drepl.h"
+#include "dline.h"
 #include "llimits.h"
 
 
@@ -29,11 +31,6 @@
 
 #if !defined(LUA_INIT_VAR)
 #define LUA_INIT_VAR		"LUA_INIT"
-#endif
-
-/* Name of the environment variable with the name of the readline library */
-#if !defined(LUA_RLLIB_VAR)
-#define LUA_RLLIB_VAR		"LUA_READLINELIB"
 #endif
 
 
@@ -88,15 +85,30 @@ static void laction (int i) {
 }
 
 
+static void print_usage_body (void);
+
+
 static void print_usage (const char *badoption) {
   lua_writestringerror("%s: ", progname);
   if (badoption[1] == 'e' || badoption[1] == 'l')
     lua_writestringerror("'%s' needs argument\n", badoption);
   else
     lua_writestringerror("unrecognized option '%s'\n", badoption);
+  print_usage_body();
+}
+
+
+/*
+** Diluvium: the options, printed either because one was wrong or because
+** '-h' asked. Interactive-only settings are grouped separately: they mean
+** nothing when a script was named, and listing them together with the
+** rest hides that.
+*/
+static void print_usage_body (void) {
   lua_writestringerror(
   "usage: %s [options] [script [args]]\n"
-  "Available options are:\n"
+  "\n"
+  "Options:\n"
   "  -e stat   execute string 'stat'\n"
   "  -i        enter interactive mode after executing 'script'\n"
   "  -l mod    require library 'mod' into global 'mod'\n"
@@ -104,8 +116,13 @@ static void print_usage (const char *badoption) {
   "  -v        show version information\n"
   "  -E        ignore environment variables\n"
   "  -W        turn warnings on\n"
+  "  -h        this message\n"
   "  --        stop handling options\n"
   "  -         stop handling options and execute stdin\n"
+  "\n"
+  "Interactive mode:\n"
+  "  Tab completes names, and the arrow keys walk the history kept in\n"
+  "  ~/.diluvium_history. Set NO_COLOR to turn off syntax highlighting.\n"
   ,
   progname);
 }
@@ -176,6 +193,52 @@ static int docall (lua_State *L, int narg, int nres) {
 static void print_version (void) {
   lua_writestring(LUA_COPYRIGHT, strlen(LUA_COPYRIGHT));
   lua_writeline();
+}
+
+
+/*
+** Diluvium: what an interactive session prints before the first prompt.
+** The version line alone said nothing about how to get out again or what
+** the editor can do, which is the first thing anyone meeting a REPL
+** wants to know.
+**
+** 'help' is defined only for interactive sessions, and only when nothing
+** of that name exists already, so a script's own 'help' is never
+** shadowed.
+*/
+static int diluvium_help (lua_State *L) {
+  static const char msg[] =
+    "Diluvium extends Lua with:\n"
+    "  $\"text {expr}\"       string interpolation, {x::%.2f} to format\n"
+    "  a ?? b               b when a is nil\n"
+    "  a?.b   a?[k]         nil when a is nil, skipping the rest\n"
+    "  x += 1               and -= *= /= //= %= ^= ..= |= &= <<= >>= ?\?=\n"
+    "  switch x do ... end  case a, b then ... default ... end\n"
+    "  defer stat           runs however the block is left\n"
+    "  ~function f() end    obfuscated at rest\n"
+    "\n"
+    "In this REPL:\n"
+    "  Tab       complete a name\n"
+    "  Up/Down   history, kept in ~/.diluvium_history\n"
+    "  Ctrl-A/E  start/end of line     Ctrl-W  delete word\n"
+    "  Ctrl-C    abandon the line      Ctrl-D  exit\n"
+    "\n"
+    "Set NO_COLOR to turn off syntax highlighting.\n";
+  (void)L;
+  lua_writestring(msg, sizeof(msg) - 1);
+  return 0;
+}
+
+
+static void repl_intro (lua_State *L) {
+  lua_getglobal(L, "help");
+  if (lua_isnil(L, -1)) {  /* nothing called 'help' already? */
+    lua_pushcfunction(L, diluvium_help);
+    lua_setglobal(L, "help");
+    lua_writestringerror("%s\n", "type 'help()' for what Diluvium adds, "
+                                  "Ctrl-D to exit");
+  }
+  lua_pop(L, 1);
 }
 
 
@@ -282,6 +345,7 @@ static int handle_script (lua_State *L, char **argv) {
 #define has_v		4	/* -v */
 #define has_e		8	/* -e */
 #define has_E		16	/* -E */
+#define has_h		32	/* -h (Diluvium) */
 
 
 /*
@@ -323,6 +387,11 @@ static int collectargs (char **argv, int *first) {
       case 'W':
         if (argv[i][2] != '\0')  /* extra characters? */
           return has_error;  /* invalid option */
+        break;
+      case 'h':  /* Diluvium: print the options and stop */
+        if (argv[i][2] != '\0')  /* extra characters? */
+          return has_error;  /* invalid option */
+        args |= has_h;
         break;
       case 'i':
         args |= has_i;  /* (-i implies -v) *//* FALLTHROUGH */
@@ -448,103 +517,16 @@ static int handle_luainit (lua_State *L) {
 
 #endif				/* } */
 
-
 /*
-** * lua_initreadline initializes the readline system.
-** * lua_readline defines how to show a prompt and then read a line from
-**   the standard input.
-** * lua_saveline defines how to "save" a read line in a "history".
-** * lua_freeline defines how to free a line read by lua_readline.
+** Diluvium: line editing is dline.c rather than GNU readline. See
+** dline.h for why -- licence and size, and the fact that readline could
+** never be reached from the WASM build, so the native and browser REPLs
+** shared no editing code at all.
+**
+** Where there is no terminal, dline falls back to plain buffered input,
+** which is how stock Lua behaves when built without readline.
 */
-
-#if !defined(lua_readline)	/* { */
-/* Otherwise, all previously listed functions should be defined. */
-
-#if defined(LUA_USE_READLINE)	/* { */
-/* Lua will be linked with '-lreadline' */
-
-#include <readline/readline.h>
-#include <readline/history.h>
-
-#define lua_initreadline(L)	((void)L, rl_readline_name="lua")
-#define lua_readline(buff,prompt)	((void)buff, readline(prompt))
-#define lua_saveline(line)	add_history(line)
-#define lua_freeline(line)	free(line)
-
-#else		/* }{ */
-/* use dynamically loaded readline (or nothing) */
-
-/* pointer to 'readline' function (if any) */
-typedef char *(*l_readlineT) (const char *prompt);
-static l_readlineT l_readline = NULL;
-
-/* pointer to 'add_history' function (if any) */
-typedef void (*l_addhistT) (const char *string);
-static l_addhistT l_addhist = NULL;
-
-
-static char *lua_readline (char *buff, const char *prompt) {
-  if (l_readline != NULL)  /* is there a 'readline'? */
-    return (*l_readline)(prompt);  /* use it */
-  else {  /* emulate 'readline' over 'buff' */
-    fputs(prompt, stdout);
-    fflush(stdout);  /* show prompt */
-    return fgets(buff, LUA_MAXINPUT, stdin);  /* read line */
-  }
-}
-
-
-static void lua_saveline (const char *line) {
-  if (l_addhist != NULL)  /* is there an 'add_history'? */
-    (*l_addhist)(line);  /* use it */
-  /* else nothing to be done */
-}
-
-
-static void lua_freeline (char *line) {
-  if (l_readline != NULL)  /* is there a 'readline'? */
-    free(line);  /* free line created by it */
-  /* else 'lua_readline' used an automatic buffer; nothing to free */
-}
-
-
-#if defined(LUA_USE_DLOPEN) && defined(LUA_READLINELIB)		/* { */
-/* try to load 'readline' dynamically */
-
-#include <dlfcn.h>
-
-static void lua_initreadline (lua_State *L) {
-  const char *rllib = l_getenv(LUA_RLLIB_VAR);  /* name of readline library */
-  void *lib;  /* library handle */
-  if (rllib == NULL)  /* no environment variable? */
-    rllib = LUA_READLINELIB;  /* use default name */
-  lib = dlopen(rllib, RTLD_NOW | RTLD_LOCAL);
-  if (lib != NULL) {
-    const char **name = cast(const char**, dlsym(lib, "rl_readline_name"));
-    if (name != NULL)
-      *name = "lua";
-    l_readline = cast(l_readlineT, cast_func(dlsym(lib, "readline")));
-    l_addhist = cast(l_addhistT, cast_func(dlsym(lib, "add_history")));
-    if (l_readline != NULL)  /* could load readline function? */
-      return;  /* everything ok */
-    /* else emit a warning */
-  }
-  lua_warning(L, "unable to load readline library '", 1);
-  lua_warning(L, rllib, 1);
-  lua_warning(L, "'", 0);
-}
-
-#else		/* }{ */
-/* no dlopen or LUA_READLINELIB undefined */
-
-/* Leave pointers with NULL */
-#define lua_initreadline(L)	((void)L)
-
-#endif		/* } */
-
-#endif				/* } */
-
-#endif				/* } */
+#define lua_saveline(line)	diluvium_history_add(line)
 
 
 /*
@@ -562,35 +544,15 @@ static const char *get_prompt (lua_State *L, int firstline) {
   }
 }
 
-/* mark in error messages for incomplete statements */
-#define EOFMARK		"<eof>"
-#define marklen		(sizeof(EOFMARK)/sizeof(char) - 1)
-
-
-/*
-** Check whether 'status' signals a syntax error and the error
-** message at the top of the stack ends with the above mark for
-** incomplete statements.
-*/
-static int incomplete (lua_State *L, int status) {
-  if (status == LUA_ERRSYNTAX) {
-    size_t lmsg;
-    const char *msg = lua_tolstring(L, -1, &lmsg);
-    if (lmsg >= marklen && strcmp(msg + lmsg - marklen, EOFMARK) == 0)
-      return 1;
-  }
-  return 0;  /* else... */
-}
 
 
 /*
 ** Prompt the user, read a line, and push it into the Lua stack.
 */
 static int pushline (lua_State *L, int firstline) {
-  char buffer[LUA_MAXINPUT];
   size_t l;
   const char *prmt = get_prompt(L, firstline);
-  char *b = lua_readline(buffer, prmt);
+  char *b = diluvium_readline(L, prmt);
   lua_pop(L, 1);  /* remove prompt */
   if (b == NULL)
     return 0;  /* no input */
@@ -598,24 +560,8 @@ static int pushline (lua_State *L, int firstline) {
   if (l > 0 && b[l-1] == '\n')  /* line ends with newline? */
     b[--l] = '\0';  /* remove it */
   lua_pushlstring(L, b, l);
-  lua_freeline(b);
+  diluvium_freeline(b);
   return 1;
-}
-
-
-/*
-** Try to compile line on the stack as 'return <line>;'; on return, stack
-** has either compiled chunk or original line (if compilation failed).
-*/
-static int addreturn (lua_State *L) {
-  const char *line = lua_tostring(L, -1);  /* original line */
-  const char *retline = lua_pushfstring(L, "return %s;", line);
-  int status = luaL_loadbufferx(L, retline, strlen(retline), "=stdin", "t");
-  if (status == LUA_OK)
-    lua_remove(L, -2);  /* remove modified line */
-  else
-    lua_pop(L, 2);  /* pop result from 'luaL_loadbufferx' and modified line */
-  return status;
 }
 
 
@@ -632,47 +578,43 @@ static void checklocal (const char *line) {
 
 
 /*
-** Read multiple lines until a complete Lua statement or an error not
-** for an incomplete statement. Start with first line already read in
-** the stack.
-*/
-static int multiline (lua_State *L) {
-  size_t len;
-  const char *line = lua_tolstring(L, 1, &len);  /* get first line */
-  checklocal(line);
-  for (;;) {  /* repeat until gets a complete statement */
-    int status = luaL_loadbufferx(L, line, len, "=stdin", "t");  /* try it */
-    if (!incomplete(L, status) || !pushline(L, 0))
-      return status;  /* should not or cannot try to add continuation line */
-    lua_remove(L, -2);  /* remove error message (from incomplete line) */
-    lua_pushliteral(L, "\n");  /* add newline... */
-    lua_insert(L, -2);  /* ...between the two lines */
-    lua_concat(L, 3);  /* join them */
-    line = lua_tolstring(L, 1, &len);  /* get what is has */
-  }
-}
-
-
-/*
-** Read a line and try to load (compile) it first as an expression (by
-** adding "return " in front of it) and second as a statement. Return
-** the final status of load/call with the resulting function (if any)
-** in the top of the stack.
+** Read a line, and keep reading while it is an unfinished statement.
+**
+** Diluvium: what to make of each attempt -- a value, more input needed,
+** or a real error -- comes from 'diluvium_repl_load', which every other
+** front end shares (see drepl.h). What is left here is only the part
+** specific to a terminal: prompting for the next line and joining it on.
+**
+** Returns LUA_OK with the compiled chunk at index 1, or an error status
+** with the message there.
 */
 static int loadline (lua_State *L) {
   const char *line;
+  size_t len;
   int status;
   lua_settop(L, 0);
   if (!pushline(L, 1))
     return -1;  /* no input */
-  if ((status = addreturn(L)) != LUA_OK)  /* 'return ...' did not work? */
-    status = multiline(L);  /* try as command, maybe with continuation lines */
+  checklocal(lua_tostring(L, 1));
+  for (;;) {
+    line = lua_tolstring(L, 1, &len);
+    status = diluvium_repl_load(L, line, len, "=stdin");
+    if (status != DILUVIUM_REPL_INCOMPLETE)
+      break;
+    if (!pushline(L, 0)) {  /* input ended inside an unfinished statement */
+      status = luaL_loadbufferx(L, line, len, "=stdin", "t");
+      break;  /* report it as the syntax error it is */
+    }
+    lua_pushliteral(L, "\n");  /* join the lines... */
+    lua_insert(L, -2);          /* ...with a newline between them */
+    lua_concat(L, 3);
+  }
   line = lua_tostring(L, 1);
   if (line[0] != '\0')  /* non empty? */
     lua_saveline(line);  /* keep history */
   lua_remove(L, 1);  /* remove line from the stack */
   lua_assert(lua_gettop(L) == 1);
-  return status;
+  return (status == DILUVIUM_REPL_OK) ? LUA_OK : status;
 }
 
 
@@ -699,14 +641,17 @@ static void l_print (lua_State *L) {
 static void doREPL (lua_State *L) {
   int status;
   const char *oldprogname = progname;
+  const char *histfile = diluvium_history_path();
   progname = NULL;  /* no 'progname' on errors in interactive mode */
-  lua_initreadline(L);
+  diluvium_history_load(histfile);  /* absent or unreadable is fine */
   while ((status = loadline(L)) != -1) {
     if (status == LUA_OK)
       status = docall(L, 0, LUA_MULTRET);
     if (status == LUA_OK) l_print(L);
     else report(L, status);
   }
+  diluvium_history_save(histfile);
+  diluvium_history_free();
   lua_settop(L, 0);  /* clear stack */
   lua_writeline();
   progname = oldprogname;
@@ -740,6 +685,10 @@ static int pmain (lua_State *L) {
     print_usage(argv[script]);  /* 'script' has index of bad arg. */
     return 0;
   }
+  if (args & has_h) {  /* Diluvium: option '-h'? */
+    print_usage_body();
+    return 0;
+  }
   if (args & has_v)  /* option '-v'? */
     print_version();
   if (args & has_E) {  /* option '-E'? */
@@ -761,11 +710,14 @@ static int pmain (lua_State *L) {
     if (handle_script(L, argv + script) != LUA_OK)
       return 0;  /* interrupt in case of error */
   }
-  if (args & has_i)  /* -i option? */
+  if (args & has_i) {  /* -i option? */
+    repl_intro(L);  /* '-i' already printed the version, via has_v */
     doREPL(L);  /* do read-eval-print loop */
+  }
   else if (script < 1 && !(args & (has_e | has_v))) { /* no active option? */
     if (lua_stdin_is_tty()) {  /* running in interactive mode? */
       print_version();
+      repl_intro(L);
       doREPL(L);  /* do read-eval-print loop */
     }
     else dofile(L, NULL);  /* executes stdin as a file */

@@ -38,11 +38,11 @@ FORK_POINT=7579fc9d7ed90240487251dfb69168f8e64e9294
 # Core files that are allowed to differ from upstream, one per line:
 #   <file>  <reason>
 CORE_PATCH_ALLOWLIST='
-llex.c      f-strings ($"..."), ?? token, $ must introduce a string
-llex.h      TK_2Q/TK_FPART tokens, fstring_del/encrypted_flag on LexState
-lparser.c   ~function statement forms, TK_FPART in simpleexp, ?? operator entry
-lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_stringK export
-lcode.h     OPR_2Q enum entry, luaK_stringK export
+llex.c      f-strings ($"..."), ?? token, $ must introduce a string, contextual keyword names
+llex.h      TK_2Q/TK_FPART tokens, fstring_del/encrypted_flag, contextual keyword names
+lparser.c   ~function forms, f-string codegen, switch, defer, with, compound assignment, ?? and ?.
+lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_skipifnil for ?.
+lcode.h     OPR_2Q enum entry, luaK_skipifnil export
 lobject.h   is_encrypted flag on Proto
 lfunc.c     is_encrypted initialization
 ldump.c     XOR scramble of code/constant strings for secure protos
@@ -50,7 +50,7 @@ lundump.c   XOR unscramble for secure protos; forced copy of fixed buffers
 lundump.h   LUAC_FORMAT 0x44 (Diluvium bytecode format byte)
 luaconf.h   fixed string hash seed (deterministic pairs order)
 lua.h       Diluvium version/branding strings
-lua.c       Diluvium branding in the REPL banner
+lua.c       Diluvium branding; REPL input handling moved to drepl.c
 onelua.c    include analyze.c; rename ltests.c resetCI (amalgamation clash)
 '
 

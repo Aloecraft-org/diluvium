@@ -1227,10 +1227,26 @@ static void primaryexp (LexState *ls, expdesc *v) {
 }
 
 
-static void suffixedexp (LexState *ls, expdesc *v) {
-  /* suffixedexp ->
-       primaryexp { '.' NAME | '[' exp ']' | ':' NAME funcargs | funcargs } */
+/*
+** suffixedexp ->
+**    primaryexp { '.' NAME | '[' exp ']' | ':' NAME funcargs | funcargs
+**               | '?' ('.' NAME | '[' exp ']') }
+**
+** Diluvium: '?.' and '?[' are safe navigation.  When the value to their
+** left is nil the whole remaining chain is skipped and the result is nil,
+** so 'a?.b.c()' neither indexes nor calls anything once 'a' is nil -- the
+** same reach as C# and JavaScript, not a single-step check.
+**
+** Each '?' contributes a jump to 'nilexit'; they all land on a LOADNIL
+** into the register the finished chain occupies, which is why the result
+** is forced into a register whenever safe navigation was used.  That also
+** means such a chain is no longer an assignable variable or a bare call,
+** so 'a?.b = 1' is rejected, and 'safenav' lets 'exprstat' still accept
+** 'a?.b()' as a statement.
+*/
+static void suffixedexp (LexState *ls, expdesc *v, int *safenav) {
   FuncState *fs = ls->fs;
+  int nilexit = NO_JUMP;  /* jumps taken when a '?' met nil */
   primaryexp(ls, v);
   for (;;) {
     switch (ls->t.token) {
@@ -1258,9 +1274,131 @@ static void suffixedexp (LexState *ls, expdesc *v) {
         funcargs(ls, v);
         break;
       }
-      default: return;
+      case '?': {  /* Diluvium: safe navigation */
+        int nxt = luaX_lookahead(ls);
+        if (nxt != '.' && nxt != '[')
+          goto done;  /* a '?' that indexes nothing is not ours */
+        luaK_concat(fs, &nilexit, luaK_skipifnil(fs, v));
+        luaX_next(ls);  /* skip '?'; the '.' or '[' is handled next round */
+        break;
+      }
+      default: goto done;
     }
   }
+ done:
+  if (nilexit != NO_JUMP) {  /* close the safe-navigation chain */
+    int over;
+    luaK_exp2nextreg(fs, v);  /* the chain's value needs a register... */
+    over = luaK_jump(fs);
+    luaK_patchtohere(fs, nilexit);  /* ...which a nil anywhere in it... */
+    luaK_nil(fs, v->u.info, 1);     /* ...leaves as nil instead */
+    luaK_patchtohere(fs, over);
+    if (safenav != NULL) *safenav = 1;
+  }
+}
+
+
+/*
+** Diluvium: interpolated string, $"text{expr}text".
+**
+** The lexer hands over one piece at a time: TK_FPART for a literal that
+** ended at a '{', TK_STRING for the one that ended at the delimiter.
+** Each piece -- literal or interpolated -- is laid down in its own
+** register and a single OP_CONCAT folds the whole range, which is what
+** 'a .. b .. c' compiles to.  Empty literal pieces (adjacent
+** placeholders, or a string that starts or ends with one) are skipped
+** rather than concatenated as "".
+**
+** Interpolated expressions are wrapped in a call to _ENV.tostring, so
+** that nil, booleans and tables interpolate instead of raising a concat
+** error, and __tostring is honoured.  The lookup goes through _ENV and
+** not the enclosing scope on purpose: a local named 'tostring' must not
+** silently change what an f-string means, while a sandbox that installs
+** its own _ENV should.
+*/
+static void fstring (LexState *ls, expdesc *v) {
+  FuncState *fs = ls->fs;
+  int del = ls->fstring_del;  /* our delimiter; a nested f-string inside an
+                                 interpolation overwrites the shared field */
+  int base = fs->freereg;  /* first register of the concatenation range */
+  int n = 0;  /* pieces laid down so far */
+  for (;;) {
+    TString *lit = ls->t.seminfo.ts;
+    int last = (ls->t.token == TK_STRING);  /* piece ended the string? */
+    if (tsslen(lit) > 0) {  /* skip empty literal pieces */
+      expdesc piece;
+      codestring(&piece, lit);
+      luaK_exp2nextreg(fs, &piece);
+      n++;
+    }
+    if (last) break;
+    else {  /* an interpolated expression follows */
+      expdesc call, arg;
+      TString *spec = NULL;  /* the '::%.2f' part, when there is one */
+      int line = ls->linenumber;
+      int freg = fs->freereg;  /* the call's function register */
+      int saved;
+      lua_assert(ls->t.token == TK_FPART);
+      luaX_next(ls);  /* skip the piece; on to the expression itself */
+      /* The function cannot be emitted yet: whether this is a call to
+         tostring or to string.format is only known once the expression
+         has been read and a specification either follows or does not.
+         Reserve its register now and fill it in below -- instructions are
+         emitted in execution order, and the call comes last either way. */
+      luaK_reserveregs(fs, 1);
+      expr(ls, &arg);
+      luaK_exp2nextreg(fs, &arg);  /* the value, at 'freg + 1' */
+      if (ls->t.token == TK_DBCOLON) {  /* '::' introduces a format spec */
+        expdesc s;
+        luaX_read_fspec(ls);  /* raw text of the spec, and the '}' */
+        spec = ls->t.seminfo.ts;
+        /* string.format takes the spec first, so the value moves up one */
+        luaK_reserveregs(fs, 1);
+        luaK_codeABC(fs, OP_MOVE, freg + 2, freg + 1, 0);
+        codestring(&s, spec);
+        saved = fs->freereg;
+        fs->freereg = cast_byte(freg + 1);
+        luaK_exp2nextreg(fs, &s);  /* the spec, at 'freg + 1' */
+        fs->freereg = cast_byte(saved);
+      }
+      else if (ls->t.token != '}')
+        luaX_syntaxerror(ls, "'}' expected in interpolated string");
+      /* Now the function, for the slot reserved above.  It is built at the
+         top of the stack and moved down rather than emitted straight into
+         that slot: indexing a global by a constant whose index does not
+         fit an operand needs a scratch register, and at the top that lands
+         safely above the arguments instead of on one of them. */
+      if (spec == NULL)
+        buildglobal(ls, luaX_newstring(ls, "tostring", 8), &call);
+      else {  /* string.format */
+        expdesc key;
+        buildglobal(ls, luaX_newstring(ls, "string", 6), &call);
+        luaK_exp2anyregup(fs, &call);
+        codestring(&key, luaX_newstring(ls, "format", 6));
+        luaK_indexed(fs, &call, &key);
+      }
+      saved = luaK_exp2anyreg(fs, &call);
+      luaK_codeABC(fs, OP_MOVE, freg, saved, 0);
+      fs->freereg = cast_byte(freg + ((spec == NULL) ? 2 : 3));
+      init_exp(&call, VCALL,
+               luaK_codeABC(fs, OP_CALL, freg, (spec == NULL) ? 2 : 3, 2));
+      luaK_fixline(fs, line);
+      fs->freereg = cast_byte(freg + 1);  /* the call leaves one result */
+      luaK_exp2nextreg(fs, &call);
+      n++;
+      /* the '}' was consumed by resuming the string or by 'read_fspec',
+         never by 'luaX_next' */
+      lua_assert(ls->lookahead.token == TK_EOS);
+      luaX_read_fstring(ls, del);
+    }
+  }
+  lua_assert(n > 0);  /* a TK_FPART always brings an interpolation with it */
+  if (n > 1) {  /* a single piece is already the whole value */
+    luaK_codeABC(fs, OP_CONCAT, base, n, 0);
+    fs->freereg = cast_byte(base + 1);
+  }
+  init_exp(v, VNONRELOC, base);
+  luaX_next(ls);  /* skip the final piece */
 }
 
 
@@ -1310,29 +1448,12 @@ static void simpleexp (LexState *ls, expdesc *v) {
       body(ls, v, 0, ls->linenumber);
       return;
     }
-    case TK_FPART: {
-        init_exp(v, VK, 0);
-        v->u.info = luaK_stringK(ls->fs, ls->t.seminfo.ts);
-        while (ls->t.token == TK_FPART) {
-            luaK_exp2nextreg(ls->fs, v);
-            expdesc e2;
-            luaX_next(ls);
-            expr(ls, &e2);
-            luaK_exp2nextreg(ls->fs, &e2);
-            luaK_posfix(ls->fs, OPR_CONCAT, v, &e2, ls->linenumber);
-            if (ls->t.token != '}') {
-                luaX_syntaxerror(ls, "expected '}' in f-string");
-            }
-            luaX_read_fstring(ls, ls->fstring_del);
-            init_exp(&e2, VK, 0);
-            e2.u.info = luaK_stringK(ls->fs, ls->t.seminfo.ts);
-            luaK_exp2nextreg(ls->fs, &e2);
-            luaK_posfix(ls->fs, OPR_CONCAT, v, &e2, ls->linenumber);
-        }   
-        break;
+    case TK_FPART: {  /* Diluvium: interpolated string */
+      fstring(ls, v);
+      return;  /* 'fstring' consumed the whole literal */
     }
     default: {
-      suffixedexp(ls, v);
+      suffixedexp(ls, v, NULL);
       return;
     }
   }
@@ -1538,7 +1659,7 @@ static void restassign (LexState *ls, struct LHS_assign *lh, int nvars) {
   if (testnext(ls, ',')) {  /* restassign -> ',' suffixedexp restassign */
     struct LHS_assign nv;
     nv.prev = lh;
-    suffixedexp(ls, &nv.v);
+    suffixedexp(ls, &nv.v, NULL);
     if (!vkisindexed(nv.v.k))
       check_conflict(ls, lh, &nv.v);
     enterlevel(ls);  /* control recursion depth */
@@ -1800,6 +1921,146 @@ static void test_then_block (LexState *ls, int *escapelist) {
 }
 
 
+/*
+** Diluvium: is the current token the contextual keyword 'kw'?  Used for
+** 'case' and 'default', which are only ever looked for inside a switch
+** body, so they cannot collide with a name used anywhere else.
+*/
+static int testcasekw (LexState *ls, const char *kw) {
+  return ls->t.token == TK_NAME && strcmp(getstr(ls->t.seminfo.ts), kw) == 0;
+}
+
+
+/*
+** Diluvium: the body of one 'case' or 'default' clause.  Same as 'block',
+** except the statement list also ends at the next 'case' or 'default',
+** which 'block_follow' cannot recognise because both are ordinary names.
+** Inside a switch body they are effectively keywords, so a statement
+** there cannot begin with a call to a function named 'case' or
+** 'default'; nothing outside a switch body is affected.
+*/
+static void caseblock (LexState *ls) {
+  FuncState *fs = ls->fs;
+  BlockCnt bl;
+  enterblock(fs, &bl, 0);
+  while (!block_follow(ls, 1) &&
+         !testcasekw(ls, "case") && !testcasekw(ls, "default")) {
+    if (ls->t.token == TK_RETURN) {
+      statement(ls);  /* 'return' must be the last statement */
+      break;
+    }
+    statement(ls);
+  }
+  leaveblock(fs);
+}
+
+
+/*
+** Diluvium: parse one case value and leave 'e' holding 'subject == value'.
+** The subject lives in a register of its own for the whole statement, so
+** it is evaluated once no matter how many values are tested against it.
+*/
+static void caseeq (LexState *ls, expdesc *e, int subjreg, int line) {
+  expdesc v;
+  init_exp(e, VNONRELOC, subjreg);
+  expr(ls, &v);
+  luaK_infix(ls->fs, OPR_EQ, e);
+  luaK_posfix(ls->fs, OPR_EQ, e, &v, line);
+}
+
+
+/*
+** Diluvium: switch statement.
+**
+**   switchstat -> 'switch' expr 'do'
+**                   {'case' explist 'then' block}
+**                   ['default' block]
+**                 'end'
+**
+** Sugar over an if-elseif chain, with the subject evaluated exactly once
+** into an anonymous local.  A case listing several values matches any of
+** them ('case 1, 2 then' is 'subject == 1 or subject == 2'), values are
+** arbitrary expressions tested in order, and there is no fallthrough --
+** a matching block runs and the statement ends, as an if-elseif does.
+**
+** 'switch' is a contextual keyword, so existing code that uses it as a
+** name keeps working.  'statement' only routes here when the following
+** token cannot continue a call or an assignment, which is why a subject
+** cannot begin with '(', a string or a table constructor: 'switch (x)'
+** is a function call in stock Lua and has to stay one.  Bind such a
+** subject to a local, or drop the parentheses.
+*/
+static void switchstat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  BlockCnt bl;
+  expdesc subj;
+  int subjreg;  /* register holding the subject */
+  int escapelist = NO_JUMP;  /* jumps out of a finished case block */
+  luaX_next(ls);  /* skip 'switch' */
+  enterblock(fs, &bl, 0);  /* scope holding the subject */
+  new_localvarliteral(ls, "(switch)");
+  expr(ls, &subj);
+  luaK_exp2nextreg(fs, &subj);  /* subject gets a register of its own */
+  subjreg = subj.u.info;
+  adjustlocalvars(ls, 1);  /* ...and is a local, so cases cannot free it */
+  checknext(ls, TK_DO);
+  while (testcasekw(ls, "case")) {
+    expdesc cond;
+    int caseline = ls->linenumber;
+    int nomatch;  /* jumps taken when this case does not match */
+    luaX_next(ls);  /* skip 'case' */
+    caseeq(ls, &cond, subjreg, caseline);
+    while (testnext(ls, ',')) {  /* 'case a, b then' matches either */
+      expdesc alt;
+      luaK_infix(fs, OPR_OR, &cond);
+      caseeq(ls, &alt, subjreg, caseline);
+      luaK_posfix(fs, OPR_OR, &cond, &alt, caseline);
+    }
+    luaK_goiftrue(fs, &cond);  /* fall into the block when it matches */
+    nomatch = cond.f;
+    checknext(ls, TK_THEN);
+    caseblock(ls);
+    if (testcasekw(ls, "case") || testcasekw(ls, "default"))
+      luaK_concat(fs, &escapelist, luaK_jump(fs));  /* skip the rest */
+    luaK_patchtohere(fs, nomatch);
+  }
+  if (testcasekw(ls, "default")) {
+    luaX_next(ls);  /* skip 'default' */
+    caseblock(ls);
+  }
+  if (!testnext(ls, TK_END))
+    luaX_syntaxerror(ls, luaO_pushfstring(ls->L,
+        "'case', 'default' or 'end' expected (to close 'switch' at line %d)",
+        line));
+  luaK_patchtohere(fs, escapelist);
+  leaveblock(fs);
+}
+
+
+/*
+** Diluvium: does a 'switch' name at the start of a statement introduce a
+** switch statement?  Only when what follows cannot continue a call or an
+** assignment -- the same test 5.5 applies to its own contextual 'global'
+** keyword.  '(', a string and '{' are deliberately absent: each of them
+** makes 'switch ...' a function call that stock Lua accepts, and those
+** programs must keep their meaning.
+*/
+static int isswitchstat (LexState *ls) {
+  int lk;
+  if (ls->t.seminfo.ts != ls->swtn)
+    return 0;
+  lk = luaX_lookahead(ls);
+  switch (lk) {
+    case TK_NAME: case TK_INT: case TK_FLT: case TK_NIL:
+    case TK_TRUE: case TK_FALSE: case TK_FUNCTION: case TK_DOTS:
+    case TK_NOT: case '-': case '#': case '~':
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+
 static void ifstat (LexState *ls, int line) {
   /* ifstat -> IF cond THEN block {ELSEIF cond THEN block} [ELSE block] END */
   FuncState *fs = ls->fs;
@@ -1892,6 +2153,155 @@ static void localstat (LexState *ls) {
     adjustlocalvars(ls, nvars);
   }
   checktoclose(fs, toclose);
+}
+
+
+/*
+** Diluvium: the body of a 'defer', compiled as a parameterless function.
+** Exactly one statement, which is enough for every form because 'do ...
+** end' is itself a statement.
+*/
+static void deferbody (LexState *ls, expdesc *e, int line) {
+  FuncState new_fs;
+  BlockCnt bl;
+  new_fs.f = addprototype(ls);
+  new_fs.f->linedefined = line;
+  open_func(ls, &new_fs, &bl);
+  statement(ls);  /* the deferred statement */
+  new_fs.f->lastlinedefined = ls->linenumber;
+  codeclosure(ls, e);  /* leaves the closure in the parent's next register */
+  close_func(ls);
+}
+
+
+/*
+** Diluvium: defer statement.
+**
+**   deferstat -> 'defer' statement
+**
+** Desugars to an anonymous to-be-closed local:
+**
+**   local <close> (defer) = setmetatable(t, t)   -- where t.__close is
+**                                                -- the deferred body
+**
+** so ordering and unwinding are inherited rather than implemented. Lua
+** closes to-be-closed variables in reverse order of declaration, on every
+** way out of the block -- falling off the end, 'break', 'goto', 'return',
+** an error, and 'coroutine.close' on a suspended coroutine -- which is
+** exactly the guarantee 'defer' has to make.
+**
+** The value needs a '__close' metamethod, and generated code can only
+** reach a metatable through _ENV, so this calls _ENV.setmetatable. One
+** table serves as both the closable object and its own metatable, which
+** keeps the cost to one table and one closure per defer executed.
+**
+** The alternative -- giving the function type a metatable at state
+** creation, so a bare closure is closable and the cost drops to one
+** allocation -- was measured and works, but it changes what
+** getmetatable() returns for every function, makes '<close>' silently
+** legal on any function where it used to error, and ties compiled
+** bytecode to state setup, so a chunk would fail on a state that had not
+** installed it. Going through _ENV keeps all of that local to this file.
+*/
+static void deferstat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  expdesc smt, tab, key, body;
+  int toclose = fs->nactvar;  /* variable index of the hidden local */
+  int base, treg, pc;
+  luaX_next(ls);  /* skip 'defer' */
+  base = fs->freereg;
+  buildglobal(ls, luaX_newstring(ls, "setmetatable", 12), &smt);
+  luaK_exp2nextreg(fs, &smt);  /* function to call */
+  /* the table, with room for the single '__close' field */
+  pc = luaK_codevABCk(fs, OP_NEWTABLE, 0, 0, 0, 0);
+  luaK_code(fs, 0);  /* space for the extra argument */
+  treg = fs->freereg;
+  luaK_reserveregs(fs, 1);
+  luaK_settablesize(fs, pc, treg, 0, 1);  /* no array part, one hash slot */
+  /* t.__close = function () <statement> end */
+  init_exp(&tab, VNONRELOC, treg);
+  codestring(&key, luaX_newstring(ls, "__close", 7));
+  luaK_indexed(fs, &tab, &key);
+  deferbody(ls, &body, line);
+  luaK_storevar(fs, &tab, &body);
+  /* second argument: the same table, so it is its own metatable */
+  fs->freereg = cast_byte(treg + 1);
+  luaK_reserveregs(fs, 1);  /* reserve before writing: this grows maxstacksize */
+  luaK_codeABC(fs, OP_MOVE, treg + 1, treg, 0);
+  luaK_codeABC(fs, OP_CALL, base, 3, 2);  /* two arguments, one result */
+  luaK_fixline(fs, line);
+  fs->freereg = cast_byte(base + 1);  /* the call leaves the closable */
+  /* keep it in an anonymous to-be-closed local */
+  new_varkind(ls, luaX_newstring(ls, "(defer)", 7), RDKTOCLOSE);
+  adjustlocalvars(ls, 1);
+  checktoclose(fs, toclose);
+}
+
+
+/*
+** Diluvium: with statement.
+**
+**   withstat -> 'with' NAME '=' expr {',' NAME '=' expr} 'do' block 'end'
+**
+** Each binding becomes a to-be-closed local scoped to the block, so
+**
+**   with f = io.open(p) do ... end
+**
+** is 'do local f <close> = io.open(p) ... end' with the shape named. The
+** value must have a __close metamethod, exactly as <close> requires; a
+** non-closable one raises there rather than here.
+**
+** Lua allows only one to-be-closed variable per local statement, so
+** several bindings are emitted as consecutive locals -- which is also
+** what gives them the right closing order, last declared first closed.
+*/
+static void withstat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  BlockCnt bl;
+  luaX_next(ls);  /* skip 'with' */
+  enterblock(fs, &bl, 0);
+  do {
+    expdesc e;
+    TString *name = str_checkname(ls);
+    int toclose;
+    checknext(ls, '=');
+    new_varkind(ls, name, RDKTOCLOSE);  /* declared, not yet in scope... */
+    toclose = fs->nactvar;
+    expr(ls, &e);                       /* ...so it cannot see itself */
+    luaK_exp2nextreg(fs, &e);
+    adjustlocalvars(ls, 1);
+    checktoclose(fs, toclose);
+  } while (testnext(ls, ','));
+  checknext(ls, TK_DO);
+  statlist(ls);
+  if (!testnext(ls, TK_END))
+    luaX_syntaxerror(ls, luaO_pushfstring(ls->L,
+        "'end' expected (to close 'with' at line %d)", line));
+  leaveblock(fs);
+}
+
+
+static int iswithstat (LexState *ls) {
+  return ls->t.seminfo.ts == ls->wthn && luaX_lookahead(ls) == TK_NAME;
+}
+
+
+/*
+** Diluvium: does a 'defer' name at the start of a statement introduce a
+** defer statement?  Same test as 'switch': only when what follows cannot
+** continue a call or an assignment, which excludes '(', a string and '{'
+** because each of those makes 'defer ...' a call stock Lua accepts.
+*/
+static int isdeferstat (LexState *ls) {
+  if (ls->t.seminfo.ts != ls->dfrn)
+    return 0;
+  switch (luaX_lookahead(ls)) {
+    case TK_NAME: case TK_DO: case TK_IF: case TK_WHILE: case TK_FOR:
+    case TK_REPEAT: case TK_LOCAL: case TK_FUNCTION:
+      return 1;
+    default:
+      return 0;
+  }
 }
 
 
@@ -2032,14 +2442,91 @@ static void funcstat (LexState *ls, int line) {
 }
 
 
+/*
+** Diluvium: the binary operator behind a compound assignment, or
+** OPR_NOBINOPR if this token starts none.
+**
+** A compound assignment is spelled as the ordinary binary token followed
+** by '=', and is recognised here rather than lexed as a token of its
+** own: 'x += 1' is '+' then '=', 'x ..= s' is '..' then '='.  That keeps
+** the operator set free and adds nothing to the lexer, at the cost of
+** also accepting a space between the two ('x + = 1'), which is not valid
+** Lua and which Lua's whitespace-insensitive lexing makes hard to reject
+** without a token per operator.
+**
+** Bitwise xor has no compound form: '~=' is already 'not equal', and
+** taking it would break every program that tests for inequality.
+*/
+static BinOpr getcompoundopr (int op) {
+  switch (op) {
+    case '+': return OPR_ADD;
+    case '-': return OPR_SUB;
+    case '*': return OPR_MUL;
+    case '/': return OPR_DIV;
+    case '%': return OPR_MOD;
+    case '^': return OPR_POW;
+    case '|': return OPR_BOR;
+    case '&': return OPR_BAND;
+    case TK_IDIV: return OPR_IDIV;
+    case TK_CONCAT: return OPR_CONCAT;
+    case TK_SHL: return OPR_SHL;
+    case TK_SHR: return OPR_SHR;
+    case TK_2Q: return OPR_2Q;
+    default: return OPR_NOBINOPR;
+  }
+}
+
+
+/*
+** Diluvium: compound assignment, 'v op= e'.
+**
+** The target is parsed once and used for both the read and the write, so
+** the prefix is evaluated exactly once: 't[f()] += 1' calls f once, and
+** the table and key it produced are reused by the store.
+**
+** Reading the current value discharges the target, which frees the
+** registers holding that table and key; freereg is restored straight
+** afterwards, because the store still needs them and the right-hand side
+** would otherwise be free to allocate over the top.
+*/
+static void compoundassign (LexState *ls, expdesc *v, BinOpr opr, int line) {
+  FuncState *fs = ls->fs;
+  expdesc val = *v;  /* a copy, to read the current value through */
+  expdesc rhs;
+  int oldfree = fs->freereg;
+  check_condition(ls, vkisvar(v->k), "syntax error");
+  check_readonly(ls, v);
+  luaX_next(ls);  /* skip the operator */
+  checknext(ls, '=');
+  luaK_dischargevars(fs, &val);  /* may free the target's registers... */
+  fs->freereg = cast_byte(oldfree);  /* ...which the store still needs */
+  luaK_infix(fs, opr, &val);
+  expr(ls, &rhs);
+  luaK_posfix(fs, opr, &val, &rhs, line);
+  luaK_storevar(fs, v, &val);
+}
+
+
 static void exprstat (LexState *ls) {
-  /* stat -> func | assignment */
+  /* stat -> func | assignment | compound assignment */
   FuncState *fs = ls->fs;
   struct LHS_assign v;
-  suffixedexp(ls, &v.v);
+  int line = ls->linenumber;
+  int safenav = 0;  /* Diluvium: did the expression use '?.' or '?[' ? */
+  BinOpr opr;
+  suffixedexp(ls, &v.v, &safenav);
   if (ls->t.token == '=' || ls->t.token == ',') { /* stat -> assignment ? */
     v.prev = NULL;
     restassign(ls, &v, 1);
+  }
+  else if ((opr = getcompoundopr(ls->t.token)) != OPR_NOBINOPR &&
+           luaX_lookahead(ls) == '=') {  /* stat -> compound assignment? */
+    compoundassign(ls, &v.v, opr, line);
+  }
+  else if (safenav) {
+    /* Diluvium: a safe-navigation chain is a value, not a call, because
+       the nil path has to leave one behind; 'a?.b()' is still a perfectly
+       good statement, so accept it and drop the value. */
   }
   else {  /* stat -> func */
     Instruction *inst;
@@ -2168,8 +2655,20 @@ static void statement (LexState *ls) {
       gotostat(ls, line);
       break;
     }
-#if LUA_COMPAT_GLOBAL
     case TK_NAME: {
+      if (isswitchstat(ls)) {  /* Diluvium: stat -> switchstat */
+        switchstat(ls, line);
+        break;
+      }
+      if (isdeferstat(ls)) {  /* Diluvium: stat -> deferstat */
+        deferstat(ls, line);
+        break;
+      }
+      if (iswithstat(ls)) {  /* Diluvium: stat -> withstat */
+        withstat(ls, line);
+        break;
+      }
+#if LUA_COMPAT_GLOBAL
       /* compatibility code to parse global keyword when "global"
          is not reserved */
       if (ls->t.seminfo.ts == ls->glbn) {  /* current = "global"? */
@@ -2181,8 +2680,8 @@ static void statement (LexState *ls) {
           break;
         }
       }  /* else... */
-    }
 #endif
+    }
     /* FALLTHROUGH */
     default: {  /* stat -> func | assignment */
       exprstat(ls);

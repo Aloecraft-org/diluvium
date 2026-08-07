@@ -12,6 +12,17 @@ local function assert_eq(actual, expected, name)
     end
 end
 
+-- Compiling 'src' must fail; used for the stock-Lua compatibility checks.
+local function assert_nocompile(src, name)
+    local ok = load(src)
+    if ok == nil then
+        print(string.format("[PASS] %s", name))
+    else
+        print(string.format("[FAIL] %s (compiled, expected a syntax error)", name))
+        os.exit(1)
+    end
+end
+
 print("=== Starting F-String Tests ===\n")
 
 -- 1. Basic Interpolation
@@ -31,7 +42,7 @@ assert_eq(s3, "This uses Double quotes", "Double quote f-string ($\"...\")")
 print("-- 3. Multiple Interpolations")
 local x = 10
 local y = 20
-local s4 = $"X: {x}, Y: {y}, Sum: {x + y}" 
+local s4 = $"X: {x}, Y: {y}, Sum: {x + y}"
 -- Note: This tests if 'expr()' correctly handles math and stops at '}'
 assert_eq(s4, "X: 10, Y: 20, Sum: 30", "Multiple interpolations & math expression")
 
@@ -46,7 +57,7 @@ local s7 = $"{name} Suffix"
 assert_eq(s7, "World Suffix", "Empty prefix")
 
 print("-- 5. Edge Case: Just text (no interpolation)")
--- Depending on implementation, this might optimize to a simple string or 
+-- Depending on implementation, this might optimize to a simple string or
 -- run through the builder. It should result in the literal string.
 local s8 = $"Just plain text"
 assert_eq(s8, "Just plain text", "No interpolation braces")
@@ -54,12 +65,8 @@ assert_eq(s8, "Just plain text", "No interpolation braces")
 print("-- 6. Type Coercion (Implicit tostring)")
 local is_cool = true
 local val = 3.14
--- local s9 = $"Bool: {is_cool}, Float: {val}"
-local s9 = $"Bool: {tostring(is_cool)}, Float: {val}"
--- Lua's concat opcode handles numbers/strings. Booleans depends on Lua version/patches,
--- but usually print as 'true'/'false' in newer Lua or might error in 5.1 without explicit tostring.
--- If this fails, try: $"Bool: {tostring(is_cool)}"
-assert_eq(s9, "Bool: true, Float: 3.14", "Type coercion") 
+local s9 = $"Bool: {is_cool}, Float: {val}"
+assert_eq(s9, "Bool: true, Float: 3.14", "Type coercion")
 
 print("-- 7. Escape Sequences")
 local s10 = $"Line1\nLine2"
@@ -71,5 +78,140 @@ local n1 = 100
 local n2 = 200
 local s11 = $"A{n1}B{n2}C"
 assert_eq(s11, "A100B200C", "Complex concatenation chain (A-x-B-y-C)")
+
+-- ---------------------------------------------------------------------
+-- The f-string escape grammar is the same one plain strings use, so that
+-- rewriting "..." as $"..." never changes what the escapes mean.
+-- ---------------------------------------------------------------------
+print("\n-- 9. Full escape grammar")
+assert_eq($"A\x41B", "A" .. "\x41" .. "B", "hex escape (\\xXX)")
+assert_eq($"A\65B", "A" .. "\65" .. "B", "decimal escape (\\ddd)")
+assert_eq($"A\u{48}B", "A" .. "\u{48}" .. "B", "unicode escape (\\u{XXX})")
+assert_eq($"A\z
+           B", "AB", "whitespace-zapping escape (\\z)")
+assert_eq($"\a\b\f\n\r\t\v", "\a\b\f\n\r\t\v", "control escapes")
+assert_eq($"q\"q'q\\q", "q\"q'q\\q", "quote and backslash escapes")
+assert_eq($"A\
+B", "A\nB", "escaped newline continues the line")
+
+-- Escapes must still resolve identically with a placeholder in the string,
+-- i.e. the escape reader is shared across every piece, not just the first.
+local esc = "X"
+assert_eq($"\x41{esc}\102", "A" .. "X" .. "f", "escapes in every piece")
+
+print("-- 10. Literal braces")
+assert_eq($"a\{b\}c", "a{b}c", "escaped braces (\\{ and \\})")
+assert_eq($"\{{esc}\}", "{X}", "escaped braces around a placeholder")
+assert_eq($"a}b", "a}b", "an unescaped '}' outside a placeholder is literal")
+
+print("-- 11. tostring semantics")
+-- Decision: interpolation stringifies, so values that '..' rejects still work.
+local nothing = nil
+assert_eq($"v={nothing}", "v=nil", "nil interpolates")
+assert_eq($"v={false}", "v=false", "boolean interpolates")
+local withmeta = setmetatable({}, {__tostring = function() return "META" end})
+assert_eq($"v={withmeta}", "v=META", "__tostring is honoured")
+local plain = {}
+assert_eq($"v={plain}", "v=" .. tostring(plain), "plain table interpolates")
+assert_eq($"v={print}", "v=" .. tostring(print), "function interpolates")
+
+print("-- 12. tostring resolution goes through _ENV, not the local scope")
+do
+    -- A local named 'tostring' must not change what an f-string means.
+    local tostring = function() return "HIJACKED" end
+    local v = true
+    assert_eq($"{v}", "true", "a local 'tostring' does not capture interpolation")
+    assert_eq(tostring(), "HIJACKED", "...and the local is otherwise untouched")
+end
+do
+    -- Replacing it in the environment, however, must take effect: this is
+    -- what lets a sandbox with its own _ENV control stringification.
+    local real = tostring
+    _ENV.tostring = function(a) return "<" .. real(a) .. ">" end
+    local ok = $"{1}"
+    _ENV.tostring = real
+    assert_eq(ok, "<1>", "_ENV.tostring is what interpolation calls")
+end
+
+print("-- 13. Nesting")
+local i = 1
+assert_eq($"a{ $'b{i}' }c", "ab1c", "nested f-string, mismatched delimiters")
+assert_eq($'a{ $"b{i}" }c', "ab1c", "nested f-string, outer single-quoted")
+assert_eq($"a{ $'b{ $"c{i}d" }e' }f", "abc1def", "three levels of nesting")
+
+print("-- 14. Expressions inside placeholders")
+local t = {k = "v", n = {deep = "D"}}
+assert_eq($"[{ t["k"] }]", "[v]", "string index containing no brace")
+assert_eq($"[{ t["}"] or "none" }]", "[none]", "a '}' inside a string literal")
+assert_eq($"[{ t.n.deep }]", "[D]", "chained field access")
+assert_eq($"[{ string.rep("ab", 2) }]", "[abab]", "function call")
+local function two() return "first", "second" end
+assert_eq($"[{ two() }]", "[first]", "multiple returns truncate to one")
+local function va(...) return $"[{ ... }]" end
+assert_eq(va("only"), "[only]", "vararg truncates to one")
+assert_eq($"{ i > 0 and "pos" or "neg" }", "pos", "and/or expression")
+
+print("-- 15. Adjacent and degenerate placeholders")
+local a, b = 1, 2
+assert_eq($"{a}{b}", "12", "adjacent placeholders, no literal between")
+assert_eq($"{a}{b}{a}{b}", "1212", "four adjacent placeholders")
+assert_eq($"", "", "empty f-string")
+assert_eq($"{a}", "1", "a single placeholder and nothing else")
+
+print("-- 16. Stock-Lua compatibility of the shared escape reader")
+-- '\{' is an f-string-only escape; in a plain string it stays invalid,
+-- exactly as stock Lua has it.
+assert_nocompile([[return "a\{b"]], "'\\{' is still invalid in a plain string")
+assert_nocompile([[return "a\}b"]], "'\\}' is still invalid in a plain string")
+assert_nocompile([[return "\q"]], "unknown escapes still rejected in strings")
+assert_nocompile([[return $"\q"]], "unknown escapes rejected in f-strings too")
+assert_eq("a\x41\66\u{43}", "aABC", "plain-string escapes unchanged")
+
+print("-- 17. Malformed f-strings are syntax errors")
+assert_nocompile([[return $"a{b"]], "unclosed placeholder")
+assert_nocompile([[return $"a{}"]], "empty placeholder")
+assert_nocompile([[return $"unterminated]], "unterminated f-string")
+assert_nocompile("return $\"a\nb\"", "raw newline inside an f-string")
+assert_nocompile([[return $ident]], "'$' must introduce a string literal")
+
+print("-- 18. Format specifications")
+-- '::' introduces a string.format directive. It is '::' and not ':'
+-- because ':' already starts a method call, which must keep working.
+local pi, n, s = 3.14159, 42, "hi"
+assert_eq($"{pi::%.2f}", "3.14", "float precision")
+assert_eq($"{pi::%.3f}", "3.142", "...rounds like string.format")
+assert_eq($"[{n::%5d}]", "[   42]", "right-aligned width")
+assert_eq($"[{s::%-6s}]", "[hi    ]", "left-aligned width")
+assert_eq($"{n::%#x}", "0x2a", "hex with the alternate flag")
+assert_eq($"{n::%o}", "52", "octal")
+assert_eq($"{pi::%e}", string.format("%e", pi), "scientific matches string.format")
+assert_eq($"{n * 2::%d}", "84", "an expression before the spec")
+assert_eq($"{t.n and 7 or 0::%03d}", "007", "and/or before the spec")
+
+assert_eq($"pi={pi::%.1f} n={n} s={s::%s}", "pi=3.1 n=42 s=hi",
+          "specified and unspecified interpolations in one string")
+assert_eq($"{pi::%.1f}{n::%d}", "3.142", "adjacent specified interpolations")
+
+-- '%s' goes through the same conversion tostring does
+assert_eq($"{nothing::%s}", "nil", "'%s' on nil")
+assert_eq($"{true::%s}", "true", "'%s' on a boolean")
+assert_eq($"{withmeta::%s}", "META", "'%s' honours __tostring")
+
+-- The spec is taken raw, so it may contain anything but a newline or '}'
+assert_eq($"{n::%d items}", "42 items", "trailing text inside the spec")
+assert_eq($"{n::%5.1f}", string.format("%5.1f", n), "width and precision")
+
+-- ':' is still a method call, inside an interpolation as anywhere else
+assert_eq($"{("ab"):rep(2)}", "abab", "a method call in an interpolation")
+assert_eq($"{("ab"):rep(2)::%s}", "abab", "a method call with a spec after it")
+
+-- nesting and escapes still work alongside specs
+assert_eq($"{ $"{pi::%.1f}" }", "3.1", "a spec inside a nested f-string")
+assert_eq($"\{{n::%d}\}", "{42}", "escaped braces around a specified value")
+
+print("-- 19. Malformed format specifications")
+assert_nocompile([[return $"{1::%d"]], "unterminated spec")
+assert_nocompile("return $\"{1::%d\n}\"", "a newline inside a spec")
+assert_nocompile([[return $"{::%d}"]], "a spec with no expression")
 
 print("\n=== All Tests Passed! ===")
