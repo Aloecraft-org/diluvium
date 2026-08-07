@@ -2155,8 +2155,8 @@ static void deferstat (LexState *ls, int line) {
   luaK_storevar(fs, &tab, &body);
   /* second argument: the same table, so it is its own metatable */
   fs->freereg = cast_byte(treg + 1);
+  luaK_reserveregs(fs, 1);  /* reserve before writing: this grows maxstacksize */
   luaK_codeABC(fs, OP_MOVE, treg + 1, treg, 0);
-  luaK_reserveregs(fs, 1);
   luaK_codeABC(fs, OP_CALL, base, 3, 2);  /* two arguments, one result */
   luaK_fixline(fs, line);
   fs->freereg = cast_byte(base + 1);  /* the call leaves the closable */
