@@ -8,7 +8,7 @@
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Repo](https://img.shields.io/badge/github-repo-blue.svg)](https://github.com/Aloecraft-org/diluvium)
-[![Lua Version](https://img.shields.io/badge/lua-5.4.7-purple.svg)](https://www.lua.org/)
+[![Lua Version](https://img.shields.io/badge/lua-5.5.1-purple.svg)](https://www.lua.org/)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-Ready-orange.svg)](https://webassembly.org/)
 
 [Try it Online](https://diluvium.aloecraft.org) | [Documentation](https://www.lua.org/docs.html)
@@ -188,42 +188,42 @@ Check back frequently for updates
 
 **Linux (Portable AMD64) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_linux_static_x86_64
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_linux_static_x86_64
 cp diluvium_linux_static_x86_64 diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **Linux (aarch64/Raspberry Pi 3/4/5) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_linux_static_aarch64
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_linux_static_aarch64
 cp diluvium_linux_static_aarch64 diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **Linux (32bit armv7l/Raspberry Pi 1/2/Zero/Zero W) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_linux_static_armv7l
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_linux_static_armv7l
 cp diluvium_linux_static_armv7l diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **MacOS (ARM64) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_darwin_arm64
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_darwin_arm64
 cp diluvium_darwin_arm64 diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **MacOS (Intel) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_darwin_x86_64
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_darwin_x86_64
 cp diluvium_darwin_x86_64 diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **Windows Installation**
 ``` ps
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.4.7_rc2/diluvium_windows_x86_64.exe -OutFile diluvium.exe
+wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_windows_x86_64.exe -OutFile diluvium.exe
 ./diluvium
 ```
 

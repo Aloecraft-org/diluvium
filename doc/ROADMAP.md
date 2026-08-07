@@ -10,10 +10,14 @@ work it describes.
 
 ## Verified state
 
-Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-37 passed / 0 failed / 6 skipped locally. CI last verified the tree at
-`dba073e` (run 31144117057, 34 tests) on linux-x86_64 and macos-arm64;
-`defer` landed after that and is verified on the run for its own commit.
+Against `v5.5.1_build1` (Lua 5.5.1 fork point `7579fc9`), suite green at
+38 passed / 0 failed / 6 skipped locally, on linux-x86_64 and macos-arm64
+in CI.
+
+`5.5.1_build1` is the first release of the 5.5 line and is named to stay
+out of upstream Lua's version space: upstream will never ship a
+`5.5.1_build1`, so a Diluvium build can never be mistaken for one, and
+`_rcN` is left free for whatever upstream does with it.
 
 ### Language
 
@@ -57,18 +61,50 @@ the standalone runtime.
 that this stays as small as it can be: anything expressible as a library
 or an embedder file does not belong in `src/`.
 
+### Testing
+
+Each feature has its own test, and `test_interop.lua` is where they meet.
+It covers the two things a single-feature test cannot: **combinations**
+(an f-string with a format spec, built from a safe-navigation chain and a
+`??` default, inside a `switch` case, inside a `defer`, inside a secure
+function) and **backward compatibility** -- every contextual keyword used
+as a local, a field, a constructor key, a function name, a method name and
+a call, plus the three call shapes (`switch (x)`, `switch "s"`,
+`switch {}`) the lookahead deliberately excludes.
+
+That second half is the one to extend when a contextual keyword is added:
+the loop is data-driven, so a new keyword is one entry.
+
 ## Next
 
-Nothing from the original list is outstanding. Remaining, unscheduled:
+The first item next session is **Diluvium Lab integration**, and it is
+mostly a subtraction problem. Lab was started before `drepl.c` and
+`dline.c` existed, so it has its own console, its own completion and its
+own notion of "is this input finished". At least three of those are now
+duplicated by runtime code that is better placed to answer -- completion
+walks real tables and metatable `__index`, and `repl_eval` reports
+unfinished input as a status rather than as error-message text a front end
+has to pattern-match. The work is to find each place Lab reimplements
+something the runtime now exports, decide which side owns it, and delete
+the other. `doc/repl-reference.html` is the contract to align against: it
+is a working REPL over exactly those exports.
 
-- **`match`** -- switch in expression position.
-- **`with`** -- the other half of the `defer`/`with` pairing.
-- **Literal suffix registry** (`1.23d`), gated on decQuad semantics.
+The blocking prerequisite is a **dev-branch release** -- being able to
+pull an artifact built from a development branch into Lab for testing,
+without cutting a public release. The Build workflow already builds any
+commit by SHA and uploads to the run; what is missing is a stable place
+for Lab to fetch from, which is a mirror at minimum.
+
+Also unscheduled:
+
+- **Literal suffix registry** (`1.23d`). The value is not decQuad on its
+  own -- it is being able to say explicitly what a literal means and have
+  the compiler hold you to it, rather than inferring from spelling. Design
+  the registry around that: a suffix is a named claim about a literal's
+  type and precision, decimal being the first entry, not the reason.
+- **`match`** -- switch in expression position. Dropped for now; the
+  statement form carries the README promise on its own.
 - The analyzer work below.
-
-`match` -- switch in expression position -- is deliberately separate from
-the statement form and unscheduled; the statement carries the README
-promise on its own.
 
 Every new construct needs analyzer support and a test in `test/`, and must
 be a syntax error in stock Lua.
@@ -259,9 +295,10 @@ images are not, so an unexplained jump is usually one of those moving.
 
 ## Known non-code issues
 
-- **Readline is GPLv3 and is statically linked into the released
-  binaries**, which makes those artifacts a combined work under GPLv3
+- **Readline was GPLv3 and statically linked into pre-5.5 released
+  binaries**, which made those artifacts a combined work under GPLv3
   rather than the Apache-2.0 the repository advertises. Source
-  availability is already satisfied on both sides; what is missing is
-  disclosure. This resolves itself when line editing moves host-side and
-  readline leaves the build — until then the release notes should say so.
+  availability was satisfied on both sides; disclosure was not. Resolved
+  from `5.5.1_build1` on: `dline.c` replaced readline and the binary links
+  nothing but libc and libm. The older release artifacts are still up and
+  still affected.

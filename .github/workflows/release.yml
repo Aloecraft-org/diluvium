@@ -28,7 +28,7 @@ on:
         required: false
         default: ''
       tag:
-        description: 'Tag name for the release, e.g. v5.4.7_rc5 (required when publishing)'
+        description: 'Tag name for the release, e.g. v5.5.1_build1 (required when publishing)'
         type: string
         required: false
         default: ''
@@ -183,9 +183,11 @@ jobs:
           row() { have "$1" && printf '| %s | `%s` | %s |\n' "$2" "$1" "$3" >> release_notes.md || true; }
 
           {
-            echo "Diluvium \`$VERSION\` — a fork of Lua 5.4.7 with string"
-            echo "interpolation, null coalescing, obfuscated functions and a"
-            echo "bytecode analysis report."
+            echo "Diluvium \`$VERSION\` — a fork of Lua 5.5.1 with string"
+            echo "interpolation and format specs, null coalescing, safe"
+            echo "navigation, compound assignment, \`switch\`, \`defer\`,"
+            echo "\`with\`, obfuscated functions and a bytecode analysis"
+            echo "report."
             echo ""
             echo "Built from commit [\`$(echo "$SHA" | cut -c1-12)\`](${{ github.server_url }}/${{ github.repository }}/commit/$SHA)."
             echo ""
