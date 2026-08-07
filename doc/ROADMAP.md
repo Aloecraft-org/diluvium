@@ -232,6 +232,24 @@ one that lists it. LuaCATS annotations are the cheapest home for these
 (comments, so stock-Lua-valid by construction, and analyzer-only); new
 syntax only if demand justifies it.
 
+## Build statistics
+
+`script/build_stats.sh` records what a build produced -- every artifact's
+size, and `text`/`data`/`bss` for the native ones, which is what says
+*where* growth came from rather than only that it happened. `compare`
+prints the delta between two records and can fail over a threshold, so a
+regression can be refused rather than merely logged.
+
+`BUILDINFO.txt` already carried the commit and a checksum per artifact;
+this adds the sizes and timings it never had. The record ships as
+`BUILDSTATS.json`, a release asset, so every release is a permanent data
+point and history needs no branch to push to. The build job compares
+against the previous release and puts the table in its summary.
+
+Sizes are only comparable within a toolchain, so each record carries the
+compiler version. The wasi-sdk is pinned by digest; the native runner
+images are not, so an unexplained jump is usually one of those moving.
+
 ## Open
 
 - Contract calling convention, kernel framing, libm embedding — carried
