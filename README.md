@@ -98,9 +98,28 @@ The target's prefix is evaluated once, so `t[next_key()] += 1` calls
 `next_key` a single time. There is no `~=` form, because `~=` already
 means "not equal".
 
+**Defer**
+
+``` lua
+local f = io.open("data.txt")
+defer f:close()          -- runs however the block exits
+
+do
+    defer do             -- a block, when one statement is not enough
+        print("cleaning up")
+        release(handle)
+    end
+    risky()              -- even if this raises
+end
+```
+
+Deferred statements run in reverse order when the block ends, and on
+`break`, `goto`, `return`, an error, or `coroutine.close`. `defer` is a
+contextual keyword, so existing code using it as a name keeps working.
+
 **And coming soon:** 
 - match (switch as an expression)
-- defer/with
+- with
 - safe navigation
 - and more
 

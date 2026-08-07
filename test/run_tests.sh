@@ -63,6 +63,7 @@ sort|run||
 strings|run||
 test_analysis|run||
 test_compound|run||
+test_defer|run||
 test_determinism|run||
 test_fstrings|run||
 test_nullco|run||

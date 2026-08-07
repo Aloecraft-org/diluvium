@@ -11,8 +11,9 @@ work it describes.
 ## Verified state
 
 Against `v5.5.1_rc1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-34 passed / 0 failed / 6 skipped, locally and in CI on both
-linux-x86_64 and macos-arm64 (run 31144117057 at `dba073e`).
+35 passed / 0 failed / 6 skipped locally. CI last verified the tree at
+`dba073e` (run 31144117057, 34 tests) on linux-x86_64 and macos-arm64;
+`defer` landed after that and is verified on the run for its own commit.
 
 ### Language
 
@@ -25,7 +26,7 @@ linux-x86_64 and macos-arm64 (run 31144117057 at `dba073e`).
 | Safe navigation `?.` / `?[` | not started |
 | `switch` statement | done |
 | `match` (switch as an expression) | not started |
-| `defer` / `with` | not started |
+| `defer` | done (`with` not started) |
 | F-string format specs `{x:%.2f}` | not started |
 | Literal suffix registry (`1.23d`) | not started; gated on decQuad semantics |
 
@@ -60,14 +61,12 @@ or an embedder file does not belong in `src/`.
 
 Ordered. Each item is independently shippable.
 
-1. **`defer`.** Desugars to a to-be-closed local with a `__close` wrapper,
-   so unwind ordering is inherited rather than implemented.
-2. **Safe navigation `?.` / `?[`.** No lexer change needed (`?.` lexes as
+1. **Safe navigation `?.` / `?[`.** No lexer change needed (`?.` lexes as
    `?` then `.`, and a bare `?` is a syntax error in stock Lua), but a nil
    head must short-circuit the *whole* remaining suffix chain, so it needs
    a jump list threaded through `suffixedexp` rather than reusing the `??`
    shape. More involved than it looks.
-3. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
+2. **F-string format specs.** `{x:%.2f}` mapping to `string.format`.
 
 `match` -- switch in expression position -- is deliberately separate from
 the statement form and unscheduled; the statement carries the README
@@ -89,6 +88,34 @@ Any future contextual keyword needs the same treatment, plus a `luaC_fix`
 in `luaX_init`: recognition is pointer equality against an interned
 string, so an unfixed name can be collected and re-created, and the
 comparison then fails depending on when the collector ran.
+
+### defer
+
+`defer stat` desugars to an anonymous to-be-closed local holding
+`setmetatable(t, t)`, where `t.__close` is the deferred statement compiled
+as a parameterless function. One rule covers both forms, because
+`do ... end` is itself a statement. Ordering and unwinding are inherited
+from Lua: to-be-closed variables close in reverse declaration order on
+every exit -- end of block, `break`, `goto`, `return`, an error, and
+`coroutine.close` on a suspended coroutine.
+
+Cost is one table and one closure per defer executed, in eight
+instructions. The value has to carry `__close`, and generated code can
+only reach a metatable through `_ENV`, so this calls `_ENV.setmetatable`
+and lets a single table be its own metatable.
+
+The cheaper alternative -- give the *function* type a metatable at state
+creation, making a bare closure closable and dropping this to one
+allocation -- was measured and does work, but it changes what
+`getmetatable` returns for every function, makes `<close>` silently legal
+on any function where it previously errored, and ties compiled bytecode to
+state setup so a chunk would fail on a state that had not installed it.
+Going through `_ENV` keeps the whole feature inside `lparser.c`.
+
+Inherited semantics worth knowing: an error raised by deferred code while
+another error is already unwinding *replaces* the in-flight error. That is
+Lua's to-be-closed rule, not a Diluvium choice, and `test_defer.lua`
+asserts it so it stays known.
 
 ### Compound assignment
 

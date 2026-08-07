@@ -2085,6 +2085,107 @@ static void localstat (LexState *ls) {
 }
 
 
+/*
+** Diluvium: the body of a 'defer', compiled as a parameterless function.
+** Exactly one statement, which is enough for every form because 'do ...
+** end' is itself a statement.
+*/
+static void deferbody (LexState *ls, expdesc *e, int line) {
+  FuncState new_fs;
+  BlockCnt bl;
+  new_fs.f = addprototype(ls);
+  new_fs.f->linedefined = line;
+  open_func(ls, &new_fs, &bl);
+  statement(ls);  /* the deferred statement */
+  new_fs.f->lastlinedefined = ls->linenumber;
+  codeclosure(ls, e);  /* leaves the closure in the parent's next register */
+  close_func(ls);
+}
+
+
+/*
+** Diluvium: defer statement.
+**
+**   deferstat -> 'defer' statement
+**
+** Desugars to an anonymous to-be-closed local:
+**
+**   local <close> (defer) = setmetatable(t, t)   -- where t.__close is
+**                                                -- the deferred body
+**
+** so ordering and unwinding are inherited rather than implemented. Lua
+** closes to-be-closed variables in reverse order of declaration, on every
+** way out of the block -- falling off the end, 'break', 'goto', 'return',
+** an error, and 'coroutine.close' on a suspended coroutine -- which is
+** exactly the guarantee 'defer' has to make.
+**
+** The value needs a '__close' metamethod, and generated code can only
+** reach a metatable through _ENV, so this calls _ENV.setmetatable. One
+** table serves as both the closable object and its own metatable, which
+** keeps the cost to one table and one closure per defer executed.
+**
+** The alternative -- giving the function type a metatable at state
+** creation, so a bare closure is closable and the cost drops to one
+** allocation -- was measured and works, but it changes what
+** getmetatable() returns for every function, makes '<close>' silently
+** legal on any function where it used to error, and ties compiled
+** bytecode to state setup, so a chunk would fail on a state that had not
+** installed it. Going through _ENV keeps all of that local to this file.
+*/
+static void deferstat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  expdesc smt, tab, key, body;
+  int toclose = fs->nactvar;  /* variable index of the hidden local */
+  int base, treg, pc;
+  luaX_next(ls);  /* skip 'defer' */
+  base = fs->freereg;
+  buildglobal(ls, luaX_newstring(ls, "setmetatable", 12), &smt);
+  luaK_exp2nextreg(fs, &smt);  /* function to call */
+  /* the table, with room for the single '__close' field */
+  pc = luaK_codevABCk(fs, OP_NEWTABLE, 0, 0, 0, 0);
+  luaK_code(fs, 0);  /* space for the extra argument */
+  treg = fs->freereg;
+  luaK_reserveregs(fs, 1);
+  luaK_settablesize(fs, pc, treg, 0, 1);  /* no array part, one hash slot */
+  /* t.__close = function () <statement> end */
+  init_exp(&tab, VNONRELOC, treg);
+  codestring(&key, luaX_newstring(ls, "__close", 7));
+  luaK_indexed(fs, &tab, &key);
+  deferbody(ls, &body, line);
+  luaK_storevar(fs, &tab, &body);
+  /* second argument: the same table, so it is its own metatable */
+  fs->freereg = cast_byte(treg + 1);
+  luaK_codeABC(fs, OP_MOVE, treg + 1, treg, 0);
+  luaK_reserveregs(fs, 1);
+  luaK_codeABC(fs, OP_CALL, base, 3, 2);  /* two arguments, one result */
+  luaK_fixline(fs, line);
+  fs->freereg = cast_byte(base + 1);  /* the call leaves the closable */
+  /* keep it in an anonymous to-be-closed local */
+  new_varkind(ls, luaX_newstring(ls, "(defer)", 7), RDKTOCLOSE);
+  adjustlocalvars(ls, 1);
+  checktoclose(fs, toclose);
+}
+
+
+/*
+** Diluvium: does a 'defer' name at the start of a statement introduce a
+** defer statement?  Same test as 'switch': only when what follows cannot
+** continue a call or an assignment, which excludes '(', a string and '{'
+** because each of those makes 'defer ...' a call stock Lua accepts.
+*/
+static int isdeferstat (LexState *ls) {
+  if (ls->t.seminfo.ts != ls->dfrn)
+    return 0;
+  switch (luaX_lookahead(ls)) {
+    case TK_NAME: case TK_DO: case TK_IF: case TK_WHILE: case TK_FOR:
+    case TK_REPEAT: case TK_LOCAL: case TK_FUNCTION:
+      return 1;
+    default:
+      return 0;
+  }
+}
+
+
 static lu_byte getglobalattribute (LexState *ls, lu_byte df) {
   lu_byte kind = getvarattribute(ls, df);
   switch (kind) {
@@ -2432,6 +2533,10 @@ static void statement (LexState *ls) {
     case TK_NAME: {
       if (isswitchstat(ls)) {  /* Diluvium: stat -> switchstat */
         switchstat(ls, line);
+        break;
+      }
+      if (isdeferstat(ls)) {  /* Diluvium: stat -> deferstat */
+        deferstat(ls, line);
         break;
       }
 #if LUA_COMPAT_GLOBAL
