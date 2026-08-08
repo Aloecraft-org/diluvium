@@ -9,6 +9,25 @@
   ],
   "releases": [
     {
+      "version": "5.5.1_build3",
+      "tag": "v5.5.1_build3",
+      "date": null,
+      "status": "unreleased",
+      "stable": true,
+      "mirror": false,
+      "lua_base": "5.5.1",
+      "bytecode_format": 69,
+      "summary": "In progress. The release that closes finding 8: compiled chunks are\nchecked at load time instead of being trusted.\n",
+      "upgrading": null,
+      "latest": false,
+      "sections": {
+        "security": [
+          "The bytecode loader verifies an instruction's operands against the\nprototype that owns them.\n\nLua has shipped no bytecode verifier since 5.2, and Diluvium\ninherited that. `script/fuzz_exec.py` measured what it costs:\nroughly 7% of single-byte-mutated chunks crashed the release\ninterpreter when run -- segmentation faults and\n`munmap_chunk(): invalid pointer`, not errors -- and about a fifth\nof those were out-of-bounds heap *writes*. The loader reported\nclean only because `script/fuzz_undump.lua` never executed what it\naccepted.\n\n`luai_verifycode` is now implemented rather than empty. Every\ninstruction's register, constant, upvalue and prototype indices are\nchecked against the prototype's own limits, and every jump target\nagainst its code length, before the chunk is handed back.\n\nThe claim this supports is that **malformed bytecode is refused\nrather than crashing**. It is not that bytecode is safe. Lua 5.1\nshipped a fuller checker than this one and still had escapes;\n`load(bytes, name, \"t\")` remains the complete mitigation, and\ninspecting a chunk with `diluvium_compiler -r` remains safer than\nrunning it.\n"
+        ]
+      },
+      "notes_md": "## [5.5.1_build3] - unreleased\n\n`v5.5.1_build3` &middot; Lua 5.5.1 &middot; bytecode format `0x45`\n\nIn progress. The release that closes finding 8: compiled chunks are\nchecked at load time instead of being trusted.\n\n### Security\n\n- The bytecode loader verifies an instruction's operands against the\n  prototype that owns them.\n\n  Lua has shipped no bytecode verifier since 5.2, and Diluvium\n  inherited that. `script/fuzz_exec.py` measured what it costs:\n  roughly 7% of single-byte-mutated chunks crashed the release\n  interpreter when run -- segmentation faults and\n  `munmap_chunk(): invalid pointer`, not errors -- and about a fifth\n  of those were out-of-bounds heap *writes*. The loader reported\n  clean only because `script/fuzz_undump.lua` never executed what it\n  accepted.\n\n  `luai_verifycode` is now implemented rather than empty. Every\n  instruction's register, constant, upvalue and prototype indices are\n  checked against the prototype's own limits, and every jump target\n  against its code length, before the chunk is handed back.\n\n  The claim this supports is that **malformed bytecode is refused\n  rather than crashing**. It is not that bytecode is safe. Lua 5.1\n  shipped a fuller checker than this one and still had escapes;\n  `load(bytes, name, \"t\")` remains the complete mitigation, and\n  inspecting a chunk with `diluvium_compiler -r` remains safer than\n  running it.\n"
+    },
+    {
       "version": "5.5.1_build2",
       "tag": "v5.5.1_build2",
       "date": "2026-08-08",
