@@ -10,9 +10,9 @@ work it describes.
 
 ## Verified state
 
-Against `v5.5.1_build1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-39 passed / 0 failed / 6 skipped locally, on linux-x86_64 and macos-arm64
-in CI.
+Against `v5.5.1_build2` (Lua 5.5.1 fork point `7579fc9`), suite green at
+39 passed / 0 failed / 6 skipped on linux-x86_64 and macos-arm64, and
+again under ASan and UBSan with no report.
 
 `5.5.1_build1` is the first release of the 5.5 line and is named to stay
 out of upstream Lua's version space: upstream will never ship a
@@ -51,9 +51,43 @@ rather than taken from the log:
 | 8 | `luai_verifycode` empty | **open** |
 | 9 | String hash seed nondeterministic | fixed |
 
-Finding 8 is stock Lua behaviour, and only becomes a hard requirement once
-compiled chunks are accepted as untrusted input. It is not a blocker for
-the standalone runtime.
+Finding 8 is stock Lua behaviour, but the assessment above that it "only
+becomes a hard requirement once compiled chunks are accepted as untrusted
+input" understated it, and `script/fuzz_exec.py` is why.
+
+Mutate one byte of a small dump and run the result: **about 7% of mutants
+crash the release interpreter** -- segmentation faults and
+`munmap_chunk(): invalid pointer`, not merely errors. Measured at 36 of
+500 on one seed and 21 of 300 on another, on `diluvium_linux_x86_64`
+where the debug assertions are compiled out.
+
+The reason `script/fuzz_undump.lua` reports clean is that it never
+executes what it loads. Corrupting an instruction's operand usually
+leaves a chunk that still loads, because nothing checks operands against
+the prototype that owns them; the damage appears only when the VM runs
+it. The byte-stream fuzzer counts those as passes. Both fuzzers are worth
+having, and neither substitutes for the other.
+
+This is a memory-safety property, not a robustness nicety, and it sits
+directly under what the fork advertises -- secure functions and the
+analysis report exist so a chunk you did not compile can be handed to you
+and inspected. A verifier is the fix: check each instruction's register,
+constant, upvalue and prototype indices against the prototype's own
+limits, and each jump target against its code length, at load time.
+`fuzz_exec.py --allowed 0` is the test for it.
+
+**Scheduled for 5.5.1_build3.** build2 ships without it, deliberately and
+on the record: the exposure is documented in the README and in build2's
+`known_issues`, the complete mitigation (`load(bytes, name, "t")`) already
+exists, and the normal paths are clean under ASan and UBSan. What made
+that acceptable is saying so rather than shipping quietly. When the
+verifier lands it needs structure-aware mutation to test it -- corrupting
+operands specifically rather than random bytes, since random mutation
+measures an accident rate and not an attack rate -- and the claim it
+supports is "malformed bytecode is refused rather than crashing", never
+"bytecode is safe". Lua 5.1's fuller checker still had escapes, and a
+verifier believed to do more than it does would repeat this release's
+other mistake.
 
 ### Secure functions and the saved-string table
 
@@ -363,7 +397,8 @@ images are not, so an unexplained jump is usually one of those moving.
 - Contract calling convention, kernel framing, libm embedding — carried
   from the handoff, all still open.
 - Float reduction order, needed before any vector work.
-- `luai_verifycode`, per finding 8 above.
+- `luai_verifycode`, per finding 8 above -- now measured, and the largest
+  open item on the runtime.
 
 ## Known non-code issues
 

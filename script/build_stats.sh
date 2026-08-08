@@ -12,12 +12,17 @@
 #
 # Usage:
 #   script/build_stats.sh record [--dist DIR] [--out FILE] [--seconds N]
+#                                [--bench BIN]
 #       One JSON object describing DIR (default: dist/). '--seconds' records
-#       how long the build took, when the caller knows.
+#       how long the build took, when the caller knows. '--bench' runs
+#       script/bench.lua under BIN and embeds the result.
 #
 #   script/build_stats.sh compare OLD.json NEW.json [--fail-over BYTES]
-#       A table of what changed. Exits non-zero if any artifact grew by more
-#       than BYTES, so CI can refuse a regression rather than just log it.
+#                                 [--fail-over-instr PERCENT]
+#       A table of what changed, in size and in benchmark instruction
+#       counts. Exits non-zero if any artifact grew by more than BYTES or
+#       any benchmark by more than PERCENT, so CI can refuse a regression
+#       rather than just log it.
 #
 #   script/build_stats.sh append RECORD.json FILE.jsonl
 #       Add a record to the history, newest last.
@@ -25,6 +30,14 @@
 # Sizes are only comparable within a toolchain, so each record carries the
 # compiler version: an unexplained jump is usually the runner image moving,
 # and that is much easier to see than to remember.
+#
+# Benchmarks carry the same caveat and one of their own. The comparable
+# figure is the instruction count, which is deterministic: the same code on
+# the same build gives the same number on any machine, so a change in it is
+# a change in work done. Times are recorded beside it but are advisory --
+# a shared CI runner varies by more than most regressions worth catching.
+# Counts are comparable only within a build configuration, since the debug
+# build changes codegen parameters and so emits different bytecode.
 
 set -eu
 
@@ -67,11 +80,13 @@ cmd_record() {
   dist="$REPO_ROOT/dist"
   out=/dev/stdout
   seconds=""
+  bench=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --dist)    dist=$2; shift 2 ;;
       --out)     out=$2; shift 2 ;;
       --seconds) seconds=$2; shift 2 ;;
+      --bench)   bench=$2; shift 2 ;;
       *) echo "build_stats: unknown option '$1'" >&2; exit 2 ;;
     esac
   done
@@ -118,7 +133,14 @@ cmd_record() {
       fi
     done
     [ "$first" -eq 0 ] && printf '\n'
-    printf '  }\n'
+    printf '  }'
+    if [ -n "$bench" ]; then
+      printf ',\n  "benchmarks":\n'
+      # Indented two spaces so the embedded object reads as part of this one.
+      "$bench" "$REPO_ROOT/script/bench.lua" --json | sed 's/^/  /'
+    else
+      printf '\n'
+    fi
     printf '}\n'
   } > "$out"
   [ "$out" = /dev/stdout ] || echo "build stats written to $out" >&2
@@ -130,22 +152,26 @@ cmd_compare() {
   [ $# -ge 2 ] || usage
   old=$1; new=$2; shift 2
   failover=""
+  failinstr=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --fail-over) failover=$2; shift 2 ;;
+      --fail-over)       failover=$2; shift 2 ;;
+      --fail-over-instr) failinstr=$2; shift 2 ;;
       *) echo "build_stats: unknown option '$1'" >&2; exit 2 ;;
     esac
   done
   [ -f "$old" ] || { echo "build_stats: no such file: $old" >&2; exit 2; }
   [ -f "$new" ] || { echo "build_stats: no such file: $new" >&2; exit 2; }
 
-  OLD="$old" NEW="$new" FAILOVER="$failover" python3 - <<'PY'
+  OLD="$old" NEW="$new" FAILOVER="$failover" FAILINSTR="$failinstr" python3 - <<'PY'
 import json, os, sys
 
 old = json.load(open(os.environ["OLD"]))
 new = json.load(open(os.environ["NEW"]))
 limit = os.environ.get("FAILOVER") or ""
 limit = int(limit) if limit else None
+ilimit = os.environ.get("FAILINSTR") or ""
+ilimit = float(ilimit) if ilimit else None
 
 a, b = old.get("artifacts", {}), new.get("artifacts", {})
 names = sorted(set(a) | set(b))
@@ -192,9 +218,49 @@ for n in names:
         if any(deltas.values()):
             print(f"\n  {n}: " + ", ".join(f"{k} {v:+d}" for k, v in deltas.items() if v))
 
+# Benchmarks. The instruction count is the comparable figure -- it is
+# deterministic, so any movement is real work added or removed. Times are
+# printed for context and never gate anything: a shared runner varies by
+# more than the regressions worth catching.
+oc = (old.get("benchmarks") or {}).get("cases", {})
+nc = (new.get("benchmarks") or {}).get("cases", {})
+iworst, iworst_name = 0.0, None
+if oc and nc:
+    shared = sorted(set(oc) & set(nc))
+    moved = []
+    for n in shared:
+        oi, ni = oc[n].get("instructions"), nc[n].get("instructions")
+        if not oi or ni is None or oc[n].get("iters") != nc[n].get("iters"):
+            continue
+        pct = (ni - oi) / oi * 100
+        if abs(pct) >= 0.01:
+            moved.append((n, oi, ni, pct))
+            if pct > iworst:
+                iworst, iworst_name = pct, n
+    print()
+    if not moved:
+        print("  no benchmark changed instruction count")
+    else:
+        w = max(len(m[0]) for m in moved)
+        print(f"  {'benchmark'.ljust(w)}  {'before':>12}  {'after':>12}  change")
+        print(f"  {'-'*w}  {'-'*12}  {'-'*12}  ------")
+        for n, oi, ni, pct in moved:
+            print(f"  {n.ljust(w)}  {oi:>12d}  {ni:>12d}  {ni-oi:+d} ({pct:+.2f}%)")
+    dropped = sorted(set(oc) ^ set(nc))
+    if dropped:
+        print(f"  (not compared, present in only one record: {', '.join(dropped)})")
+elif ilimit is not None:
+    print("\n  NOTE: no benchmarks in one of the records; nothing to gate on")
+
+fail = False
 if limit is not None and worst > limit:
     print(f"\nFAIL: an artifact grew by {worst} bytes, over the {limit} allowed")
-    sys.exit(1)
+    fail = True
+if ilimit is not None and iworst > ilimit:
+    print(f"\nFAIL: benchmark '{iworst_name}' grew {iworst:.2f}%, over the "
+          f"{ilimit}% allowed")
+    fail = True
+sys.exit(1 if fail else 0)
 PY
 }
 

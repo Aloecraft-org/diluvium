@@ -329,6 +329,65 @@ Example Output:
   }
 }
 ```
+## Loading bytecode you did not compile
+
+**Compiled chunks from a source you do not trust are not safe to run.**
+This is Lua's position as much as Diluvium's — Lua has shipped no
+bytecode verifier since 5.2 — but it is worth stating plainly here,
+because secure functions and the analysis report exist precisely so that
+a chunk somebody else compiled can be handed to you.
+
+A corrupt or hostile chunk can reach memory it should not: measured with
+`script/fuzz_exec.py`, roughly 7% of single-byte-mutated chunks crash the
+interpreter when run, and about a fifth of those are out-of-bounds heap
+*writes*. Instructions carry register, constant and upvalue indices that
+nothing currently checks against the prototype that owns them, so treat
+running untrusted bytecode as equivalent to running untrusted native
+code.
+
+The complete mitigation is Lua's own `mode` argument, which refuses
+binary chunks outright:
+
+``` lua
+local f, err = load(untrusted, "chunk", "t")   -- "t" = text only
+-- => nil, "attempt to load a binary chunk (mode is 't')"
+```
+
+Inspecting is safer than running. `diluvium_compiler -r` loads a chunk
+and describes it without executing it, and the loader itself survives
+mutation testing — 30,000 mutated chunks, no crash. That is the intended
+way to look at something before you decide to trust it. It is not a
+guarantee: safer is not safe.
+
+A load-time verifier that bounds-checks instruction operands is the fix
+and is the largest open item on the runtime; `doc/ROADMAP.md` tracks it.
+Source `.lua` files are unaffected by any of this.
+
+## Compatibility
+
+What this fork promises, so that "stable" means something specific:
+
+**Source compatibility with stock Lua is absolute.** Every construct
+Diluvium adds is a syntax error in stock Lua, and none of them takes a
+reserved word — `switch`, `case`, `default`, `defer` and `with` are
+contextual keywords and stay usable as ordinary names. Lua code runs
+unmodified. This will not change.
+
+**Diluvium's own syntax is settled for the 5.5 line.** The constructs
+here are what 5.5 ships; new ones may be added, but what exists keeps its
+meaning.
+
+**Bytecode format may change between builds.** A compiled chunk carries a
+format byte and loads only into a build carrying the same one, so a stale
+chunk is refused rather than misread — recompile and carry on. The
+current format is `0x45`; the next change is expected when decimal
+literals land. Source is never affected.
+
+**The C API is Lua's**, plus what `diluvium_api.h` adds. Diluvium's
+changes to the Lua sources are held to 14 files and checked against
+pristine upstream on every build, which is what keeps rebasing onto new
+Lua releases tractable.
+
 ## Changelog
 
 [`CHANGELOG.md`](CHANGELOG.md) records what changed in each release. It is
