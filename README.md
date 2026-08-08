@@ -329,6 +329,13 @@ Example Output:
   }
 }
 ```
+## Changelog
+
+[`CHANGELOG.md`](CHANGELOG.md) records what changed in each release. It is
+generated from [`CHANGELOG.yaml`](CHANGELOG.yaml), which is the source of
+truth for the release page and the release mirror alike -- edit that file
+and run `script/changelog.py generate`.
+
 ## Testing
 
 The suite lives in `test/`. `test/run_tests.sh` is the single source of truth

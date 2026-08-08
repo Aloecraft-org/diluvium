@@ -19,6 +19,12 @@ Usage:
                                             changelog.json from the YAML
   script/changelog.py check                 fail unless the generated
                                             files match the YAML; for CI
+  script/changelog.py consistency           fail unless the tree agrees
+                                            with the newest entry; for CI
+  script/changelog.py release-check --tag TAG [--publish]
+                                            fail unless TAG is releasable;
+                                            prints prerelease= and version=
+                                            for GITHUB_OUTPUT
 
 Why the generated files are committed: the release mirror runs on a host
 with a stdlib-only Python and no build step, so it reads changelog.json
@@ -237,12 +243,93 @@ def render_json(doc):
     return json.dumps(out, indent=2) + "\n"
 
 
+def read(path):
+    with open(os.path.join(ROOT, path)) as f:
+        return f.read()
+
+
+def consistency(doc):
+    """The newest entry describes the tree as it stands, so the tree has to
+    agree with it. Version numbers live in three files here and drift
+    quietly; this is what makes that loud. -> list of problems."""
+    bad = []
+    r = doc["releases"][0]
+    version = r["version"]
+    where = "newest entry (%s)" % version
+
+    got = read("VERSION").strip()
+    if got != version:
+        bad.append("VERSION is %r but %s says %r" % (got, where, version))
+
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
+    if not m:
+        bad.append("%s: version does not start with X.Y.Z" % where)
+        return bad
+    major, minor, patch = m.groups()
+
+    try:
+        proj = json.loads(read(".technoproj"))["TECHNO_VERSION"]
+    except (OSError, ValueError, KeyError) as e:
+        bad.append(".technoproj: cannot read TECHNO_VERSION (%s)" % e)
+    else:
+        for key, want in (("major", int(major)), ("minor", int(minor)),
+                          ("patch", int(patch))):
+            if proj.get(key) != want:
+                bad.append(".technoproj TECHNO_VERSION.%s is %r but %s implies %r"
+                           % (key, proj.get(key), where, want))
+        build = re.search(r"_build(\d+)$", version)
+        if build and str(proj.get("build")) != build.group(1):
+            bad.append(".technoproj TECHNO_VERSION.build is %r but %s implies %r"
+                       % (proj.get("build"), where, build.group(1)))
+
+    fmt = re.search(r"^#define\s+LUAC_FORMAT\s+(\S+)", read("src/lundump.h"),
+                    re.M)
+    if not fmt:
+        bad.append("src/lundump.h: no LUAC_FORMAT")
+    elif int(fmt.group(1), 0) != r["bytecode_format"]:
+        bad.append("src/lundump.h LUAC_FORMAT is %s but %s says %s"
+                   % (fmt.group(1), where, hex(r["bytecode_format"])))
+
+    lua_h = read("src/lua.h")
+    for key, want in (("MAJOR", major), ("MINOR", minor), ("RELEASE", patch)):
+        m = re.search(r"^#define\s+LUA_VERSION_%s_N\s+(\d+)" % key, lua_h, re.M)
+        if not m:
+            bad.append("src/lua.h: no LUA_VERSION_%s_N" % key)
+        elif m.group(1) != want:
+            bad.append("src/lua.h LUA_VERSION_%s_N is %s but %s says lua_base "
+                       "%s" % (key, m.group(1), where, r.get("lua_base")))
+    return bad
+
+
+def release_check(doc, tag, publishing):
+    """Gate a release on its changelog entry. -> (problems, outputs)."""
+    entry = next((r for r in doc["releases"] if r["tag"] == tag), None)
+    if entry is None:
+        return (["no entry in CHANGELOG.yaml for tag %r -- add one before "
+                 "releasing it" % tag], {})
+    bad = []
+    if publishing:
+        if entry["status"] != "released":
+            bad.append(
+                "%s is still status: %s. Before publishing, edit "
+                "CHANGELOG.yaml: set status: released and a date, move "
+                "latest: true onto it, set mirror: true, then re-run "
+                "script/changelog.py generate and commit."
+                % (tag, entry["status"]))
+        if not entry.get("date"):
+            bad.append("%s has no date" % tag)
+    return bad, {"prerelease": "false" if entry.get("stable") else "true",
+                 "version": entry["version"]}
+
+
 def main():
     ap = argparse.ArgumentParser(add_help=False)
     ap.add_argument("command", choices=["validate", "render", "mirror-tags",
-                                        "latest", "generate", "check"])
+                                        "latest", "generate", "check",
+                                        "consistency", "release-check"])
     ap.add_argument("format", nargs="?", choices=["md", "json"])
     ap.add_argument("--tag")
+    ap.add_argument("--publish", action="store_true")
     ap.add_argument("-h", "--help", action="store_true")
     args = ap.parse_args()
     if args.help:
@@ -272,6 +359,24 @@ def main():
                 print(r["tag"])
     elif args.command == "latest":
         print(next(r["tag"] for r in doc["releases"] if r.get("latest")))
+    elif args.command == "consistency":
+        problems = consistency(doc)
+        if problems:
+            for p in problems:
+                print("inconsistent: " + p, file=sys.stderr)
+            return 1
+        print("OK: VERSION, .technoproj, lua.h and LUAC_FORMAT agree with %s"
+              % doc["releases"][0]["version"])
+    elif args.command == "release-check":
+        if not args.tag:
+            sys.exit("changelog.py: release-check needs --tag")
+        problems, out = release_check(doc, args.tag, args.publish)
+        if problems:
+            for p in problems:
+                print("release-check: " + p, file=sys.stderr)
+            return 1
+        for k, v in out.items():
+            print("%s=%s" % (k, v))
     elif args.command in ("generate", "check"):
         want = {MD: render_md(doc), JSON: render_json(doc)}
         stale = []

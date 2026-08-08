@@ -151,6 +151,36 @@ jobs:
           path: /tmp/series.patch
           retention-days: 90
 
+  changelog:
+    name: Changelog
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Changelog tooling
+        run: pip install --quiet pyyaml
+
+      # CHANGELOG.yaml is the source of truth for the release page and for
+      # the release mirror, so a mistake here is a mistake on a published
+      # artifact. 'check' catches the committed CHANGELOG.md and
+      # changelog.json drifting from it -- the mirror reads that JSON with
+      # a stdlib-only Python, which is why it is committed rather than
+      # generated on demand.
+      - name: Changelog is valid and its generated copies are current
+        run: |
+          set -eu
+          ./script/changelog.py validate
+          ./script/changelog.py check
+
+      # The newest entry describes the tree it sits in. The version lives
+      # in three files here, so this is where drift between them surfaces.
+      - name: Tree agrees with the newest entry
+        run: ./script/changelog.py consistency
+
   analyzer:
     name: Analysis report
     needs: resolve

@@ -126,6 +126,32 @@ releases:
         function and ordinary code, and checks the unstripped dump too.
         Its previous probe used markers only inside the secure function and
         so could not have caught this.
+      - |
+        `CHANGELOG.yaml` is now the source of truth for release notes,
+        rendered by `script/changelog.py`.
+
+        Release bodies previously carried no changelog at all -- the whole
+        user-visible change list for 5.5.1_build1 was GitHub's
+        auto-generated line naming one squashed pull request. That
+        auto-generation is off, and the release page is now built from this
+        file plus the download guide, which is derived from what a build
+        produced rather than from what changed.
+
+        `CHANGELOG.md` and `changelog.json` are generated and committed;
+        CI fails when they drift, and the release mirror reads the JSON.
+        The `mirror` and `latest` fields replace the mirror's
+        hand-maintained tag pins.
+      - |
+        CI checks that the tree agrees with the newest changelog entry.
+
+        The version is written in three places -- `VERSION`,
+        `.technoproj` and `src/lua.h` -- and `LUAC_FORMAT` in a fourth.
+        `script/changelog.py consistency` fails when any of them drifts
+        from the entry that claims to describe them.
+      - |
+        A release cannot be published for a tag the changelog does not
+        describe as released, so a release page can no longer say
+        "unreleased".
 
     upgrading: |
       Bytecode compiled by 5.5.1_build1 will not load in 5.5.1_build2, and
