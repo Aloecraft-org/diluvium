@@ -7,3 +7,5 @@ dist/
 # IDE/System files
 .DS_Store
 .vscode/
+# Test output
+test/.out/
