@@ -74,17 +74,25 @@ command -v "$RUNTIME" >/dev/null 2>&1 || {
 WASI_TESTS="
   test_fstrings test_switch test_compound test_defer test_safenav test_with
   test_interop test_nullco test_secure_dump secure_function
-  math sort bitwise bwcoercion calls closure constructs events goto
-  locals nextvar pm tpack utf8 vararg
+  math sort bwcoercion calls closure constructs events goto
+  nextvar pm tpack utf8 vararg
 "
 
-# Left out on purpose, and not because Diluvium fails them:
+# Left out on purpose, and none because Diluvium fails them -- each is a
+# capability the WASI runtime or wasi-libc does not have, the same reason
+# run_tests.sh already skips api/main/literals on the native side:
+#
 #   test_determinism  uses io.popen; WASI has no subprocesses.
 #   strings           sets a 'ptb' collate locale; wasi-libc is C-locale
 #                     only, so os.setlocale returns nil and the collation
-#                     assertion fails. Same class as the 'literals' skip in
-#                     run_tests.sh (musl vs glibc). Neither gap is in the
-#                     runtime this project ships as native binaries.
+#                     assertion fails. Same class as the 'literals' skip.
+#   bitwise, locals   `require` a sibling test module (bwcoercion, tracegc).
+#                     require searches package.path's './?.lua', and a WASI
+#                     guest has no working directory for '.' to mean. The
+#                     VM behaviour they exercise is stock Lua and is covered
+#                     by the kept tests running under the same wasm; the
+#                     Diluvium-specific tests do not use require. Re-add
+#                     them if require-under-WASI is ever wired up.
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -103,18 +111,16 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 RUNTIME_FLAGS=${WASI_RUNTIME_FLAGS--W exceptions=y}
 
 # A WASI guest has no host working directory -- it sees preopened
-# directories and nothing else. Two consequences, handled here:
+# directories and nothing else -- so a relative script name handed to it
+# cannot be resolved even though the wrapper is sitting in the directory
+# that holds the file. run_tests.sh invokes its binary as `BIN name.lua`
+# from inside test/, so the wrapper rewrites relative arguments that name
+# existing files into absolute paths, which the '/' preopen resolves.
 #
-#  * A relative script name handed to it cannot be resolved even though the
-#    wrapper is sitting in the directory that holds the file. run_tests.sh
-#    invokes its binary as `BIN name.lua` from inside test/, so the wrapper
-#    rewrites relative arguments that name existing files into absolute
-#    paths, which the '/' preopen resolves.
-#  * require searches package.path's './?.lua' against the guest's '.',
-#    which does not exist unless a directory is preopened as '.'. Adding
-#    '--dir .' preopens the wrapper's own cwd -- test/, during the suite --
-#    as the guest's '.', so a sibling require (bitwise -> bwcoercion,
-#    locals -> tracegc) finds its file.
+# Only '/' is preopened. Adding a second '--dir .' alongside it made
+# wasmtime fail to resolve those same absolute paths -- every test could
+# no longer open its own file -- so the guest gets one preopen and
+# absolute paths, which is the arrangement that actually ran the suite.
 cat > "$WORK/diluvium_wasi" <<EOF
 #!/bin/sh
 n=\$#
@@ -129,7 +135,7 @@ while [ \$i -lt \$n ]; do
   set -- "\$@" "\$a"
   i=\$((i + 1))
 done
-exec $RUNTIME run $RUNTIME_FLAGS --dir / --dir . ${WASI_DIRS:-} "$WASM" "\$@"
+exec $RUNTIME run $RUNTIME_FLAGS --dir / ${WASI_DIRS:-} "$WASM" "\$@"
 EOF
 chmod +x "$WORK/diluvium_wasi"
 
