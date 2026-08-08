@@ -67,12 +67,22 @@ WASI_TESTS="
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
 
+# The module needs the WebAssembly exception-handling proposal. Lua signals
+# errors with setjmp/longjmp, and wasi-sdk implements those on top of wasm
+# EH, so every Diluvium wasm build carries EH instructions whether or not
+# anything throws. Browsers have had EH for years -- which is why the
+# browser REPL works -- but wasmtime needs it asked for, and versions
+# before roughly 28 have no flag to ask with, failing at parse with
+# "exceptions proposal not enabled".
+#
 # Granting '/' keeps the wrapper indifferent to where the suite puts its
 # working directory; this is a build-time check on a trusted module, not a
 # sandbox demonstration.
+RUNTIME_FLAGS=${WASI_RUNTIME_FLAGS--W exceptions=y}
+
 cat > "$WORK/diluvium_wasi" <<EOF
 #!/bin/sh
-exec $RUNTIME run --dir / ${WASI_DIRS:-} "$WASM" "\$@"
+exec $RUNTIME run $RUNTIME_FLAGS --dir / ${WASI_DIRS:-} "$WASM" "\$@"
 EOF
 chmod +x "$WORK/diluvium_wasi"
 

@@ -134,10 +134,13 @@ jobs:
           done
 
       # wasmtime, pinned: an unpinned runtime is one more thing that can
-      # change under a build without anyone choosing it.
+      # change under a build without anyone choosing it. It must be new
+      # enough to offer '-W exceptions', since the module carries wasm
+      # exception-handling instructions -- see script/wasi_check.sh. v27
+      # has no such flag and cannot parse the module at all.
       - name: Install wasmtime
         env:
-          WASMTIME_VERSION: v27.0.0
+          WASMTIME_VERSION: v38.0.1
         run: |
           set -eu
           url="https://github.com/bytecodealliance/wasmtime/releases/download"

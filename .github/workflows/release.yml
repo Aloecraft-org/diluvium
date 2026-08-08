@@ -245,7 +245,7 @@ jobs:
           row diluvium_darwin_arm64            "**macOS (Apple silicon)**" "M1/M2/M3/M4"
           row diluvium_darwin_x86_64           "**macOS (Intel)**"       ""
           row diluvium_windows_x86_64.exe      "**Windows**"             "64-bit"
-          row diluvium_wasi.wasm               "**WASI**"                "Run with wasmtime or another WASI runtime"
+          row diluvium_wasi.wasm               "**WASI**"                "Needs a runtime with wasm exception-handling (wasmtime 28+ with \`-W exceptions=y\`)"
           row libdiluvium_wasm_unknown.a       "**Browser**"             "wasm32-unknown-unknown static library"
 
           {
