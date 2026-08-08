@@ -10,9 +10,9 @@ work it describes.
 
 ## Verified state
 
-Against `v5.5.1_build1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-39 passed / 0 failed / 6 skipped locally, on linux-x86_64 and macos-arm64
-in CI.
+Against `v5.5.1_build2` (Lua 5.5.1 fork point `7579fc9`), suite green at
+39 passed / 0 failed / 6 skipped on linux-x86_64 and macos-arm64, and
+again under ASan and UBSan with no report.
 
 `5.5.1_build1` is the first release of the 5.5 line and is named to stay
 out of upstream Lua's version space: upstream will never ship a
@@ -75,6 +75,19 @@ and inspected. A verifier is the fix: check each instruction's register,
 constant, upvalue and prototype indices against the prototype's own
 limits, and each jump target against its code length, at load time.
 `fuzz_exec.py --allowed 0` is the test for it.
+
+**Scheduled for 5.5.1_build3.** build2 ships without it, deliberately and
+on the record: the exposure is documented in the README and in build2's
+`known_issues`, the complete mitigation (`load(bytes, name, "t")`) already
+exists, and the normal paths are clean under ASan and UBSan. What made
+that acceptable is saying so rather than shipping quietly. When the
+verifier lands it needs structure-aware mutation to test it -- corrupting
+operands specifically rather than random bytes, since random mutation
+measures an accident rate and not an attack rate -- and the claim it
+supports is "malformed bytecode is refused rather than crashing", never
+"bytecode is safe". Lua 5.1's fuller checker still had escapes, and a
+verifier believed to do more than it does would repeat this release's
+other mistake.
 
 ### Secure functions and the saved-string table
 

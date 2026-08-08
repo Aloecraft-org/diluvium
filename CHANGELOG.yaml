@@ -51,10 +51,11 @@ releases:
 
   - version: "5.5.1_build2"
     tag: v5.5.1_build2
-    date: null
-    status: unreleased
+    date: 2026-08-08
+    status: released
     stable: true
-    mirror: false
+    latest: true
+    mirror: true
     lua_base: "5.5.1"
     bytecode_format: 0x45
     summary: |
@@ -230,7 +231,6 @@ releases:
     date: 2026-08-07
     status: released
     stable: true
-    latest: true
     mirror: true
     lua_base: "5.5.1"
     bytecode_format: 0x44
