@@ -329,6 +329,40 @@ Example Output:
   }
 }
 ```
+## Loading bytecode you did not compile
+
+**Compiled chunks from a source you do not trust are not safe to run.**
+This is Lua's position as much as Diluvium's — Lua has shipped no
+bytecode verifier since 5.2 — but it is worth stating plainly here,
+because secure functions and the analysis report exist precisely so that
+a chunk somebody else compiled can be handed to you.
+
+A corrupt or hostile chunk can reach memory it should not: measured with
+`script/fuzz_exec.py`, roughly 7% of single-byte-mutated chunks crash the
+interpreter when run, and about a fifth of those are out-of-bounds heap
+*writes*. Instructions carry register, constant and upvalue indices that
+nothing currently checks against the prototype that owns them, so treat
+running untrusted bytecode as equivalent to running untrusted native
+code.
+
+The complete mitigation is Lua's own `mode` argument, which refuses
+binary chunks outright:
+
+``` lua
+local f, err = load(untrusted, "chunk", "t")   -- "t" = text only
+-- => nil, "attempt to load a binary chunk (mode is 't')"
+```
+
+Inspecting is safer than running. `diluvium_compiler -r` loads a chunk
+and describes it without executing it, and the loader itself survives
+mutation testing — 30,000 mutated chunks, no crash. That is the intended
+way to look at something before you decide to trust it. It is not a
+guarantee: safer is not safe.
+
+A load-time verifier that bounds-checks instruction operands is the fix
+and is the largest open item on the runtime; `doc/ROADMAP.md` tracks it.
+Source `.lua` files are unaffected by any of this.
+
 ## Compatibility
 
 What this fork promises, so that "stable" means something specific:

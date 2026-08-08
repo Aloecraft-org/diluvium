@@ -89,6 +89,17 @@ table this depends on, so 5.4.7 and earlier never had it.
   buffer and long ones in the string's own storage, so there is no
   allocation to lose. Present since the 5.5.1 rebase.
 - A corrupt string size is rejected by name instead of being acted on.
+- The analysis report decoded table constructor sizes with the wrong
+  instruction operands.
+
+  `OP_NEWTABLE` is an `ivABC` instruction, where `vB` is six bits and
+  `vC` ten, against eight each for `B` and `C`. `analyze.c` still
+  read it as Lua 5.4 did, so it took two bits of `vC` along with
+  `vB` and started two bits into `vC` -- wrong array and hash sizes
+  in every report, and a shift wide enough to be undefined
+  behaviour. The guard that would have caught it is a debug-build
+  assertion, so release builds read the wrong bits in silence.
+  Found by UBSan on a valid chunk."
 
 ### Security
 
@@ -124,6 +135,30 @@ table this depends on, so 5.4.7 and earlier never had it.
   written string's size field now carries a scramble flag in its low
   bit. That is a format change, so the byte is bumped and stale
   chunks are refused rather than misread.
+
+### Known issues
+
+- Compiled chunks from an untrusted source are not safe to run.
+
+  Instructions carry register, constant and upvalue indices that
+  nothing checks against the prototype that owns them, so a corrupt
+  or hostile chunk can reach memory it should not. Measured with
+  `script/fuzz_exec.py`: about 7% of single-byte-mutated chunks
+  crash the interpreter when run, and roughly a fifth of those are
+  out-of-bounds heap writes rather than mere crashes.
+
+  This is Lua's position as much as Diluvium's -- Lua has shipped no
+  bytecode verifier since 5.2 -- but it deserves stating outright
+  here, because secure functions and the analysis report exist so
+  that a chunk somebody else compiled can be handed to you. The
+  complete mitigation is Lua's own `mode` argument:
+  `load(bytes, name, "t")` refuses binary chunks.
+
+  Inspecting is safer than running: `diluvium_compiler -r` describes
+  a chunk without executing it, and the loader alone survived 30,000
+  mutated chunks without a crash. Safer is not safe. A load-time
+  verifier is the fix and is the largest open item on the runtime.
+  Source `.lua` files are unaffected.
 
 ### Upgrading
 

@@ -332,19 +332,32 @@ static void json_write_string(FILE *out, const char *s) {
 
 
 /* -------------------------------------------------------------------------
-** OP_NEWTABLE size decoding for Lua 5.4
+** OP_NEWTABLE size decoding.
 **
 ** From lopcodes.h notes:
-**   B  = log2(hash_size) + 1, or 0 for empty hash part
-**   C  = array_size  (or low bits if k flag set, high bits in EXTRAARG)
+**   vB = log2(hash_size) + 1, or 0 for empty hash part
+**   vC = array_size  (or low bits if k flag set, high bits in EXTRAARG)
+**
+** vB and vC, not B and C: OP_NEWTABLE is an ivABC instruction, where vB is
+** six bits and vC is ten, against eight each for B and C. Reading it with
+** GETARG_B takes two bits of vC along with vB, and GETARG_C starts two
+** bits into vC -- wrong values, and a hash size large enough to make the
+** shift below undefined. The GETARG_B guard that would have caught this is
+** a debug-build assertion, so a release build read the wrong bits in
+** silence. Found by UBSan on a valid chunk.
 **
 ** The old fb2int floating-point-byte encoding was a Lua 5.1/5.2 thing and
 ** does NOT apply here.
 ** ------------------------------------------------------------------------- */
 
 static int decode_hash_size(int b) {
-  /* B == 0 → 0 slots; otherwise 1 << (B-1) */
-  return (b == 0) ? 0 : (1 << (b - 1));
+  /* vB == 0 → 0 slots; otherwise 1 << (vB-1). vB is six bits, so a
+     well-formed chunk cannot exceed 32 here; a malformed one can, and the
+     analyzer is pointed at chunks it did not compile, so clamp rather than
+     shift by whatever the operand says. */
+  if (b <= 0) return 0;
+  if (b - 1 >= 31) return 0;
+  return 1 << (b - 1);
 }
 
 /*
@@ -354,15 +367,16 @@ static int decode_hash_size(int b) {
 static int decode_array_size(const Proto *f, int pc) {
   Instruction newtable = f->code[pc];
   int k   = GETARG_k(newtable);
-  int c   = GETARG_C(newtable);
+  int c   = GETARG_vC(newtable);
 
   if (!k) return c;
 
-  /* k=1: real array size = EXTRAARG:C (high bits from EXTRAARG, low 8 from C) */
+  /* k=1: real array size is EXTRAARG concatenated with vC, so the shift is
+     the width of vC and not a hardcoded eight. */
   if (pc + 1 < f->sizecode) {
     Instruction extra = f->code[pc + 1];
     if (GET_OPCODE(extra) == OP_EXTRAARG)
-      return (GETARG_Ax(extra) << 8) | c;
+      return (int)(((unsigned)GETARG_Ax(extra) << SIZE_vC) | (unsigned)c);
   }
   return c; /* fallback — shouldn't happen in well-formed bytecode */
 }
@@ -825,7 +839,7 @@ static void analyze_function(const Proto *f, InterfaceReport *report) {
       case OP_NEWTABLE: {
         last_newtable_pc  = pc;
         last_newtable_arr = decode_array_size(f, pc);
-        last_newtable_hsh = decode_hash_size(GETARG_B(ins));
+        last_newtable_hsh = decode_hash_size(GETARG_vB(ins));
         break;
       }
 

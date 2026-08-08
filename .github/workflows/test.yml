@@ -151,6 +151,52 @@ jobs:
           path: /tmp/series.patch
           retention-days: 90
 
+  sanitizers:
+    name: ASan + UBSan
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # Not the ltests.h debug build: that installs its own allocator, which
+      # would fight AddressSanitizer for the same job. This is an ordinary
+      # build with the sanitizers on.
+      - name: Build with sanitizers
+        run: |
+          set -eu
+          mkdir -p .data dist
+          cp -r src/* .data/
+          gcc -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g \
+            -DLUA_USE_LINUX -Wl,-E -ldl -o dist/diluvium_asan .data/onelua.c -lm
+          gcc -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g \
+            -o dist/luac_asan .data/onelua.c .data/analyze.c .data/diluvium_api.c \
+            -DMAKE_LUAC -lm
+
+      - name: Suite under the sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: ./test/run_tests.sh --bin dist/diluvium_asan --timeout 900
+
+      # The compiler and the analyzer walk instruction operands by hand, so
+      # they are exactly where a decoding mistake hides. This is what caught
+      # analyze.c reading OP_NEWTABLE with Lua 5.4's operand widths: the
+      # guard against that is a debug-build assertion, so a release build
+      # read the wrong bits without complaint.
+      - name: Compiler and analyzer under the sanitizers
+        env:
+          ASAN_OPTIONS: detect_leaks=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set -eu
+          for f in test/*.lua; do
+            ./dist/luac_asan -r -o /dev/null "$f" >/dev/null
+          done
+          echo "analysed $(ls test/*.lua | wc -l) files with no sanitizer report"
+
   fuzz:
     name: Loader fuzz
     needs: resolve
@@ -177,6 +223,24 @@ jobs:
           for seed in 20260808 31337 65535 8675309; do
             ./dist/diluvium_debug script/fuzz_undump.lua 2000 "$seed"
           done
+
+      # Loading a mutant is only half of it: corrupting an instruction
+      # operand usually leaves a chunk that still loads, and the damage
+      # appears when the VM runs it. fuzz_exec runs them.
+      #
+      # --allowed is a CEILING, not a target. It is above zero because the
+      # loader does not yet check operands against the prototype that owns
+      # them -- see "Loading bytecode you did not compile" in the README --
+      # so this currently catches the loader getting dramatically worse
+      # rather than proving it is sound. It goes to 0 when the verifier
+      # lands, and must never be raised to make a build green.
+      - name: Build release binary
+        run: make build_platform || make
+      - name: Mutate, load and run
+        run: |
+          set -eu
+          BIN=$(ls dist/diluvium_linux_x86_64 dist/diluvium 2>/dev/null | head -1)
+          ./script/fuzz_exec.py --bin "$BIN" --rounds 200 --seed 7 --allowed 35
 
   changelog:
     name: Changelog
