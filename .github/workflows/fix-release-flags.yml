@@ -1,0 +1,60 @@
+# Set an existing release's draft/prerelease flags to what the changelog
+# says, without rebuilding or moving the tag.
+#
+# The Release workflow already does this for releases it publishes. This is
+# the same correction applied to a release that is already out -- needed
+# because softprops/action-gh-release will not clear a release's prerelease
+# flag from true to false on update, which is how v5.5.1_build2's first
+# publish ended up labelled a pre-release despite being stable. Re-running
+# Release cannot fix it: its tag-exists guard refuses a tag that is already
+# published, and rebuilding from a newer commit would move the tag.
+#
+# The changelog is the source of truth: `stable: true` means prerelease
+# false. A published release is never a draft.
+name: Fix release flags
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag of the release to correct, e.g. v5.5.1_build2'
+        type: string
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Changelog tooling
+        run: pip install --quiet pyyaml
+
+      - name: Set the flags from the changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.api_url }}
+        run: |
+          set -eu
+          # Fatal unless the changelog describes this tag as released; the
+          # 'stable' field then decides prerelease. Same gate the Release
+          # workflow uses before publishing.
+          CL=$(script/changelog.py release-check --tag "$TAG" --publish)
+          prerelease=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
+          [ -n "$prerelease" ] || { echo "::error::no prerelease value for $TAG"; exit 1; }
+
+          auth="Authorization: Bearer $GH_TOKEN"
+          rel=$(curl -sf -H "$auth" -H "Accept: application/vnd.github+json" \
+            "$API/repos/$REPO/releases/tags/$TAG")
+          id=$(printf '%s' "$rel" | sed -n 's/.*"id":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' | head -1)
+          [ -n "$id" ] || { echo "::error::no release found for tag $TAG"; exit 1; }
+
+          curl -sf -X PATCH -H "$auth" -H "Accept: application/vnd.github+json" \
+            "$API/repos/$REPO/releases/$id" \
+            -d "{\"draft\":false,\"prerelease\":$prerelease}" >/dev/null
+          echo "set draft=false prerelease=$prerelease on $TAG (release $id)"
