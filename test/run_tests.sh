@@ -69,6 +69,7 @@ test_fstrings|run||
 test_interop|run||
 test_nullco|run||
 test_safenav|run||
+test_secure_dump|run||
 test_switch|run||
 test_with|run||
 tpack|run||

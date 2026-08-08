@@ -11,7 +11,7 @@ work it describes.
 ## Verified state
 
 Against `v5.5.1_build1` (Lua 5.5.1 fork point `7579fc9`), suite green at
-38 passed / 0 failed / 6 skipped locally, on linux-x86_64 and macos-arm64
+39 passed / 0 failed / 6 skipped locally, on linux-x86_64 and macos-arm64
 in CI.
 
 `5.5.1_build1` is the first release of the 5.5 line and is named to stay
@@ -45,7 +45,7 @@ rather than taken from the log:
 | 2 | `??` evaluated both operands | fixed |
 | 3 | Obfuscation covered a quarter of the code (byte count) | fixed |
 | 4 | Nested closures inside secure functions not obfuscated | fixed |
-| 5 | Bytecode format byte not bumped | fixed (`LUAC_FORMAT` 0x44) |
+| 5 | Bytecode format byte not bumped | fixed (`LUAC_FORMAT` 0x45) |
 | 6 | F-string nesting and escapes | fixed |
 | 7 | `$` fallthrough created `$`-prefixed identifiers | fixed |
 | 8 | `luai_verifycode` empty | **open** |
@@ -55,6 +55,69 @@ Finding 8 is stock Lua behaviour, and only becomes a hard requirement once
 compiled chunks are accepted as untrusted input. It is not a blocker for
 the standalone runtime.
 
+### Secure functions and the saved-string table
+
+Found after the review, and worth recording because of what it says about
+the shape of the feature rather than only the bug.
+
+5.5 added a saved-string table to the dump: each distinct string is
+written once and referred to by index afterwards. Scrambling decided by
+position in the proto tree -- which is how the instruction stream still
+works -- silently stops being sound under that, because a string shared
+between a secure function and ordinary code has exactly **one** stored
+copy, at whichever site was written first. A function dumps its own
+constants before recursing into its children, so a literal shared with
+the enclosing function was always stored in the clear:
+
+```lua
+local tag = "license-key";
+~function check() return "license-key" end   -- strings(1) found it anyway
+```
+
+Among siblings it depended on which was dumped first, which is a worse
+property still: the same source leaked or did not depending on where else
+a literal happened to appear. It round-tripped perfectly either way, so
+nothing failed -- the function was marked secure and the bytes simply
+were not there.
+
+Deduplicating per `(string, encrypted)` pair does not fix it. The
+plaintext copy has already been written by then; a second, scrambled copy
+alongside it leaves the first one exactly where `strings` will find it.
+The decision has to be made **before** anything is written, so
+`taintSecureStrings` walks the whole proto tree first and marks every
+string any secure function will contribute. A marked string is scrambled
+wherever it is written, including from ordinary code.
+
+That in turn means position no longer tells the loader what to do, so a
+written string's size field now carries a scramble flag in its low bit
+(`LUAC_FORMAT` 0x45). Cost is under a byte per distinct string, and
+dedup is kept. Consequence worth knowing: a literal shared with a secure
+function is hidden in the *ordinary* function's copy too -- there is only
+the one copy, and it is the secure function that decides.
+
+The general lesson for the next Lua rebase: any upstream change to how
+the dump stores things has to be re-checked against secure functions,
+because the security property is about the encoding and not only about
+the values.
+
+### `~function` after an expression
+
+`~` is also the binary xor operator, and Lua expressions span newlines,
+so a `~function` statement directly after an expression-ending statement
+is absorbed into it:
+
+```lua
+local tag = "x"
+~function probe() end        -- parsed as: "x" ~ function probe() ...
+```
+
+The result is the confusing error `'(' expected near 'probe'` rather than
+a silent miscompile, since a named function is not an expression. A `;`
+after the preceding statement resolves it. This is inherited from Lua's
+grammar rather than introduced by the `~` prefix, and it is the same
+class of problem as the `switch (x)` lookahead -- worth knowing before
+any further sigil-prefixed syntax is added.
+
 ### Core patch series
 
 14 files, enforced by `script/patch_series.sh check` in CI. Doctrine is
@@ -62,6 +125,15 @@ that this stays as small as it can be: anything expressible as a library
 or an embedder file does not belong in `src/`.
 
 ### Testing
+
+`test_secure_dump.lua` covers the dump-level security property directly:
+that a secure function's strings are absent from the bytes, across shared
+literals, both sibling orders, both sides of the short-string boundary,
+debug names, stripped and unstripped, and back-references; and that all of
+it still round-trips once a string is hidden away from the function that
+hid it. CI's obfuscation audit checks the same property from outside,
+through `luac`, and now uses a probe that shares a literal with ordinary
+code -- the shape the old probe could not have caught.
 
 Each feature has its own test, and `test_interop.lua` is where they meet.
 It covers the two things a single-feature test cannot: **combinations**

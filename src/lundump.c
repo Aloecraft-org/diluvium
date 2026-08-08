@@ -39,7 +39,6 @@ typedef struct {
   size_t offset;  /* current position relative to beginning of dump */
   lua_Unsigned nstr;  /* number of strings in the list */
   lu_byte fixed;  /* dump is fixed in memory */
-  int encrypted;  /* Diluvium: loading inside a secure (~) function */
 } LoadState;
 
 
@@ -161,6 +160,7 @@ static void loadString (LoadState *S, Proto *p, TString **sl) {
   lua_State *L = S->L;
   TString *ts;
   TValue sv;
+  int scrambled;  /* Diluvium: set from the low bit of the size field */
   size_t size = loadSize(S);
   if (size == 0) {  /* previously saved string? */
     lua_Unsigned idx = loadVarint(S, LUA_MAXUNSIGNED);  /* get its index */
@@ -175,16 +175,37 @@ static void loadString (LoadState *S, Proto *p, TString **sl) {
     luaC_objbarrier(L, p, ts);
     return;  /* do not save it again */
   }
-  else if (((size -= 1), S->encrypted)) {
-    /* Diluvium: secure function. Load into a scratch buffer and
-       unscramble there -- never alias a fixed input buffer, since we
-       must mutate the bytes. Handles every length uniformly. */
-    char *buff = luaM_newvector(L, size + 1, char);
+  /* Diluvium: the low bit says whether the contents are scrambled; the
+     rest is the size, biased by one as upstream leaves it. The flag
+     rides here because the dump, not the position in the proto tree,
+     decides which strings are hidden (see 'dumpString'). A written
+     string encodes at least (0+1)*2, so anything below that is corrupt
+     and must be rejected before the bias is removed. */
+  if (size < 2)
+    error(S, "invalid string size");
+  scrambled = (size & 1);
+  size = (size >> 1) - 1;
+  if (scrambled && size <= LUAI_MAXSHORTLEN) {
+    /* A short string of a secure function. Unscramble in a local buffer
+       rather than a heap one: 'loadVector' raises on a truncated chunk,
+       and an allocation held only in a local would leak every time a
+       malformed chunk was refused. */
+    char buff[LUAI_MAXSHORTLEN + 1];  /* extra space for '\0' */
     loadVector(S, buff, size + 1);
     diluvium_unscramble(buff, size + 1);
     *sl = ts = luaS_newlstr(L, buff, size);
     luaC_objbarrier(L, p, ts);
-    luaM_freearray(L, buff, size + 1);
+  }
+  else if (scrambled) {
+    /* A long one. Load into the string's own storage and unscramble it
+       there -- never into a fixed input buffer, which must not be
+       mutated, and never into a scratch allocation, for the reason
+       above. The object is collectable from the moment it exists, so an
+       error part-way through leaks nothing. */
+    *sl = ts = luaS_createlngstrobj(L, size);
+    luaC_objbarrier(L, p, ts);
+    loadVector(S, getlngstr(ts), size + 1);
+    diluvium_unscramble(getlngstr(ts), size + 1);
   }
   else if (size <= LUAI_MAXSHORTLEN) {  /* short string? */
     char buff[LUAI_MAXSHORTLEN + 1];  /* extra space for '\0' */
@@ -358,14 +379,12 @@ static void loadDebug (LoadState *S, Proto *f) {
 
 
 static void loadFunction (LoadState *S, Proto *f) {
-  int saved = S->encrypted;
   f->is_encrypted = loadByte(S);  /* Diluvium: secure-function marker */
-  /* A secure function owns copies of its code and strings (loadCode and
-     loadString force copies when encrypted), so it has no fixed parts
-     regardless of the load mode. Children of a secure function are
-     themselves secure; save/restore keeps the parent's context for its
-     trailing source string. */
-  S->encrypted = f->is_encrypted;
+  /* A secure function owns copies of its code and strings (loadCode
+     forces one when encrypted, and so does loadString for any scrambled
+     string), so it has no fixed parts regardless of the load mode.
+     Nothing here tracks the enclosing function's secrecy: the code is
+     scrambled per its own proto, and a string per the flag it carries. */
   f->linedefined = loadInt(S);
   f->lastlinedefined = loadInt(S);
   f->numparams = loadByte(S);
@@ -380,7 +399,6 @@ static void loadFunction (LoadState *S, Proto *f) {
   loadProtos(S, f);
   loadString(S, f, &f->source);
   loadDebug(S, f);
-  S->encrypted = saved;
 }
 
 
@@ -447,7 +465,6 @@ LClosure *luaU_undump (lua_State *L, ZIO *Z, Table *anchor, const char *name,
   S.L = L;
   S.Z = Z;
   S.fixed = cast_byte(fixed);
-  S.encrypted = 0;
   S.offset = 1;  /* fist byte was already read */
   checkHeader(&S);
   S.h = anchor;

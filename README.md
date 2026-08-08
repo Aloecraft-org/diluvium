@@ -58,6 +58,13 @@ print(nil ?? "hello!")
 end
 ``` 
 
+A compiled chunk stores each distinct string once, so a literal a secure
+function shares with ordinary code has a single copy — and it is the
+secure function that decides, meaning that copy is hidden everywhere it
+is used. Nothing a secure function contains appears in the dump in the
+clear, whatever else in the chunk happens to use it.
+
+
 **Switch**
 
 ``` lua

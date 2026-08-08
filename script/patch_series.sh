@@ -45,9 +45,9 @@ lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_skipifnil for ?.
 lcode.h     OPR_2Q enum entry, luaK_skipifnil export
 lobject.h   is_encrypted flag on Proto
 lfunc.c     is_encrypted initialization
-ldump.c     XOR scramble of code/constant strings for secure protos
-lundump.c   XOR unscramble for secure protos; forced copy of fixed buffers
-lundump.h   LUAC_FORMAT 0x44 (Diluvium bytecode format byte)
+ldump.c     XOR scramble of code/constant strings for secure protos; taint pass
+lundump.c   XOR unscramble per string flag; forced copy of fixed buffers
+lundump.h   LUAC_FORMAT 0x45 (Diluvium bytecode format byte)
 luaconf.h   fixed string hash seed (deterministic pairs order)
 lua.h       Diluvium version/branding strings
 lua.c       Diluvium branding; REPL input handling moved to drepl.c

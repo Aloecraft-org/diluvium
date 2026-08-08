@@ -513,7 +513,7 @@ do
   local header = {  -- header components
     "\27Lua",               -- signature
     0x55,                   -- version 5.5 (0x55)
-    0x44,                   -- format (Diluvium; stock Lua is 0)
+    0x45,                   -- format (Diluvium 2; stock Lua is 0)
     "\x19\x93\r\n\x1a\n",   -- a binary string
     string.packsize("i"),   -- size of an int
     -0x5678,                -- an int

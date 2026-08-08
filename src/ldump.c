@@ -40,9 +40,18 @@ typedef struct {
 /*
 ** Diluvium: XOR-scramble a block in place. This is obfuscation, not
 ** cryptography (single-byte key). Applied to the code and string
-** constants of secure functions. Dump and load walk the proto tree in
-** identical order, so a string is scrambled and unscrambled at the same
-** tree position -- no per-string flag is needed.
+** constants of secure functions.
+**
+** The instruction stream is scrambled iff its own proto is secure, so
+** its position in the tree decides it. Strings cannot work that way:
+** 5.5 dumps each distinct string once and refers back to it by index
+** afterwards, so a string shared between a secure function and ordinary
+** code has exactly one stored copy, at whichever site was dumped first.
+** That site is not always the secure one -- a function dumps its own
+** constants before recursing into its children -- so scrambling by
+** position would store such a string in the clear. Instead the dump
+** decides per string (see 'taintSecureStrings') and records the decision
+** in the string's own header, which is what 'loadString' reads.
 */
 #define DILUVIUM_XOR_KEY	0xBE
 
@@ -151,13 +160,71 @@ static void dumpInteger (DumpState *D, lua_Integer x) {
 
 
 /*
+** Diluvium: record in 'D->h' that a string will be written from inside a
+** secure function somewhere in this chunk, so it is scrambled wherever
+** it is written first. 'D->h' doubles as the saved-string table: 0 marks
+** a string as secure but not yet written, and a real index (which starts
+** at 1) replaces it once it is. See 'dumpString'.
+*/
+static void taintString (DumpState *D, TString *ts) {
+  TValue key, value;
+  if (ts == NULL) return;
+  setsvalue(D->L, &key, ts);
+  setivalue(&value, 0);
+  luaH_set(D->L, D->h, &key, &value);  /* h[ts] = 0 */
+}
+
+
+/*
+** Walk the whole proto tree before dumping anything and mark every
+** string that a secure function will contribute. This mirrors exactly
+** the strings 'dumpFunction' writes while 'D->encrypted' holds -- the
+** constants, the source and the debug names -- so that the set is
+** neither short (which would leak) nor long (which would scramble
+** unrelated strings for no reason).
+**
+** 'secure' is inherited rather than replaced: a child of a secure
+** function contributes to it whatever its own flag says, so the fix does
+** not depend on the parser having marked every nested proto.
+*/
+static void taintSecureStrings (DumpState *D, const Proto *f, int secure) {
+  int i;
+  secure = secure || f->is_encrypted;
+  if (secure) {
+    for (i = 0; i < f->sizek; i++) {
+      const TValue *o = &f->k[i];
+      if (ttisstring(o))
+        taintString(D, tsvalue(o));
+    }
+    if (!D->strip) {
+      taintString(D, f->source);
+      for (i = 0; i < f->sizelocvars; i++)
+        taintString(D, f->locvars[i].varname);
+      for (i = 0; i < f->sizeupvalues; i++)
+        taintString(D, f->upvalues[i].name);
+    }
+  }
+  for (i = 0; i < f->sizep; i++)
+    taintSecureStrings(D, f->p[i], secure);
+}
+
+
+/*
 ** Dump a String. First dump its "size":
 ** size==0 is followed by an index and means "reuse saved string with
 ** that index"; index==0 means NULL.
-** size>=1 is followed by the string contents with real size==size-1 and
-** means that string, which will be saved with the next available index.
-** The real size does not include the ending '\0' (which is not dumped),
-** so adding 1 to it cannot overflow a size_t.
+** size>=1 means the string contents follow. Diluvium widens this field
+** by one bit -- it is dumped as size*2, plus 1 when the contents are
+** scrambled -- because whether a string is hidden is a property of the
+** string rather than of the position it is written at. Zero still means
+** "reuse", since a written string always has size>=1. The real size does
+** not include the ending '\0' (which is not dumped), so adding 1 to it
+** cannot overflow a size_t; nor can doubling it, for a string long
+** enough to need the top bit could not have been in memory to be dumped.
+**
+** That the flag is visible tells a reader which strings are hidden, but
+** not what they are, and the scramble is avowedly obfuscation rather
+** than cryptography -- so this costs nothing that was being relied on.
 */
 static void dumpString (DumpState *D, TString *ts) {
   if (ts == NULL) {
@@ -167,7 +234,9 @@ static void dumpString (DumpState *D, TString *ts) {
   else {
     TValue idx;
     int tag = luaH_getstr(D->h, ts, &idx);
-    if (!tagisempty(tag)) {  /* string already saved? */
+    /* 'h[ts]' is absent when unseen, 0 when marked secure by the taint
+       pass but not yet written, and its index once written. */
+    if (!tagisempty(tag) && ivalue(&idx) != 0) {  /* string already saved? */
       dumpVarint(D, 0);  /* reuse a saved string */
       dumpVarint(D, l_castS2U(ivalue(&idx)));  /* index of saved string */
     }
@@ -175,8 +244,11 @@ static void dumpString (DumpState *D, TString *ts) {
       TValue key, value;  /* to save the string in the hash */
       size_t size;
       const char *s = getlstr(ts, size);
-      dumpSize(D, size + 1);
-      if (D->encrypted) {  /* Diluvium: hide strings of secure functions */
+      /* Diluvium: scramble if this string belongs to a secure function
+         anywhere in the chunk, whether or not this is that site. */
+      int scrambled = D->encrypted || !tagisempty(tag);
+      dumpSize(D, (size + 1) * 2 + cast_sizet(scrambled));
+      if (scrambled) {  /* Diluvium: hide strings of secure functions */
         char *buff = luaM_newvector(D->L, size + 1, char);
         memcpy(buff, s, size + 1);
         diluvium_scramble(buff, size + 1);
@@ -344,6 +416,10 @@ int luaU_dump (lua_State *L, const Proto *f, lua_Writer w, void *data,
   D.status = 0;
   D.nstr = 0;
   D.encrypted = 0;
+  /* Diluvium: decide which strings are secure before writing any of
+     them; the first write of a shared string is not always the secure
+     one, and it is the only copy stored. */
+  taintSecureStrings(&D, f, 0);
   dumpHeader(&D);
   dumpByte(&D, f->sizeupvalues);
   dumpFunction(&D, f);
