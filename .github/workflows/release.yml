@@ -76,6 +76,16 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           fetch-depth: 0
 
+      - name: Changelog tooling
+        run: pip install --quiet pyyaml
+
+      - name: The changelog is the source of truth for release notes
+        run: |
+          set -eu
+          script/changelog.py validate
+          script/changelog.py check
+          script/changelog.py consistency
+
       - id: check
         env:
           EVENT: ${{ github.event_name }}
@@ -92,7 +102,15 @@ jobs:
             TAG="${GITHUB_REF#refs/tags/}"
             PUBLISH=true
             DRAFT=false
-            case "$VERSION" in *rc*|*alpha*|*beta*) PRERELEASE=true ;; *) PRERELEASE=false ;; esac
+            # No user input on a tag push, so the changelog decides. Its
+            # 'stable' field is the only reliable source here: this repo's
+            # versions carry suffixes ('_build1', '_release') that no
+            # string heuristic reads correctly.
+            # Assign from the command, not from a pipeline: a pipeline's
+            # status is the last stage's, so piping into sed would swallow
+            # the failure this gate exists to raise.
+            CL=$(script/changelog.py release-check --tag "$TAG" --publish)
+            PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
           else
             TAG="$IN_TAG"
             PUBLISH="${IN_PUBLISH:-false}"
@@ -107,6 +125,26 @@ jobs:
             if [ -n "$TAG" ] && git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
               echo "::error::tag '$TAG' already exists. Pick a new tag, or delete the old one first."
               exit 1
+            fi
+
+            # A rehearsal may name a tag the changelog does not describe yet;
+            # publishing one may not. Either way the entry, when it exists,
+            # is checked against what is being asked for.
+            CL_PRERELEASE=""
+            if [ -n "$TAG" ]; then
+              if [ "$PUBLISH" = true ]; then
+                # Fatal: publishing a tag the changelog does not describe as
+                # released would put "unreleased" on the release page.
+                CL=$(script/changelog.py release-check --tag "$TAG" --publish)
+                CL_PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
+              elif CL=$(script/changelog.py release-check --tag "$TAG"); then
+                CL_PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
+              else
+                echo "::warning::no CHANGELOG.yaml entry for '$TAG' yet; one is required before it can be published."
+              fi
+              if [ -n "$CL_PRERELEASE" ] && [ "$CL_PRERELEASE" != "$PRERELEASE" ]; then
+                echo "::warning::prerelease=$PRERELEASE was requested but the changelog marks '$TAG' as prerelease=$CL_PRERELEASE."
+              fi
             fi
           fi
 
@@ -172,6 +210,9 @@ jobs:
           name: ${{ needs.build.outputs.bundle_artifact }}
           path: release_dist
 
+      - name: Changelog tooling
+        run: pip install --quiet pyyaml
+
       - name: Generate release notes
         env:
           TAG: ${{ needs.preflight.outputs.tag }}
@@ -182,12 +223,13 @@ jobs:
           have() { [ -f "release_dist/$1" ]; }
           row() { have "$1" && printf '| %s | `%s` | %s |\n' "$2" "$1" "$3" >> release_notes.md || true; }
 
+          # The notes come from CHANGELOG.yaml, which is the source of
+          # truth. Everything below is provenance and download guidance,
+          # which is derived from what this build actually produced and so
+          # does not belong in the changelog.
+          script/changelog.py render md --tag "$TAG" > release_notes.md
+
           {
-            echo "Diluvium \`$VERSION\` — a fork of Lua 5.5.1 with string"
-            echo "interpolation and format specs, null coalescing, safe"
-            echo "navigation, compound assignment, \`switch\`, \`defer\`,"
-            echo "\`with\`, obfuscated functions and a bytecode analysis"
-            echo "report."
             echo ""
             echo "Built from commit [\`$(echo "$SHA" | cut -c1-12)\`](${{ github.server_url }}/${{ github.repository }}/commit/$SHA)."
             echo ""
@@ -195,7 +237,7 @@ jobs:
             echo ""
             echo "| Platform | File | Notes |"
             echo "| :--- | :--- | :--- |"
-          } > release_notes.md
+          } >> release_notes.md
 
           row diluvium_linux_static_x86_64     "**Linux (standard)**"    "Static; works on Ubuntu, Fedora, CentOS, Arch"
           row diluvium_linux_static_aarch64    "**Raspberry Pi 3/4/5**"  "64-bit OS only"
@@ -234,7 +276,6 @@ jobs:
           name: Diluvium ${{ needs.build.outputs.version }}
           files: release_dist/*
           body_path: release_notes.md
-          generate_release_notes: true
           draft: ${{ needs.preflight.outputs.draft == 'true' }}
           prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}
           fail_on_unmatched_files: true

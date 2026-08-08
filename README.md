@@ -58,6 +58,13 @@ print(nil ?? "hello!")
 end
 ``` 
 
+A compiled chunk stores each distinct string once, so a literal a secure
+function shares with ordinary code has a single copy — and it is the
+secure function that decides, meaning that copy is hidden everywhere it
+is used. Nothing a secure function contains appears in the dump in the
+clear, whatever else in the chunk happens to use it.
+
+
 **Switch**
 
 ``` lua
@@ -322,6 +329,13 @@ Example Output:
   }
 }
 ```
+## Changelog
+
+[`CHANGELOG.md`](CHANGELOG.md) records what changed in each release. It is
+generated from [`CHANGELOG.yaml`](CHANGELOG.yaml), which is the source of
+truth for the release page and the release mirror alike -- edit that file
+and run `script/changelog.py generate`.
+
 ## Testing
 
 The suite lives in `test/`. `test/run_tests.sh` is the single source of truth

@@ -151,6 +151,36 @@ jobs:
           path: /tmp/series.patch
           retention-days: 90
 
+  changelog:
+    name: Changelog
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Changelog tooling
+        run: pip install --quiet pyyaml
+
+      # CHANGELOG.yaml is the source of truth for the release page and for
+      # the release mirror, so a mistake here is a mistake on a published
+      # artifact. 'check' catches the committed CHANGELOG.md and
+      # changelog.json drifting from it -- the mirror reads that JSON with
+      # a stdlib-only Python, which is why it is committed rather than
+      # generated on demand.
+      - name: Changelog is valid and its generated copies are current
+        run: |
+          set -eu
+          ./script/changelog.py validate
+          ./script/changelog.py check
+
+      # The newest entry describes the tree it sits in. The version lives
+      # in three files here, so this is where drift between them surfaces.
+      - name: Tree agrees with the newest entry
+        run: ./script/changelog.py consistency
+
   analyzer:
     name: Analysis report
     needs: resolve
@@ -220,24 +250,39 @@ jobs:
       - name: Check that a ~function leaks nothing in plaintext
         env:
           # Strict since the fixes for handoff findings 3 (scramble length was
-          # an instruction count, not a byte count) and 4 (is_encrypted now
-          # propagates to nested closures): any plaintext marker in a secure
-          # dump is a regression.
+          # an instruction count, not a byte count), 4 (is_encrypted now
+          # propagates to nested closures) and the saved-string leak (a
+          # literal shared with ordinary code had one stored copy, in the
+          # clear): any plaintext marker in a secure dump is a regression.
           STRICT: 'true'
         run: |
           set -eu
+          # MARKER_SHARED_* are the interesting ones: 5.5 stores each distinct
+          # string once and back-references it, so a literal a secure function
+          # shares with ordinary code has a single stored copy at whichever
+          # site was dumped first -- which is not always the secure one.
           cat > /tmp/secure_probe.lua <<'LUA'
+          local shared_before = "MARKER_SHARED_ENCLOSING";
+          -- the ';' matters: '~' is also binary xor, so a '~function' line
+          -- following an expression is otherwise absorbed into it.
           ~function probe()
             local direct = "MARKER_DIRECT_CONSTANT"
             local nested = function() return "MARKER_NESTED_CONSTANT" end
-            return direct, nested
+            return direct, nested, "MARKER_SHARED_ENCLOSING", "MARKER_SHARED_SIBLING"
           end
+          local function sibling() return "MARKER_SHARED_SIBLING" end
+          return probe, sibling, shared_before
           LUA
+          # Dump unstripped too: debug names of a secure function are strings
+          # like any other, and -s would hide a leak in them.
           ./dist/luac -s -o /tmp/secure_probe.out /tmp/secure_probe.lua
+          ./dist/luac -o /tmp/secure_probe_debug.out /tmp/secure_probe.lua
 
           leaked=0
-          for marker in MARKER_DIRECT_CONSTANT MARKER_NESTED_CONSTANT; do
-            if grep -qa "$marker" /tmp/secure_probe.out; then
+          for marker in MARKER_DIRECT_CONSTANT MARKER_NESTED_CONSTANT \
+                        MARKER_SHARED_ENCLOSING MARKER_SHARED_SIBLING; do
+            if grep -qa "$marker" /tmp/secure_probe.out ||
+               grep -qa "$marker" /tmp/secure_probe_debug.out; then
               echo "LEAKED   $marker  (present in plaintext in the dumped chunk)"
               leaked=1
             else

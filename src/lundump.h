@@ -30,9 +30,16 @@
 ** Diluvium bytecode is not loadable by stock Lua (extra is_encrypted
 ** byte per function, optional XOR-scrambled code/constants), so it
 ** carries its own format byte: stock Lua rejects Diluvium chunks at the
-** header instead of misparsing them, and vice versa. 'D' for Diluvium.
+** header instead of misparsing them, and vice versa.
+**
+** 0x44 ('D' for Diluvium) was the first such format. 0x45 is the second:
+** a written string's size field carries a scramble flag in its low bit,
+** because 5.5's saved-string table means a string shared with a secure
+** function has one stored copy whose position no longer says whether it
+** should be hidden. Bump this whenever the layout changes, so a stale
+** chunk is refused rather than misread.
 */
-#define LUAC_FORMAT	0x44	/* Diluvium format ('D'); stock Lua uses 0 */
+#define LUAC_FORMAT	0x45	/* Diluvium format 2; stock Lua uses 0 */
 
 
 /* load one chunk; from lundump.c */
