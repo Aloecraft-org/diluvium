@@ -71,6 +71,7 @@ test_nullco|run||
 test_safenav|run||
 test_secure_dump|run||
 test_switch|run||
+test_verify|run||
 test_with|run||
 tpack|run||
 tracegc|run||

@@ -150,6 +150,21 @@ static void vfyskip (VState *V, int pc) {
 
 
 /*
+** A test that branches does not dispatch the following instruction --
+** 'donextjump' reads the raw word and takes GETARG_sJ of it, whatever
+** opcode it happens to carry. So requiring an OP_JMP there is what makes
+** that jump's own target check the real bound; without it a 25-bit
+** signed offset is read out of, say, an OP_LOADK and the interpreter
+** leaves the code array entirely.
+*/
+static void vfytest (VState *V, int pc) {
+  vfyskip(V, pc);
+  vfycheck(V, GET_OPCODE(V->f->code[pc + 1]) == OP_JMP,
+        "test instruction not followed by a jump");
+}
+
+
+/*
 ** The C operand of OP_RETURN and OP_TAILCALL is not a count but a
 ** signal: zero, or the parameter count of a function with hidden vararg
 ** arguments (lcode.c, luaK_finish). The VM subtracts it from ci->func,
@@ -157,8 +172,16 @@ static void vfyskip (VState *V, int pc) {
 ** frame -- a write, not just a read.
 */
 static void vfyvaparams (VState *V, int c) {
-  vfycheck(V, c == 0 || c == V->f->numparams + 1,
+  if (c == 0)
+    return;  /* the ordinary case: nothing hidden to unwind */
+  vfycheck(V, c == V->f->numparams + 1,
         "bad vararg parameter count in return");
+  /* 'ci->u.l.nextraargs' is the other half of that subtraction and is
+     written only by buildhiddenargs, on the PF_VAHID path. Checking the
+     count without checking the flag leaves it whatever the CallInfo was
+     last used for. */
+  vfycheck(V, (V->f->flag & PF_VAHID) != 0,
+        "return unwinds hidden arguments a function without them never built");
 }
 
 
@@ -315,19 +338,19 @@ static void verifyinstruction (VState *V, int pc) {
     case OP_EQ: case OP_LT: case OP_LE: case OP_TESTSET: {
       vfyreg(V, a);
       vfyreg(V, GETARG_B(i));
-      vfyskip(V, pc);
+      vfytest(V, pc);
       break;
     }
     case OP_EQK: {
       vfyreg(V, a);
       vfyk(V, GETARG_B(i));
-      vfyskip(V, pc);
+      vfytest(V, pc);
       break;
     }
     case OP_EQI: case OP_LTI: case OP_LEI: case OP_GTI: case OP_GEI:
     case OP_TEST: {
       vfyreg(V, a);
-      vfyskip(V, pc);
+      vfytest(V, pc);
       break;
     }
     case OP_CALL: {
@@ -349,7 +372,10 @@ static void verifyinstruction (VState *V, int pc) {
     }
     case OP_RETURN: {
       int b = GETARG_B(i);
-      vfyreg(V, a);
+      /* A is where the results start, not a register that has to hold
+         one: a function returning nothing emits B == 1 with A one past
+         the last live register, so this is a window bound */
+      vfywindow(V, a);
       if (b != 0)  /* returns R[A] .. R[A+B-2]; top becomes base+A+B-1 */
         vfywindow(V, a + b - 1);
       vfyvaparams(V, GETARG_C(i));
@@ -362,14 +388,22 @@ static void verifyinstruction (VState *V, int pc) {
       vfyreg(V, a);
       break;
     }
-    case OP_FORLOOP: case OP_TFORLOOP: {
-      /* both jump backwards by Bx */
-      vfyreg(V, a + (op == OP_FORLOOP ? 3 : 2));
+    case OP_FORLOOP: {
+      /* 5.5's numeric for is a three-slot control block: forprep rewrites
+         R[A], R[A+1] and R[A+2] in place and the visible variable is
+         R[A+2]. (5.4 had a fourth slot; checking for one here rejects
+         every numeric for whose frame ends exactly at R[A+2].) */
+      vfyreg(V, a + 2);
+      vfydest(V, pc + 1 - GETARG_Bx(i));
+      break;
+    }
+    case OP_TFORLOOP: {
+      vfyreg(V, a + 3);  /* tests the control variable at R[A+3] */
       vfydest(V, pc + 1 - GETARG_Bx(i));
       break;
     }
     case OP_FORPREP: {
-      vfyreg(V, a + 3);
+      vfyreg(V, a + 2);
       vfydest(V, pc + 1 + GETARG_Bx(i) + 1);
       break;
     }
@@ -389,8 +423,11 @@ static void verifyinstruction (VState *V, int pc) {
       /* shuffles the control variables up to R[A+5] before the call,
          then writes C results starting at R[A+4] */
       vfyreg(V, a + 5);
+      /* the call runs at R[A+3] and its results are moved back down to
+         start there, so A+3+C is the exclusive end of the window, not a
+         register that has to exist */
       if (GETARG_C(i) != 0)
-        vfyreg(V, a + 3 + GETARG_C(i));
+        vfywindow(V, a + 3 + GETARG_C(i));
       vfycheck(V, pc + 1 < f->sizecode, "generic-for call with no loop after it");
       vfycheck(V, GET_OPCODE(f->code[pc + 1]) == OP_TFORLOOP,
             "generic-for call not followed by its loop");
@@ -415,10 +452,16 @@ static void verifyinstruction (VState *V, int pc) {
       int c = GETARG_C(i);
       if (c != 0)  /* fixed result count: results land in R[A..A+C-2] */
         vfywindow(V, a + c - 1);
+      /* the two vararg shapes read different places, so each form of the
+         instruction only makes sense under its own flag */
+      vfycheck(V, (f->flag & (TESTARG_k(i) ? PF_VATAB : PF_VAHID)) != 0,
+            "vararg access does not match the function's vararg shape");
       break;
     }
     case OP_GETVARG: {
       vfyreg(V, GETARG_C(i));
+      vfycheck(V, (f->flag & PF_VAHID) != 0,
+            "hidden-argument access in a function without hidden arguments");
       break;
     }
     case OP_ERRNNIL: {
@@ -430,12 +473,23 @@ static void verifyinstruction (VState *V, int pc) {
       break;
     }
     case OP_VARARGPREP: {
-      break;  /* takes its counts from the prototype, not from operands */
+      /* it rebases the frame, so it is a prologue and nothing else: the
+         compiler emits it only as the first instruction */
+      vfycheck(V, pc == 0, "vararg prologue away from the start of a function");
+      break;
     }
     case OP_EXTRAARG: {
-      /* only ever reached as the operand of the instruction before it,
-         which is what makes that instruction's check the real one */
+      /* An EXTRAARG is a word, not an instruction: reaching it through
+         dispatch is lua_assert(0) in a debug build and a silent no-op in
+         a release one. It is legal only where the instruction before it
+         consumes it, so that is the rule -- "something precedes it" is
+         not enough, because that is true of every word but the first. */
+      OpCode prev;
       vfycheck(V, pc >= 1, "extra argument with nothing before it");
+      prev = GET_OPCODE(f->code[pc - 1]);
+      vfycheck(V, prev == OP_LOADKX || prev == OP_NEWTABLE ||
+                  (prev == OP_SETLIST && TESTARG_k(f->code[pc - 1])),
+            "extra argument after an instruction that does not take one");
       break;
     }
     default: {
@@ -481,6 +535,24 @@ static void verifyproto (lua_State *L, const Proto *f, const char *src,
   vfycheck(&V, f->sizecode > 0, "function has no code");
   vfycheck(&V, f->numparams <= f->maxstacksize,
         "more parameters than the function has registers for");
+  /* The flag byte is loaded raw (lundump.c masks only PF_FIXED), and
+     luaT_adjustvarargs merely lua_asserts which of the two vararg shapes
+     it is looking at. In a release build a bad flag silently picks a
+     branch and builds a frame the prologue never prepared, so the
+     agreement between the flag and the prologue has to be checked here.
+     'flag' is also the only place a Proto records something the code
+     array does not repeat. */
+  vfycheck(&V, (f->flag & cast_byte(~(PF_VAHID | PF_VATAB | PF_FIXED))) == 0,
+        "unknown bits in the prototype flag byte");
+  vfycheck(&V, (f->flag & (PF_VAHID | PF_VATAB)) != (PF_VAHID | PF_VATAB),
+        "prototype claims both vararg shapes at once");
+  vfycheck(&V, (isvararg(f) != 0) ==
+               (GET_OPCODE(f->code[0]) == OP_VARARGPREP),
+        "vararg flag and vararg prologue disagree");
+  if (isvararg(f))
+    /* both branches of luaT_adjustvarargs write register 'numparams' */
+    vfycheck(&V, f->numparams + 1 <= f->maxstacksize,
+          "vararg function has no register for its vararg parameter");
   /* the compiler always closes a function with a return, and without one
      execution runs off the end of the code array */
   switch (GET_OPCODE(f->code[f->sizecode - 1])) {

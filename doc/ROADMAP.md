@@ -108,8 +108,30 @@ Measured on the same seeds, verifier off then on, 300 mutants each:
 | 3 | 18 | 1 |
 | 7 | 21 | 2 |
 
-78 abnormal terminations out of 1200 down to 5, and the suite is
-unchanged at 39 passed / 0 failed / 6 skipped.
+78 abnormal terminations out of 1200 down to 5 (and 3 out of 1500 on a
+further seed). The suite is at 40 passed / 0 failed / 6 skipped.
+
+**The suite could not have caught a bug in this file, and did not.**
+`luai_verifycode` is called from `luaU_undump` and from nowhere else, so
+it only runs when a *binary* chunk is loaded — and almost every test
+feeds source. The first version of this verifier rejected
+`for i = 1, 10 do end` on reload, and the whole suite passed anyway.
+`test/test_verify.lua` exists for that reason and is shaped around it:
+everything in it goes through `string.dump` and back, because that is
+the only path that reaches the code under test. It round-trips every
+construct the compiler emits — each loop form one variable at a time,
+since the operand bound is a function of the variable count and an
+off-by-one only shows at the exact frame size — plus every suite file's
+own compiled form, stripped and unstripped, as a free corpus of real
+compiler output.
+
+It loads mutants and deliberately runs none of them: loading is where
+the verifier works and is safe in-process, while running a mutant that
+survives the verifier takes the suite down with it. That is
+`fuzz_exec.py`'s job and the reason it forks. The refusal *rate* is
+pinned too — the loader alone refuses 19.2% of single-byte mutants and
+the loader plus the verifier refuses 32.9%, so a floor of 25% fails if
+`luai_verifycode` is ever quietly emptied again.
 
 What it checks is bounds and structure: every register, constant,
 upvalue and prototype index against the owning prototype's own limits;
@@ -122,17 +144,39 @@ against the enclosing function's registers and upvalue list, which is
 the one bound that belongs to a different prototype than the one being
 read.
 
-Two of those deserve recording because they are writes rather than
-reads. The `C` operand of `OP_RETURN` and `OP_TAILCALL` is not a count
-but a signal (`lcode.c`, `luaK_finish`); the VM subtracts it from
-`ci->func`, so an arbitrary value walks the frame pointer backwards. And
-`OP_MMBIN` reads the instruction *before* it and takes that
-instruction's `A` as its destination register, so the metamethod
-instructions have a predecessor rule and not only an operand rule.
+Four of those deserve recording individually.
 
-**The residue is one crash class, and it is not a bounds problem.**
-All five surviving mutants die at the same instruction, `lvm.c`'s
-`OP_SETLIST`:
+The `C` operand of `OP_RETURN` and `OP_TAILCALL` is not a count but a
+signal (`lcode.c`, `luaK_finish`); the VM subtracts it from `ci->func`,
+so an arbitrary value walks the frame pointer backwards — a write.
+Checking the count is not enough on its own, because
+`ci->u.l.nextraargs` is the other half of that subtraction and is
+written only by `buildhiddenargs`, on the `PF_VAHID` path; the flag has
+to be checked with it or the value is whatever the `CallInfo` was last
+used for.
+
+`OP_MMBIN` and its two variants read the instruction *before* them and
+take that instruction's `A` as the register the metamethod result is
+written into, so the metamethod instructions carry a predecessor rule
+and not only an operand rule.
+
+A test that branches does not dispatch the following instruction:
+`donextjump` reads the raw word and takes `GETARG_sJ` of it whatever
+opcode it carries. Requiring an `OP_JMP` there is what makes that
+jump's own target check the real bound — without it a 25-bit signed
+offset is read out of, say, an `OP_LOADK` and the interpreter leaves the
+code array.
+
+`f->flag` is loaded raw and `luaT_adjustvarargs` only `lua_assert`s
+which of the two vararg shapes it is looking at, so in a release build a
+bad flag silently picks a branch and builds a frame the prologue never
+prepared. The flag, the presence of `OP_VARARGPREP` at pc 0, and the
+opcodes that depend on either (`OP_VARARG`'s two forms, `OP_GETVARG`)
+all have to agree.
+
+**The residue is a type assumption, not a bounds problem.** Of the five
+surviving mutants, the three traced under `gdb` all die at the same
+instruction, `lvm.c`'s `OP_SETLIST`:
 
 ```c
 Table *h = hvalue(s2v(ra));   /* no type test */
@@ -166,6 +210,18 @@ out, in increasing cost:
 Until one of them lands, `fuzz_exec.py --allowed 0` does not pass, and
 the honest claim is "the operand crash class is closed, one type
 assumption is not."
+
+One loose end, recorded because it is genuinely unresolved rather than
+because it is understood. Walking every single-byte mutation of the
+*debug* build's own dump leaves three assertion failures: two are the
+`SETLIST` type assumption above, and the third is `ci_func`'s
+`ttisLclosure` at `lvm.c:1216`. The release build loads that same
+mutant, runs it, and returns the correct answer, so it is not
+reproducible as a release-mode crash and may be an artefact of what
+`ltests.h` changes. It is either a debug-only artefact or a silent
+invariant violation that happens not to fault; deciding which needs
+more than the time it has had. Note `test_verify.lua` cannot hit it —
+that test loads mutants and runs none.
 
 ### Secure functions and the saved-string table
 
