@@ -51,9 +51,30 @@ rather than taken from the log:
 | 8 | `luai_verifycode` empty | **open** |
 | 9 | String hash seed nondeterministic | fixed |
 
-Finding 8 is stock Lua behaviour, and only becomes a hard requirement once
-compiled chunks are accepted as untrusted input. It is not a blocker for
-the standalone runtime.
+Finding 8 is stock Lua behaviour, but the assessment above that it "only
+becomes a hard requirement once compiled chunks are accepted as untrusted
+input" understated it, and `script/fuzz_exec.py` is why.
+
+Mutate one byte of a small dump and run the result: **about 7% of mutants
+crash the release interpreter** -- segmentation faults and
+`munmap_chunk(): invalid pointer`, not merely errors. Measured at 36 of
+500 on one seed and 21 of 300 on another, on `diluvium_linux_x86_64`
+where the debug assertions are compiled out.
+
+The reason `script/fuzz_undump.lua` reports clean is that it never
+executes what it loads. Corrupting an instruction's operand usually
+leaves a chunk that still loads, because nothing checks operands against
+the prototype that owns them; the damage appears only when the VM runs
+it. The byte-stream fuzzer counts those as passes. Both fuzzers are worth
+having, and neither substitutes for the other.
+
+This is a memory-safety property, not a robustness nicety, and it sits
+directly under what the fork advertises -- secure functions and the
+analysis report exist so a chunk you did not compile can be handed to you
+and inspected. A verifier is the fix: check each instruction's register,
+constant, upvalue and prototype indices against the prototype's own
+limits, and each jump target against its code length, at load time.
+`fuzz_exec.py --allowed 0` is the test for it.
 
 ### Secure functions and the saved-string table
 
@@ -363,7 +384,8 @@ images are not, so an unexplained jump is usually one of those moving.
 - Contract calling convention, kernel framing, libm embedding — carried
   from the handoff, all still open.
 - Float reduction order, needed before any vector work.
-- `luai_verifycode`, per finding 8 above.
+- `luai_verifycode`, per finding 8 above -- now measured, and the largest
+  open item on the runtime.
 
 ## Known non-code issues
 
