@@ -25,3 +25,7 @@ x.patch
 luac.out
 release_dist
 .xtrshow_manifest
+
+# Python bytecode from script/
+__pycache__/
+*.pyc
