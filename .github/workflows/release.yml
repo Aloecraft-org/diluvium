@@ -259,6 +259,7 @@ jobs:
           cat release_notes.md
 
       - name: Create release
+        id: gh_release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
@@ -269,6 +270,33 @@ jobs:
           draft: ${{ needs.preflight.outputs.draft == 'true' }}
           prerelease: ${{ needs.preflight.outputs.prerelease == 'true' }}
           fail_on_unmatched_files: true
+
+      # action-gh-release updates an existing release's draft flag but will
+      # not clear its prerelease flag from true to false -- build2's first
+      # publish came out labelled "pre-release" for that reason, on a run
+      # that had computed prerelease=false. So set both flags explicitly
+      # afterwards, from the values preflight derived from the changelog.
+      # This makes the label match the changelog's `stable` no matter what
+      # the release already was.
+      - name: Enforce draft/prerelease flags from the changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ needs.preflight.outputs.tag }}
+          WANT_DRAFT: ${{ needs.preflight.outputs.draft }}
+          WANT_PRERELEASE: ${{ needs.preflight.outputs.prerelease }}
+          REPO: ${{ github.repository }}
+          API: ${{ github.api_url }}
+        run: |
+          set -eu
+          auth="Authorization: Bearer $GH_TOKEN"
+          rel=$(curl -sf -H "$auth" -H "Accept: application/vnd.github+json" \
+            "$API/repos/$REPO/releases/tags/$TAG")
+          id=$(printf '%s' "$rel" | sed -n 's/.*"id":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' | head -1)
+          [ -n "$id" ] || { echo "::error::could not find release id for $TAG"; exit 1; }
+          curl -sf -X PATCH -H "$auth" -H "Accept: application/vnd.github+json" \
+            "$API/repos/$REPO/releases/$id" \
+            -d "{\"draft\":$WANT_DRAFT,\"prerelease\":$WANT_PRERELEASE}" >/dev/null
+          echo "set draft=$WANT_DRAFT prerelease=$WANT_PRERELEASE on $TAG"
 
   # Make the outcome of a rehearsal run obvious from the run page.
   summary:
