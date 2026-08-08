@@ -37,16 +37,6 @@ on:
         type: boolean
         required: false
         default: false
-      draft:
-        description: 'Create the release as a draft'
-        type: boolean
-        required: false
-        default: true
-      prerelease:
-        description: 'Mark as a pre-release'
-        type: boolean
-        required: false
-        default: true
       run_tests:
         description: 'Run the test suite before building'
         type: boolean
@@ -91,8 +81,6 @@ jobs:
           EVENT: ${{ github.event_name }}
           IN_TAG: ${{ inputs.tag }}
           IN_PUBLISH: ${{ inputs.publish }}
-          IN_DRAFT: ${{ inputs.draft }}
-          IN_PRERELEASE: ${{ inputs.prerelease }}
         run: |
           set -eu
           VERSION=$(tr -d '[:space:]' < VERSION)
@@ -114,8 +102,14 @@ jobs:
           else
             TAG="$IN_TAG"
             PUBLISH="${IN_PUBLISH:-false}"
-            DRAFT="${IN_DRAFT:-true}"
-            PRERELEASE="${IN_PRERELEASE:-true}"
+            # Never a draft, and prerelease is not an input: whether a
+            # release is stable is a fact recorded in the changelog, not a
+            # box someone ticks at dispatch time. A box that could disagree
+            # with the changelog is exactly how build2's first release came
+            # out a draft prerelease. publish=false makes no release at all,
+            # so these only take effect when we actually publish.
+            DRAFT=false
+            PRERELEASE=false
 
             if [ "$PUBLISH" = true ] && [ -z "$TAG" ]; then
               echo "::error::publish=true requires a tag name."
@@ -127,23 +121,19 @@ jobs:
               exit 1
             fi
 
-            # A rehearsal may name a tag the changelog does not describe yet;
-            # publishing one may not. Either way the entry, when it exists,
-            # is checked against what is being asked for.
-            CL_PRERELEASE=""
-            if [ -n "$TAG" ]; then
-              if [ "$PUBLISH" = true ]; then
-                # Fatal: publishing a tag the changelog does not describe as
-                # released would put "unreleased" on the release page.
-                CL=$(script/changelog.py release-check --tag "$TAG" --publish)
-                CL_PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
-              elif CL=$(script/changelog.py release-check --tag "$TAG"); then
-                CL_PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
+            if [ "$PUBLISH" = true ]; then
+              # Fatal if the changelog does not describe this tag as
+              # released -- otherwise the release page could say
+              # "unreleased". The changelog decides prerelease, via 'stable'.
+              CL=$(script/changelog.py release-check --tag "$TAG" --publish)
+              PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
+            elif [ -n "$TAG" ]; then
+              # A rehearsal may name a tag the changelog does not cover yet;
+              # report but do not fail, since nothing is published.
+              if CL=$(script/changelog.py release-check --tag "$TAG"); then
+                PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
               else
                 echo "::warning::no CHANGELOG.yaml entry for '$TAG' yet; one is required before it can be published."
-              fi
-              if [ -n "$CL_PRERELEASE" ] && [ "$CL_PRERELEASE" != "$PRERELEASE" ]; then
-                echo "::warning::prerelease=$PRERELEASE was requested but the changelog marks '$TAG' as prerelease=$CL_PRERELEASE."
               fi
             fi
           fi
