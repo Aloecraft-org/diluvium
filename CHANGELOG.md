@@ -99,7 +99,7 @@ table this depends on, so 5.4.7 and earlier never had it.
   in every report, and a shift wide enough to be undefined
   behaviour. The guard that would have caught it is a debug-build
   assertion, so release builds read the wrong bits in silence.
-  Found by UBSan on a valid chunk."
+  Found by UBSan on a valid chunk.
 
 ### Security
 

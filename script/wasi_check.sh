@@ -42,6 +42,20 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# Absolutise before anything else: run_tests.sh runs each test with the cwd
+# set to test/, so a relative --wasm or --native stops resolving the moment
+# the suite starts. run_tests.sh already does this for its own --bin; the
+# same reasoning applies to every path handed across that boundary.
+abspath() {
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *)  printf '%s/%s\n' "$(CDPATH= cd -- "$(dirname -- "$1")" && pwd)" \
+                          "$(basename -- "$1")" ;;
+  esac
+}
+[ -e "$WASM" ] && WASM=$(abspath "$WASM")
+[ -n "$NATIVE" ] && [ -e "$NATIVE" ] && NATIVE=$(abspath "$NATIVE")
+
 [ -f "$WASM" ] || { echo "wasi_check: no such module: $WASM" >&2; exit 2; }
 command -v "$RUNTIME" >/dev/null 2>&1 || {
   echo "wasi_check: no WASI runtime '$RUNTIME' on PATH" >&2; exit 2; }
