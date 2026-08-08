@@ -76,7 +76,10 @@ constant, upvalue and prototype indices against the prototype's own
 limits, and each jump target against its code length, at load time.
 `fuzz_exec.py --allowed 0` is the test for it.
 
-**Scheduled for 5.5.1_build3.** build2 ships without it, deliberately and
+**Landing in 5.5.1_build3**, and partly landed: see "The verifier, as
+built" below for what it does and the one crash class it does not close.
+
+build2 shipped without it, deliberately and
 on the record: the exposure is documented in the README and in build2's
 `known_issues`, the complete mitigation (`load(bytes, name, "t")`) already
 exists, and the normal paths are clean under ASan and UBSan. What made
@@ -88,6 +91,81 @@ supports is "malformed bytecode is refused rather than crashing", never
 "bytecode is safe". Lua 5.1's fuller checker still had escapes, and a
 verifier believed to do more than it does would repeat this release's
 other mistake.
+
+### The verifier, as built
+
+`src/lverify.c`, called from the `luai_verifycode` hook stock Lua leaves
+empty. It is a **new** file rather than a patch to `lundump.c`, so the
+core patch series stays at 14: `lundump.h` gains the one-line hook
+definition it already had a slot for, and nothing else in `src/` moves.
+
+Measured on the same seeds, verifier off then on, 300 mutants each:
+
+| Seed | Before | After |
+| :--- | ---: | ---: |
+| 1 | 21 | 0 |
+| 2 | 18 | 2 |
+| 3 | 18 | 1 |
+| 7 | 21 | 2 |
+
+78 abnormal terminations out of 1200 down to 5, and the suite is
+unchanged at 39 passed / 0 failed / 6 skipped.
+
+What it checks is bounds and structure: every register, constant,
+upvalue and prototype index against the owning prototype's own limits;
+every jump target against the code length, and never onto an
+`OP_EXTRAARG`; the register *window* of the instructions that name a
+range, not merely the base; the `EXTRAARG` and `MMBIN` adjacency rules
+in both directions; that a function ends in a return, so execution
+cannot run off the end; and a nested prototype's upvalue descriptors
+against the enclosing function's registers and upvalue list, which is
+the one bound that belongs to a different prototype than the one being
+read.
+
+Two of those deserve recording because they are writes rather than
+reads. The `C` operand of `OP_RETURN` and `OP_TAILCALL` is not a count
+but a signal (`lcode.c`, `luaK_finish`); the VM subtracts it from
+`ci->func`, so an arbitrary value walks the frame pointer backwards. And
+`OP_MMBIN` reads the instruction *before* it and takes that
+instruction's `A` as its destination register, so the metamethod
+instructions have a predecessor rule and not only an operand rule.
+
+**The residue is one crash class, and it is not a bounds problem.**
+All five surviving mutants die at the same instruction, `lvm.c`'s
+`OP_SETLIST`:
+
+```c
+Table *h = hvalue(s2v(ra));   /* no type test */
+```
+
+`SETLIST` is the only opcode in the dispatch loop that assumes a
+register's *type* without checking it — everything else reaches
+`luaV_finishget` or an explicit `ttistable` first. Corrupt the
+`OP_NEWTABLE` that set `R[A]` up, or the register it targets, and
+`h->asize` dereferences whatever that slot happens to hold.
+
+No amount of operand bounds-checking closes this: it is a dataflow
+property (was `R[A]` last written by a `NEWTABLE`, on every path that
+reaches here), which is where a bounds checker stops and an abstract
+interpreter starts. That is exactly the line this file said to draw in
+advance, so it is being recorded rather than crossed quietly. Three ways
+out, in increasing cost:
+
+1. **A type test in `lvm.c`.** One branch per table constructor, and it
+   makes `src/` 15 files instead of 14 — the first addition to the core
+   patch series, which is the review point `patch_series.sh` exists to
+   force.
+2. **Backward register tracing in the verifier.** `analyze.c` already
+   has `find_reg_source` and `find_newtable_for_reg`, built for the
+   report and directly reusable. Cheap and no core patch, but unsound
+   across joins: it would have to fail closed on any `SETLIST` whose
+   base it cannot trace, and that risks refusing chunks a real compiler
+   emits.
+3. **A real dataflow pass.** Sound, and the largest of the three.
+
+Until one of them lands, `fuzz_exec.py --allowed 0` does not pass, and
+the honest claim is "the operand crash class is closed, one type
+assumption is not."
 
 ### Secure functions and the saved-string table
 

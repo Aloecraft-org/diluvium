@@ -11,7 +11,16 @@
 
 #include "llimits.h"
 #include "lobject.h"
+#include "lverify.h"
 #include "lzio.h"
+
+
+/*
+** Diluvium: stock Lua leaves this hook empty, so an instruction's
+** operands were never checked against the prototype that owns them.
+** src/lverify.c implements it; see the note there.
+*/
+#define luai_verifycode(L,f)	luaU_verify(L,f)
 
 
 /* data to catch conversion errors */

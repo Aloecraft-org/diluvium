@@ -85,6 +85,7 @@
 #include "lctype.c"
 #include "lopcodes.c"
 #include "lmem.c"
+#include "lverify.c"
 #include "lundump.c"
 #include "ldump.c"
 #include "lstate.c"
