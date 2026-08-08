@@ -55,6 +55,27 @@ table this depends on, so 5.4.7 and earlier never had it.
 - A release cannot be published for a tag the changelog does not
   describe as released, so a release page can no longer say
   "unreleased".
+- Performance is tracked per release, in `BUILDSTATS.json`.
+
+  `script/bench.lua` measures thirteen cases, Diluvium's own
+  constructs among them -- f-strings with and without a format spec,
+  `switch`, safe navigation, `defer`, and a dump/load round trip
+  through a secure function -- so the cost of the features this fork
+  exists for is measured rather than assumed.
+
+  The comparable figure is the VM instruction count, not elapsed
+  time. It is deterministic: the same code on the same build gives
+  the same number on any machine, so a movement in it is real work
+  added or removed, where a wall-clock movement on a shared runner
+  usually is not. Counting uses a count hook rather than a patched
+  VM, so the harness is ordinary Lua and runs anywhere Diluvium
+  runs. Times are recorded beside the counts and are advisory.
+
+  `build_stats.sh compare` reports instruction deltas alongside size
+  deltas and can fail over a percentage, so a performance regression
+  can be refused rather than merely logged. Counts are comparable
+  within a build configuration: the debug build changes codegen
+  parameters and so emits different bytecode.
 
 ### Fixed
 
