@@ -114,9 +114,50 @@ jobs:
         run: |
           set -eu
           ./dist/diluvium_linux_static_x86_64 -v
-          ./dist/diluvium_linux_static_x86_64 -e 'assert((nil ?? "ok") == "ok"); print("null coalescing ok")'
-          ./dist/diluvium_linux_static_x86_64 -e 'local w="world"; assert($"hello {w}" == "hello world"); print("f-strings ok")'
+          ./dist/diluvium_linux_static_x86_64 script/smoke.lua
           ./dist/diluvium_compiler_linux_static_x86_64 -v
+
+      # aarch64 and armv7l were built here and shipped without ever being
+      # run. QEMU and the container are already set up from building them,
+      # so running the binary costs one more invocation each.
+      - name: Smoke test the ARM static binaries
+        run: |
+          set -eu
+          for spec in "linux/arm64 aarch64" "linux/arm/v7 armv7l"; do
+            set -- $spec
+            plat=$1; arch=$2
+            bin="dist/diluvium_linux_static_$arch"
+            [ -f "$bin" ] || { echo "::error::$bin missing"; exit 1; }
+            echo "--- $arch (under QEMU)"
+            podman run --rm --platform "$plat" -v "$(pwd):/w" -w /w \
+              alpine:latest sh -c "./$bin -v && ./$bin script/smoke.lua"
+          done
+
+      # wasmtime, pinned: an unpinned runtime is one more thing that can
+      # change under a build without anyone choosing it.
+      - name: Install wasmtime
+        env:
+          WASMTIME_VERSION: v27.0.0
+        run: |
+          set -eu
+          url="https://github.com/bytecodealliance/wasmtime/releases/download"
+          curl -sSL "$url/$WASMTIME_VERSION/wasmtime-$WASMTIME_VERSION-x86_64-linux.tar.xz" \
+            | tar -xJ
+          sudo install -m755 \
+            "wasmtime-$WASMTIME_VERSION-x86_64-linux/wasmtime" /usr/local/bin/wasmtime
+          wasmtime --version
+
+      # The WASI module is published on every release and was, until now,
+      # never executed anywhere. This runs the Diluvium constructs through
+      # it and checks that benchmark instruction counts match the native
+      # build -- counts are supposed to describe the bytecode rather than
+      # the machine, and this is what makes that checkable.
+      - name: Run the WASI artifact we ship
+        run: |
+          set -eu
+          script/wasi_check.sh \
+            --wasm dist/diluvium_wasi.wasm \
+            --native ./dist/diluvium_linux_static_x86_64
 
       - uses: actions/upload-artifact@v4
         with:
@@ -157,7 +198,7 @@ jobs:
           set -eu
           BIN=$(ls dist/diluvium_darwin_* | grep -v '\.a$' | grep -v compiler | head -1)
           "$BIN" -v
-          "$BIN" -e 'assert((nil ?? "ok") == "ok"); print("null coalescing ok")'
+          "$BIN" script/smoke.lua
 
       - uses: actions/upload-artifact@v4
         with:
@@ -198,7 +239,7 @@ jobs:
         run: |
           set -eu
           ./dist/diluvium_windows_x86_64.exe -v
-          ./dist/diluvium_windows_x86_64.exe -e 'assert((nil ?? "ok") == "ok"); print("null coalescing ok")'
+          ./dist/diluvium_windows_x86_64.exe script/smoke.lua
 
       - uses: actions/upload-artifact@v4
         with:

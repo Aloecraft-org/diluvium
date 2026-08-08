@@ -131,6 +131,15 @@ Bytecode compiled by 5.5.1_build1 will not load in 5.5.1_build2, and
 the reverse. Recompile any `.luac` produced by build1. Source is
 unaffected, and nothing about the language changed.
 
+This release also states the fork's compatibility promise outright
+(see `Compatibility` in the README), so that "stable" means
+something specific rather than being a tone of voice. In short:
+source compatibility with stock Lua is absolute and will not change;
+the 5.5 syntax is settled and keeps its meaning; the bytecode format
+may move between builds, and a stale chunk is refused rather than
+misread. The next format change is expected when decimal literals
+land.
+
 
 ## [5.5.1_build1] - 2026-08-07
 

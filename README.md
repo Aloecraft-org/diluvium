@@ -329,6 +329,31 @@ Example Output:
   }
 }
 ```
+## Compatibility
+
+What this fork promises, so that "stable" means something specific:
+
+**Source compatibility with stock Lua is absolute.** Every construct
+Diluvium adds is a syntax error in stock Lua, and none of them takes a
+reserved word — `switch`, `case`, `default`, `defer` and `with` are
+contextual keywords and stay usable as ordinary names. Lua code runs
+unmodified. This will not change.
+
+**Diluvium's own syntax is settled for the 5.5 line.** The constructs
+here are what 5.5 ships; new ones may be added, but what exists keeps its
+meaning.
+
+**Bytecode format may change between builds.** A compiled chunk carries a
+format byte and loads only into a build carrying the same one, so a stale
+chunk is refused rather than misread — recompile and carry on. The
+current format is `0x45`; the next change is expected when decimal
+literals land. Source is never affected.
+
+**The C API is Lua's**, plus what `diluvium_api.h` adds. Diluvium's
+changes to the Lua sources are held to 14 files and checked against
+pristine upstream on every build, which is what keeps rebasing onto new
+Lua releases tractable.
+
 ## Changelog
 
 [`CHANGELOG.md`](CHANGELOG.md) records what changed in each release. It is

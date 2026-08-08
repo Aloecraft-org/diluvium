@@ -151,6 +151,33 @@ jobs:
           path: /tmp/series.patch
           retention-days: 90
 
+  fuzz:
+    name: Loader fuzz
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # The debug binary, not the release one: its allocator asserts on a
+      # leak at exit and its GC checks are on, which is what makes the quiet
+      # failures visible. Both loader bugs fixed in 5.5.1_build2 were found
+      # this way rather than by the suite.
+      - name: Build debug binary (with ltests.h assertions)
+        run: make test_build
+
+      # Fixed seeds, so a failure here is reproducible from the log rather
+      # than being a thing that happened once. Rotate or add seeds to widen
+      # coverage; do not randomise, or a red build cannot be re-run.
+      - name: Mutate and load
+        run: |
+          set -eu
+          for seed in 20260808 31337 65535 8675309; do
+            ./dist/diluvium_debug script/fuzz_undump.lua 2000 "$seed"
+          done
+
   changelog:
     name: Changelog
     needs: resolve
