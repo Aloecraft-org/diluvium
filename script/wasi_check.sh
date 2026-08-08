@@ -94,8 +94,27 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 # sandbox demonstration.
 RUNTIME_FLAGS=${WASI_RUNTIME_FLAGS--W exceptions=y}
 
+# A WASI guest has no host working directory -- it sees preopened
+# directories and nothing else -- so a relative script name handed to it
+# cannot be resolved, even though the wrapper itself is sitting in the
+# directory that contains the file. run_tests.sh invokes its binary as
+# `BIN name.lua` from inside test/, which is exactly that shape. The
+# wrapper therefore rewrites relative arguments that name existing files
+# into absolute paths, which the '/' preopen can resolve.
 cat > "$WORK/diluvium_wasi" <<EOF
 #!/bin/sh
+n=\$#
+i=0
+while [ \$i -lt \$n ]; do
+  a=\$1; shift
+  case "\$a" in
+    -*) ;;
+    /*) ;;
+    *)  [ -f "\$a" ] && a="\$PWD/\$a" ;;
+  esac
+  set -- "\$@" "\$a"
+  i=\$((i + 1))
+done
 exec $RUNTIME run $RUNTIME_FLAGS --dir / ${WASI_DIRS:-} "$WASM" "\$@"
 EOF
 chmod +x "$WORK/diluvium_wasi"
