@@ -73,10 +73,18 @@ command -v "$RUNTIME" >/dev/null 2>&1 || {
 # ---------------------------------------------------------------------------
 WASI_TESTS="
   test_fstrings test_switch test_compound test_defer test_safenav test_with
-  test_interop test_nullco test_secure_dump test_determinism secure_function
-  strings math sort bitwise bwcoercion calls closure constructs events goto
+  test_interop test_nullco test_secure_dump secure_function
+  math sort bitwise bwcoercion calls closure constructs events goto
   locals nextvar pm tpack utf8 vararg
 "
+
+# Left out on purpose, and not because Diluvium fails them:
+#   test_determinism  uses io.popen; WASI has no subprocesses.
+#   strings           sets a 'ptb' collate locale; wasi-libc is C-locale
+#                     only, so os.setlocale returns nil and the collation
+#                     assertion fails. Same class as the 'literals' skip in
+#                     run_tests.sh (musl vs glibc). Neither gap is in the
+#                     runtime this project ships as native binaries.
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT INT TERM
@@ -95,12 +103,18 @@ trap 'rm -rf "$WORK"' EXIT INT TERM
 RUNTIME_FLAGS=${WASI_RUNTIME_FLAGS--W exceptions=y}
 
 # A WASI guest has no host working directory -- it sees preopened
-# directories and nothing else -- so a relative script name handed to it
-# cannot be resolved, even though the wrapper itself is sitting in the
-# directory that contains the file. run_tests.sh invokes its binary as
-# `BIN name.lua` from inside test/, which is exactly that shape. The
-# wrapper therefore rewrites relative arguments that name existing files
-# into absolute paths, which the '/' preopen can resolve.
+# directories and nothing else. Two consequences, handled here:
+#
+#  * A relative script name handed to it cannot be resolved even though the
+#    wrapper is sitting in the directory that holds the file. run_tests.sh
+#    invokes its binary as `BIN name.lua` from inside test/, so the wrapper
+#    rewrites relative arguments that name existing files into absolute
+#    paths, which the '/' preopen resolves.
+#  * require searches package.path's './?.lua' against the guest's '.',
+#    which does not exist unless a directory is preopened as '.'. Adding
+#    '--dir .' preopens the wrapper's own cwd -- test/, during the suite --
+#    as the guest's '.', so a sibling require (bitwise -> bwcoercion,
+#    locals -> tracegc) finds its file.
 cat > "$WORK/diluvium_wasi" <<EOF
 #!/bin/sh
 n=\$#
@@ -115,7 +129,7 @@ while [ \$i -lt \$n ]; do
   set -- "\$@" "\$a"
   i=\$((i + 1))
 done
-exec $RUNTIME run $RUNTIME_FLAGS --dir / ${WASI_DIRS:-} "$WASM" "\$@"
+exec $RUNTIME run $RUNTIME_FLAGS --dir / --dir . ${WASI_DIRS:-} "$WASM" "\$@"
 EOF
 chmod +x "$WORK/diluvium_wasi"
 
