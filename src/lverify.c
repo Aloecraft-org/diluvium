@@ -41,6 +41,16 @@
 */
 #define isarith(o)	(OP_ADDI <= (o) && (o) <= OP_SHR)
 
+/*
+** The three metamethod instructions are contiguous too. This is a range
+** test rather than testMMMode because it is applied to a *neighbouring*
+** instruction's opcode, and every opmode macro indexes luaP_opmodes --
+** an 85-entry table read with a 7-bit field. Anything that looks at an
+** opcode other than the one being checked must avoid that table or be
+** certain the opcode is in range; see the first pass in verifyproto.
+*/
+#define ismmbin(o)	(OP_MMBIN <= (o) && (o) <= OP_MMBINK)
+
 
 typedef struct {
   lua_State *L;
@@ -191,7 +201,8 @@ static void verifyinstruction (VState *V, int pc) {
   OpCode op = GET_OPCODE(i);
   int a = GETARG_A(i);
   V->pc = pc;
-  vfycheck(V, cast_int(op) < NUM_OPCODES, "unknown opcode");
+  /* opcodes are already known to be in range: verifyproto sweeps for that
+     first, precisely so the neighbour lookups below are safe */
   /* every opcode that assigns to R[A] needs A to name a register; the
      opcode table already says which those are */
   if (testAMode(op))
@@ -202,7 +213,7 @@ static void verifyinstruction (VState *V, int pc) {
      skipped */
   if (isarith(op)) {
     vfycheck(V, pc + 1 < f->sizecode, "missing metamethod instruction");
-    vfycheck(V, testMMMode(GET_OPCODE(f->code[pc + 1])),
+    vfycheck(V, ismmbin(GET_OPCODE(f->code[pc + 1])),
           "arithmetic opcode not followed by its metamethod instruction");
   }
   switch (op) {
@@ -561,6 +572,18 @@ static void verifyproto (lua_State *L, const Proto *f, const char *src,
       V.pc = f->sizecode - 1;
       verifyerror(&V, "function does not end in a return");
     }
+  }
+  /* First pass: every opcode in range. This has to finish before any
+     per-instruction check runs, because those look at neighbouring
+     instructions (an arithmetic opcode's metamethod fallback, an
+     EXTRAARG's owner) and every opmode macro indexes an 85-entry table
+     with a 7-bit field. Folding this into the main loop reads
+     luaP_opmodes out of bounds for exactly as long as it takes the
+     corrupt opcode's own turn to come around. */
+  for (pc = 0; pc < f->sizecode; pc++) {
+    V.pc = pc;
+    vfycheck(&V, cast_int(GET_OPCODE(f->code[pc])) < NUM_OPCODES,
+          "unknown opcode");
   }
   for (pc = 0; pc < f->sizecode; pc++)
     verifyinstruction(&V, pc);

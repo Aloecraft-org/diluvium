@@ -211,6 +211,26 @@ Until one of them lands, `fuzz_exec.py --allowed 0` does not pass, and
 the honest claim is "the operand crash class is closed, one type
 assumption is not."
 
+One thing the verifier got wrong about itself, worth recording because
+of the shape rather than the size. Every opmode macro — `testAMode`,
+`testMMMode`, `getOpMode` — indexes `luaP_opmodes`, which has one entry
+per opcode (85) and is read with a 7-bit field that encodes 128 values.
+Validating an opcode before using its own opmode is not enough, because
+several checks look at a *neighbouring* instruction: the metamethod
+fallback after an arithmetic opcode, the owner of an `EXTRAARG`. A
+corrupt neighbour was read out of that table for exactly as long as it
+took its own turn to come around — a verifier with the bug it exists to
+catch. ASan found it and nothing else did; the debug build's own
+assertions did not, and neither did the fuzzer, because reading 42 bytes
+past a static array rarely faults.
+
+The fix is structural rather than local: `verifyproto` sweeps every
+opcode for range in a pass of its own before any per-instruction check
+runs, so neighbour lookups are safe by construction, and the
+metamethod-family test is a range compare rather than a table read.
+Anything added later that inspects another instruction inherits that
+guarantee instead of having to remember it.
+
 One loose end, recorded because it is genuinely unresolved rather than
 because it is understood. Walking every single-byte mutation of the
 *debug* build's own dump leaves three assertion failures: two are the
