@@ -413,3 +413,29 @@ jobs:
           else
             echo "::warning::secure chunk contains plaintext constants (known: handoff findings 3 and 4)"
           fi
+
+      - name: Check that no single-byte XOR pass recovers the markers
+        run: |
+          set -eu
+          # The grep above passes for any scramble at all, including one
+          # repeated byte -- which it was until the keystream landed, leaving
+          # the strings one 'tr' pass from readable. Sweeping all 256 keys
+          # tests the shape of the encoding rather than a constant, so this
+          # cannot pass again by accident if someone simplifies the scramble.
+          python3 - <<'PY'
+          import sys
+          markers = [b"MARKER_DIRECT_CONSTANT", b"MARKER_NESTED_CONSTANT",
+                     b"MARKER_SHARED_ENCLOSING", b"MARKER_SHARED_SIBLING"]
+          bad = 0
+          for path in ("/tmp/secure_probe.out", "/tmp/secure_probe_debug.out"):
+              blob = open(path, "rb").read()
+              for key in range(256):
+                  flipped = bytes(b ^ key for b in blob)
+                  for m in markers:
+                      if m in flipped:
+                          print("RECOVERED %s from %s with XOR 0x%02x"
+                                % (m.decode(), path, key))
+                          bad = 1
+          print("no single-byte XOR pass recovers a marker" if not bad else "")
+          sys.exit(bad)
+          PY

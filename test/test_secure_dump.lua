@@ -154,4 +154,39 @@ end
 assert_eq(rejected > 0, true, "single-byte corruption is caught, never crashes")
 assert_eq(seen["invalid string size"], true, "and an under-biased size by name")
 
+print("\n-- 9. No single-byte XOR pass recovers a hidden string")
+-- This is the property the keystream exists for. While the scramble was one
+-- repeated byte, 'absent' above passed and the strings were still one 'tr'
+-- pass from being readable, which is not meaningfully better than the text
+-- editor the README says a secure function defends against. Sweeping all
+-- 256 keys rather than only the one in ldump.c keeps this honest: it is a
+-- statement about the shape of the encoding, not about a constant.
+local s9 = marker("Kappa")
+local bytes9 = dumped(("local ~function c() return %q end return c"):format(s9))
+local recovered = nil
+for key = 0, 255 do
+    local out = {}
+    for i = 1, #bytes9 do out[i] = string.char(bytes9:byte(i) ~ key) end
+    if table.concat(out):find(s9, 1, true) then recovered = key; break end
+end
+assert_eq(recovered, nil, "no whole-file single-byte XOR reveals the marker")
+
+-- ... and the plain dump is still hidden, i.e. the sweep is not vacuous
+-- because the string was absent for some unrelated reason.
+present(dumped(("local function c() return %q end return c"):format(s9)), s9,
+        "the same literal IS in the clear without the '~', so 9 is not vacuous")
+
+print("\n-- 10. Scrambling is deterministic")
+-- 'doc/Messaging.md' plans to content-address prototypes by hashing their
+-- stripped dump, which needs identical source to give identical bytes. A
+-- per-dump nonce in the scramble would break that silently -- everything
+-- would still round-trip, and only the cache would stop working. Assert it
+-- here, where a change to the scramble is what someone is editing.
+local s10 = marker("Lambda")
+local src10 = ("local ~function c() return %q end return c"):format(s10)
+assert_eq(dumped(src10, true) == dumped(src10, true), true,
+          "identical source gives byte-identical stripped dumps")
+assert_eq(dumped(src10, false) == dumped(src10, false), true,
+          "and unstripped too")
+
 print("\n=== All Secure Dump Tests Passed ===")

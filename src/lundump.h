@@ -45,10 +45,14 @@
 ** a written string's size field carries a scramble flag in its low bit,
 ** because 5.5's saved-string table means a string shared with a secure
 ** function has one stored copy whose position no longer says whether it
-** should be hidden. Bump this whenever the layout changes, so a stale
-** chunk is refused rather than misread.
+** should be hidden. 0x46 is the third: the scramble became a generated
+** keystream rather than one repeated byte. That one is not a layout change
+** at all, and it is the reason to state the rule as more than layout --
+** a chunk scrambled under a different keystream still parses, and decodes
+** to garbage silently. Bump this whenever the layout OR the encoding
+** changes, so a stale chunk is refused rather than misread.
 */
-#define LUAC_FORMAT	0x45	/* Diluvium format 2; stock Lua uses 0 */
+#define LUAC_FORMAT	0x46	/* Diluvium format 3; stock Lua uses 0 */
 
 
 /* load one chunk; from lundump.c */

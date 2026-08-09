@@ -380,7 +380,7 @@ meaning.
 **Bytecode format may change between builds.** A compiled chunk carries a
 format byte and loads only into a build carrying the same one, so a stale
 chunk is refused rather than misread — recompile and carry on. The
-current format is `0x45`; the next change is expected when decimal
+current format is `0x46`; the next change is expected when decimal
 literals land. Source is never affected.
 
 **The C API is Lua's**, plus what `diluvium_api.h` adds. Diluvium's

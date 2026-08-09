@@ -383,6 +383,38 @@ the dump stores things has to be re-checked against secure functions,
 because the security property is about the encoding and not only about
 the values.
 
+### The scramble itself, finally looked at
+
+Both rounds above were about *where* the scramble is applied. Neither
+touched what it is, and it was a single repeated byte from the day the
+feature was written -- `git log -S 0xBE` lands on the original commit and
+nothing after it. That passed every test, including the CI audit, because
+every test asked whether `strings` finds the constants. It does not. `tr`
+does, in one pass, which is about one step above the text editor the
+README says this defends against.
+
+It is now a generated keystream (`LUAC_FORMAT` 0x46), seeded from the
+block length so blocks do not share a prefix, deterministic and
+self-inverse. The tests changed shape more than the code did:
+`test_secure_dump.lua` sweeps all 256 single-byte keys instead of checking
+the one in `ldump.c`, and the CI audit does the same over real `luac`
+output -- a property of the encoding rather than a fact about a constant,
+so simplifying the scramble back cannot pass again by accident. Both were
+verified failing on the previous scheme before being committed.
+
+Two constraints now bind anyone editing this, and both are recorded in
+`ldump.c` beside the code: it must stay **deterministic**, because
+`doc/Messaging.md` content-addresses prototypes by the hash of their
+stripped dump and a per-dump nonce would break that while round-tripping
+perfectly, and it must stay **self-inverse**, because `lundump.c` holds
+the same function under another name.
+
+The honest claim is unchanged in kind and stronger in degree: this is
+obfuscation, not encryption. Recovering a secure function's strings takes
+reading these public sources and implementing the keystream. That is
+trivial for anyone who wants to, and no longer a one-liner for anyone who
+does not.
+
 ### `~function` after an expression
 
 `~` is also the binary xor operator, and Lua expressions span newlines,
