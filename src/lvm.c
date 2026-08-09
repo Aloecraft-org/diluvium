@@ -1908,7 +1908,21 @@ void luaV_execute (lua_State *L, CallInfo *ci) {
         StkId ra = RA(i);
         unsigned n = cast_uint(GETARG_vB(i));
         unsigned last = cast_uint(GETARG_vC(i));
-        Table *h = hvalue(s2v(ra));
+        Table *h;
+        /* Diluvium: SETLIST is the one opcode in this loop that reads a
+           register as a table without first testing that it is one --
+           every sibling (GETFIELD, GETTABLE, SELF) reaches ttistable via
+           luaV_fastget. In honest code the compiler always writes R[A]
+           with NEWTABLE first, so this only fires on corrupt bytecode;
+           whether R[A] is a table there is a dataflow fact a load-time
+           verifier cannot settle (doc/ROADMAP.md), so the guard lives
+           here, at the point the value is known. A catchable error, so a
+           bad chunk is refused rather than a wild pointer dereferenced. */
+        if (l_unlikely(!ttistable(s2v(ra)))) {
+          savepc(ci);
+          luaG_runerror(L, "set list into a non-table (corrupt bytecode)");
+        }
+        h = hvalue(s2v(ra));
         if (n == 0)
           n = cast_uint(L->top.p - ra) - 1;  /* get up to the top */
         else

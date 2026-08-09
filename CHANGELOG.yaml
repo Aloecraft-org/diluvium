@@ -92,10 +92,16 @@ releases:
         exactly what the verifier checks. On one corpus that turns 111
         crashes into none.
 
-        The claim this supports is that **malformed bytecode is refused
-        rather than crashing**. It is not that bytecode is safe. One crash
-        class remains, a type assumption in `OP_SETLIST` that is a dataflow
-        property rather than a bounds one (`doc/ROADMAP.md` tracks it); Lua
+        One opcode needed more than the verifier. `OP_SETLIST` (and the
+        vararg-table path) read a register as a table without testing it
+        was one -- a dataflow property a load-time check cannot settle --
+        so the VM now tests it and raises a catchable error rather than
+        dereferencing a wild pointer, the way its sibling opcodes already
+        do. With that, both fuzzers pass at `--allowed 0`: no single-byte
+        or operand mutation crashes the release interpreter on the corpus.
+
+        The claim this supports is that **malformed bytecode is refused or
+        errors rather than crashing**. It is not that bytecode is safe: Lua
         5.1 shipped a fuller checker than this one and still had escapes.
         `load(bytes, name, "t")` remains the complete mitigation, and
         inspecting a chunk with `diluvium_compiler -r` remains safer than

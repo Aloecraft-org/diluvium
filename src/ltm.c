@@ -337,7 +337,19 @@ static int getnumargs (lua_State *L, CallInfo *ci, Table *h) {
 */
 void luaT_getvarargs (lua_State *L, CallInfo *ci, StkId where, int wanted,
                                     int vatab) {
-  Table *h = (vatab < 0) ? NULL : hvalue(s2v(ci->func.p + vatab + 1));
+  Table *h;
+  /* Diluvium: the same unchecked table read OP_SETLIST had. The vararg
+     table is set up by the prologue in honest code, so a non-table here
+     is corrupt bytecode; raise rather than dereference it. This runs
+     under Protect from OP_VARARG, so the pc is already saved. */
+  if (vatab < 0)
+    h = NULL;
+  else {
+    TValue *vt = s2v(ci->func.p + vatab + 1);
+    if (l_unlikely(!ttistable(vt)))
+      luaG_runerror(L, "vararg table is not a table (corrupt bytecode)");
+    h = hvalue(vt);
+  }
   int nargs = getnumargs(L, ci, h);  /* number of available vararg args. */
   int i, touse;  /* 'touse' is minimum between 'wanted' and 'nargs' */
   if (wanted < 0) {

@@ -48,7 +48,7 @@ rather than taken from the log:
 | 5 | Bytecode format byte not bumped | fixed (`LUAC_FORMAT` 0x45) |
 | 6 | F-string nesting and escapes | fixed |
 | 7 | `$` fallthrough created `$`-prefixed identifiers | fixed |
-| 8 | `luai_verifycode` empty | **open** |
+| 8 | `luai_verifycode` empty | fixed in `_build3` (see "The verifier, as built") |
 | 9 | String hash seed nondeterministic | fixed |
 
 Finding 8 is stock Lua behaviour, but the assessment above that it "only
@@ -234,47 +234,72 @@ format change would otherwise cause.
 
 Measured off versus on, one corpus, 469 operand mutations: **111 crashes
 become 0.** `--allowed 0`, and it stays there — this is the gate that says
-the operand crash class is closed, and unlike `fuzz_exec` it targets
-operands specifically so it never reaches the `SETLIST` residual. Both
-fuzzers now run in CI; `fuzz_exec`'s ceiling dropped from 35 to 3, the 3
-being that same residual.
+the operand crash class is closed. Both fuzzers now run in CI at
+`--allowed 0`.
 
-**The residue is a type assumption, not a bounds problem.** Of the five
-surviving `fuzz_exec` mutants, the three traced under `gdb` all die at the
-same instruction, `lvm.c`'s `OP_SETLIST`:
+### The one type assumption, and how it was closed
+
+`OP_SETLIST` was the single opcode in the dispatch loop that read a
+register as a table without first testing that it is one:
 
 ```c
-Table *h = hvalue(s2v(ra));   /* no type test */
+Table *h = hvalue(s2v(ra));   /* no ttistable */
 ```
 
-`SETLIST` is the only opcode in the dispatch loop that assumes a
-register's *type* without checking it — everything else reaches
-`luaV_finishget` or an explicit `ttistable` first. Corrupt the
-`OP_NEWTABLE` that set `R[A]` up, or the register it targets, and
-`h->asize` dereferences whatever that slot happens to hold.
+Every sibling — `GETFIELD`, `GETTABLE`, `SELF` — reaches `ttistable`
+through `luaV_fastget` first; `SETLIST` was the anomaly, and `ltm.c`'s
+vararg-table path (`luaT_getvarargs`) had the same one. Corrupt the
+`NEWTABLE` that set `R[A]` up, or the register it targets, and `h->asize`
+dereferenced whatever the slot held — the last release crash class, and
+the three `gdb`-traced `fuzz_exec` mutants.
 
-No amount of operand bounds-checking closes this: it is a dataflow
-property (was `R[A]` last written by a `NEWTABLE`, on every path that
-reaches here), which is where a bounds checker stops and an abstract
-interpreter starts. That is exactly the line this file said to draw in
-advance, so it is being recorded rather than crossed quietly. Three ways
-out, in increasing cost:
+This is a **dataflow** property — was `R[A]` last written by a `NEWTABLE`
+on every path that reaches here — not a bounds one, so the load-time
+verifier cannot settle it: "there is a `NEWTABLE` textually before this
+`SETLIST`" is not "`R[A]` is a table here" without a control-flow graph
+to rule out a jump over it, and building that graph is the aspirational
+work below.
 
-1. **A type test in `lvm.c`.** One branch per table constructor, and it
-   makes `src/` 15 files instead of 14 — the first addition to the core
-   patch series, which is the review point `patch_series.sh` exists to
-   force.
-2. **Backward register tracing in the verifier.** `analyze.c` already
-   has `find_reg_source` and `find_newtable_for_reg`, built for the
-   report and directly reusable. Cheap and no core patch, but unsound
-   across joins: it would have to fail closed on any `SETLIST` whose
-   base it cannot trace, and that risks refusing chunks a real compiler
-   emits.
-3. **A real dataflow pass.** Sound, and the largest of the three.
+So the fix is a **runtime type-test in the VM**, one `ttistable` at each
+of the two sites, raising a catchable error instead of dereferencing a
+wild pointer. It is sound and complete by construction — it checks the
+real value at the moment it is known — with no false-rejection surface,
+and it is one tag compare next to the `last > h->asize` compare already
+there. The framing that makes it the right call rather than a reluctant
+patch: it does not *add* a check, it *removes an inconsistency* where one
+opcode skipped the test its siblings all make. That is the argued
+exception `patch_series.sh` exists to surface, and it takes the core
+series from 14 files to 16 — `lvm.c` and `ltm.c`, both newly allowlisted
+with that reason. With it, `fuzz_exec.py --allowed 0` passes.
 
-Until one of them lands, `fuzz_exec.py --allowed 0` does not pass, and
-the honest claim is "the operand crash class is closed, one type
-assumption is not."
+What remains at `SETLIST` is not memory safety: two debug-build
+`lua_assert`s a corrupt operand can still trip — a live `CLOSE` with a
+nonzero `B` (the parser emits dead ones with `B == 1`, so the verifier
+cannot reject it), and the `SETLIST` preallocation assert when a corrupt
+`vC` forces a resize. Both are release-safe — the resize path is
+self-consistent in its (possibly wrapped) `last`, and `CLOSE` ignores `B`
+— which the release fuzzers confirm by staying at zero on exactly those
+mutations. They are invariants worth an assertion, not holes.
+
+### Aspirational: a dataflow pass, shared with boundedness
+
+The verifier is a bounds-and-structure checker by design, and the
+`SETLIST` type-test above is the one place that was not enough. The
+principled version — a control-flow graph and an abstract interpretation
+that tracks, per register per program point, whether a value is
+known-table — would let the verifier *prove* the `SETLIST` invariant
+statically rather than the VM enforcing it dynamically, and would make
+the vararg-table check the same kind of static fact.
+
+It is recorded as aspirational rather than scheduled because it is not
+single-use: the **boundedness verdict** in the Analyzer section below
+needs exactly this machinery — basic blocks and a fixpoint over loop
+structure. Building the CFG once serves both, which is the argument for
+doing it deliberately and well rather than bolting a narrow
+`SETLIST`-only tracer onto the verifier now. The VM type-test remains
+correct and cheap even after the analyzer can also prove it, so this is
+additive, not a replacement — belt and suspenders, the right posture for
+memory safety.
 
 One thing the verifier got wrong about itself, worth recording because
 of the shape rather than the size. Every opmode macro — `testAMode`,
@@ -616,8 +641,12 @@ images are not, so an unexplained jump is usually one of those moving.
 - Contract calling convention, kernel framing, libm embedding — carried
   from the handoff, all still open.
 - Float reduction order, needed before any vector work.
-- `luai_verifycode`, per finding 8 above -- now measured, and the largest
-  open item on the runtime.
+- A dataflow pass over the code (control-flow graph plus a known-table
+  lattice), which would let the verifier prove the `OP_SETLIST` invariant
+  statically instead of the VM enforcing it at run time, and which the
+  boundedness verdict needs anyway. Aspirational; see "Aspirational: a
+  dataflow pass, shared with boundedness" above. `luai_verifycode` itself
+  (finding 8) is done.
 
 ## Known non-code issues
 
