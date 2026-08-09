@@ -32,13 +32,27 @@ checked at load time instead of being trusted.
   accepted.
 
   `luai_verifycode` is now implemented rather than empty. Every
-  instruction's register, constant, upvalue and prototype indices are
+  instruction's register, constant, upvalue and prototype index is
   checked against the prototype's own limits, and every jump target
-  against its code length, before the chunk is handed back.
+  against its code length, before the chunk is handed back. The check
+  also reaches past the instruction stream: line info must cover the
+  code or be absent (a short one reads out of bounds on the first
+  error), absolute line entries must be ordered and in range, and a
+  few operands with undefined behaviour at the extremes (a table hash
+  size that would shift a word by its full width) are bounded.
+
+  Two fuzzers now gate it. `script/fuzz_exec.py` flips random bytes
+  and measures the accident rate; `script/fuzz_struct.py` is new and
+  measures the attack rate -- it finds the code array and sets each
+  operand out of range for the prototype that owns it, which is
+  exactly what the verifier checks. On one corpus that turns 111
+  crashes into none.
 
   The claim this supports is that **malformed bytecode is refused
-  rather than crashing**. It is not that bytecode is safe. Lua 5.1
-  shipped a fuller checker than this one and still had escapes;
+  rather than crashing**. It is not that bytecode is safe. One crash
+  class remains, a type assumption in `OP_SETLIST` that is a dataflow
+  property rather than a bounds one (`doc/ROADMAP.md` tracks it); Lua
+  5.1 shipped a fuller checker than this one and still had escapes.
   `load(bytes, name, "t")` remains the complete mitigation, and
   inspecting a chunk with `diluvium_compiler -r` remains safer than
   running it.

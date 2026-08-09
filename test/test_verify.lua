@@ -109,6 +109,32 @@ local shapes = {
   "do defer print('x') end",
   "local t = setmetatable({}, {__close = function() end}) with a = t do end",
   "~function secret() return 'hidden' end return secret",
+  -- a long straight-line body, to force many line-info and absolute-line
+  -- entries: the debug-array checks only mean anything on a function big
+  -- enough to have more than one absolute entry (MAXIWTHABS apart)
+  (function ()
+    local parts = {"local x = 0"}
+    for i = 1, 400 do parts[#parts + 1] = "x = x + " .. i end
+    parts[#parts + 1] = "return x"
+    return table.concat(parts, "\n")   -- newlines, so line info advances
+  end)(),
+  -- a big table with hash and array parts, to push NEWTABLE's sizes
+  (function ()
+    local parts = {"return {"}
+    for i = 1, 200 do parts[#parts + 1] = i .. "," end
+    for i = 1, 200 do parts[#parts + 1] = "k" .. i .. " = " .. i .. "," end
+    parts[#parts + 1] = "}"
+    return table.concat(parts, "\n")
+  end)(),
+  -- an array past 1023 elements, which is what makes NEWTABLE set its k
+  -- flag and spill the array size into an OP_EXTRAARG: the case the
+  -- verifier's k-and-extra-argument check has to accept
+  (function ()
+    local parts = {"return {"}
+    for i = 1, 1500 do parts[#parts + 1] = i .. "," end
+    parts[#parts + 1] = "}"
+    return table.concat(parts, "\n")
+  end)(),
 }
 
 for _, src in ipairs(shapes) do

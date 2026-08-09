@@ -380,6 +380,13 @@ static void loadDebug (LoadState *S, Proto *f) {
 
 static void loadFunction (LoadState *S, Proto *f) {
   f->is_encrypted = loadByte(S);  /* Diluvium: secure-function marker */
+  /* It is a flag: a well-formed chunk stores 0 or 1. A larger value is
+     harmless in practice -- the code paths that read it are truthiness
+     tests, so 2 behaves as 1 -- but it is a malformed encoding, and the
+     loader rejects those by name rather than acting on them, exactly as
+     it does for a corrupt string size. */
+  if (f->is_encrypted > 1)
+    error(S, "invalid secure-function marker");
   /* A secure function owns copies of its code and strings (loadCode
      forces one when encrypted, and so does loadString for any scrambled
      string), so it has no fixed parts regardless of the load mode.

@@ -174,9 +174,74 @@ prepared. The flag, the presence of `OP_VARARGPREP` at pc 0, and the
 opcodes that depend on either (`OP_VARARG`'s two forms, `OP_GETVARG`)
 all have to agree.
 
+Beyond the instruction stream, four more checks close faults that have
+nothing to do with operands:
+
+- **Line info must cover the code, or be absent.** `loadDebug` reads the
+  line-info length independently of the code length, and `ldebug.c`
+  guards only against a `NULL` `lineinfo`, never a short one — so a chunk
+  whose line info is shorter than its code reads out of bounds on the
+  first traceback, error or line hook. The check is `sizelineinfo == 0 ||
+  sizelineinfo == sizecode`, and the zero is load-bearing: a stripped
+  chunk loaded the ordinary way has `lineinfo == NULL`, but loaded into a
+  fixed buffer (the C API's `"B"` mode) it is a **non-NULL zero-length
+  view** into the caller's memory. An earlier form of this check tested
+  `== sizecode` and would have refused every stripped chunk loaded in
+  fixed mode — an adversarial reviewer found that before it shipped, and
+  it is the reason the check keys on the length and not the pointer.
+- **Absolute line entries in range and ordered**, since `getbaseline`
+  binary-searches them by pc, plus a density floor
+  (`(sizecode-1)/MAXIWTHABS <= sizeabslineinfo`) because its first guess,
+  `pc/MAXIWTHABS - 1`, is taken on faith to be a valid index. The floor
+  uses the same `MAXIWTHABS` the runtime does — a chunk compiled under a
+  different one and loaded here is already outside what the format
+  promises, and stock `getbaseline` says as much.
+- **`NEWTABLE` hash size.** The VM turns `vB` into a size with
+  `1u << (vB - 1)`; `vB` is a 6-bit field, so a value past 32 shifts a
+  32-bit word by 32 or more, which is undefined and which UBSan flags.
+  The bound is 32, not 31, because `1u << 31` is defined and the compiler
+  can legally emit exactly 32.
+- **`is_encrypted` is 0 or 1**, rejected in the loader. This one closes
+  no memory-safety fault — the reviewer confirmed a stray value behaves
+  as 1, since every path that reads it is a truthiness test — but it is a
+  malformed encoding, and the loader refuses those by name for the same
+  reason it rejects unknown flag bits.
+
+**One structural check was tried and deliberately dropped: IT/OT
+pairing.** `lcode.c` asserts `luaP_isOT(code[pc-1]) == luaP_isIT(code[pc])`
+— the invariant that would bound the zero-count `CALL`/`RETURN`/`SETLIST`,
+which inherit `L->top` from a top-producing predecessor. But it asserts
+it *before* `luaK_finish`'s own peephole rewrites `RETURN0` into `RETURN`
+on every vararg or `<close>` function, which changes `isIT`, so the
+*dumped* code does not satisfy the invariant. Enforcing it at load time
+would refuse every vararg and every to-be-closed function. It belongs in
+the runtime bucket with `SETLIST` below, not here — the load-time half is
+genuinely not expressible without replaying `finish`.
+
+### Fuzzing the verifier: accident rate and attack rate
+
+`script/fuzz_exec.py` flips random bytes and measures how often that
+crashes the interpreter. That is an accident rate: most single-byte
+mutations land in string or debug data and never reach an operand check.
+`script/fuzz_struct.py` is the attack-rate companion the roadmap asked
+for. It locates the code array in a real dump — anchored on the 4-byte
+alignment `dumpCode` gives it, the `OP_VARARGPREP` that opens every main
+chunk, and the return that closes every function — and sets each
+instruction operand out of range for the prototype that owns it, which is
+exactly what the verifier checks. If it cannot find that anchor it aborts
+rather than fuzzing nothing, because a silent zero-coverage pass is what a
+format change would otherwise cause.
+
+Measured off versus on, one corpus, 469 operand mutations: **111 crashes
+become 0.** `--allowed 0`, and it stays there — this is the gate that says
+the operand crash class is closed, and unlike `fuzz_exec` it targets
+operands specifically so it never reaches the `SETLIST` residual. Both
+fuzzers now run in CI; `fuzz_exec`'s ceiling dropped from 35 to 3, the 3
+being that same residual.
+
 **The residue is a type assumption, not a bounds problem.** Of the five
-surviving mutants, the three traced under `gdb` all die at the same
-instruction, `lvm.c`'s `OP_SETLIST`:
+surviving `fuzz_exec` mutants, the three traced under `gdb` all die at the
+same instruction, `lvm.c`'s `OP_SETLIST`:
 
 ```c
 Table *h = hvalue(s2v(ra));   /* no type test */

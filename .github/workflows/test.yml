@@ -228,19 +228,33 @@ jobs:
       # operand usually leaves a chunk that still loads, and the damage
       # appears when the VM runs it. fuzz_exec runs them.
       #
-      # --allowed is a CEILING, not a target. It is above zero because the
-      # loader does not yet check operands against the prototype that owns
-      # them -- see "Loading bytecode you did not compile" in the README --
-      # so this currently catches the loader getting dramatically worse
-      # rather than proving it is sound. It goes to 0 when the verifier
-      # lands, and must never be raised to make a build green.
+      # --allowed is a CEILING, not a target. It was 35 before the verifier
+      # landed. It is now a small margin above zero for one reason only: the
+      # residual SETLIST type assumption (doc/ROADMAP.md), which is a
+      # dataflow property a load-time verifier cannot close and which random
+      # byte mutation still occasionally hits. It must never be raised to
+      # make a build green; it drops to 0 when SETLIST is closed.
       - name: Build release binary
         run: make build_platform || make
       - name: Mutate, load and run
         run: |
           set -eu
           BIN=$(ls dist/diluvium_linux_x86_64 dist/diluvium 2>/dev/null | head -1)
-          ./script/fuzz_exec.py --bin "$BIN" --rounds 200 --seed 7 --allowed 35
+          ./script/fuzz_exec.py --bin "$BIN" --rounds 200 --seed 7 --allowed 3
+
+      # The attack-rate companion to fuzz_exec's accident rate. It finds the
+      # code array and sets each instruction operand out of range for the
+      # prototype that owns it -- exactly what the verifier checks -- so a
+      # crash here means the verifier let an out-of-range operand through.
+      # --allowed 0, and it stays there: this is the gate that says the
+      # operand crash class is closed. (Measured off vs on: 111 crashes
+      # become 0 on this corpus.) It targets operands specifically, so it
+      # does not reach the SETLIST residual fuzz_exec tolerates above.
+      - name: Corrupt operands, load and run
+        run: |
+          set -eu
+          BIN=$(ls dist/diluvium_linux_x86_64 dist/diluvium 2>/dev/null | head -1)
+          ./script/fuzz_struct.py --bin "$BIN" --allowed 0
 
   changelog:
     name: Changelog

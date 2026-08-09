@@ -12,6 +12,7 @@
 
 #include "lua.h"
 
+#include "ldebug.h"  /* MAXIWTHABS */
 #include "ldo.h"
 #include "llimits.h"
 #include "lobject.h"
@@ -290,6 +291,17 @@ static void verifyinstruction (VState *V, int pc) {
     }
     case OP_NEWTABLE: {
       vfyextraarg(V, pc);  /* the VM skips it whether or not k is set */
+      /* the VM turns vB into a hash size with `1u << (vB - 1)`; vB is a
+         6-bit field, so anything past 32 shifts a 32-bit unsigned by 32
+         or more, which is undefined. A real log2-of-hash-size is tiny, so
+         this never refuses compiler output. */
+      vfycheck(V, GETARG_vB(i) <= 32, "table hash size out of range");
+      /* the k flag means "the following extra argument carries more array
+         size"; the compiler sets it only when that size is nonzero, and
+         the VM asserts as much before folding it in. */
+      if (TESTARG_k(i))
+        vfycheck(V, GETARG_Ax(f->code[pc + 1]) != 0,
+              "table extra-size flag set with a zero argument");
       break;
     }
     case OP_SELF: {
@@ -340,6 +352,10 @@ static void verifyinstruction (VState *V, int pc) {
     }
     case OP_CLOSE: case OP_TBC: {
       vfyreg(V, a);
+      /* CLOSE's B cannot be checked here: the parser emits a dead
+         placeholder CLOSE with B == 1 for goto handling (lparser.c), so a
+         nonzero B is legal in the dump even though the VM asserts it is
+         zero on the ones it actually executes. */
       break;
     }
     case OP_JMP: {
@@ -534,6 +550,53 @@ static void verifyupvalues (VState *V, const Proto *child) {
 }
 
 
+/*
+** The debug arrays are indexed by program counter, and their lengths are
+** loaded independently of the code length. ldebug.c guards only against a
+** NULL lineinfo, never against a short one, so a chunk whose line info is
+** shorter than its code reads out of bounds on the first traceback, error
+** or line hook -- a memory-safety property that has nothing to do with
+** the instruction stream.
+*/
+static void verifydebug (VState *V) {
+  const Proto *f = V->f;
+  int j;
+  /* One line-info byte per instruction, or none at all. getfuncline walks
+     lineinfo up to the requested pc, so a chunk that carries *partial*
+     line info reads off the end. A stripped chunk carries none: loaded
+     the ordinary way that is lineinfo == NULL, but loaded into a fixed
+     buffer (the C API's "B" mode) it is a non-NULL zero-length view into
+     the caller's memory, so the length and not the pointer is what says
+     "no line info". Both are legal; only a length strictly between zero
+     and sizecode is the corruption this refuses. */
+  vfycheck(V, f->sizelineinfo == 0 || f->sizelineinfo == f->sizecode,
+        "line info does not cover the code");
+  vfycheck(V, f->sizeabslineinfo == 0 || f->abslineinfo != NULL,
+        "absolute line info count without an array");
+  /* getbaseline binary-searches abslineinfo by pc, so the entries have to
+     be ordered and in range or the search reads outside the code and the
+     array alike. */
+  for (j = 0; j < f->sizeabslineinfo; j++) {
+    vfycheck(V, 0 <= f->abslineinfo[j].pc && f->abslineinfo[j].pc < f->sizecode,
+          "absolute line entry outside the code");
+    if (j > 0)
+      vfycheck(V, f->abslineinfo[j].pc > f->abslineinfo[j - 1].pc,
+            "absolute line entries out of order");
+  }
+  /* getbaseline's first guess is `pc / MAXIWTHABS - 1`, taken on faith to
+     be a valid index. The compiler writes an absolute entry at least
+     every MAXIWTHABS instructions, so for real code that guess is always
+     in range; a chunk with too few entries for its length makes the guess
+     run off the end of the array before the search can correct it. The
+     bound uses the same MAXIWTHABS the runtime does, since both are this
+     translation unit -- a chunk compiled under a different MAXIWTHABS and
+     loaded here is already outside what the format promises. */
+  if (f->sizeabslineinfo > 0)
+    vfycheck(V, (f->sizecode - 1) / MAXIWTHABS <= f->sizeabslineinfo,
+          "too few absolute line entries for the code length");
+}
+
+
 static void verifyproto (lua_State *L, const Proto *f, const char *src,
                          int depth) {
   VState V;
@@ -591,6 +654,7 @@ static void verifyproto (lua_State *L, const Proto *f, const char *src,
     V.pc = 0;
     verifyupvalues(&V, f->p[pc]);
   }
+  verifydebug(&V);
   for (pc = 0; pc < f->sizep; pc++)
     verifyproto(L, f->p[pc], src, depth + 1);
 }
