@@ -1,8 +1,13 @@
 # Diluvium Roadmap
 
 Scope: the standalone runtime and compiler in this repository. Host
-embedding, capability plumbing and anything downstream of them are tracked
-elsewhere and deliberately kept out of this file.
+embedding and capability plumbing were previously tracked elsewhere and
+kept out of this file; that boundary has moved. They now live in
+`doc/Messaging.md`, which specifies the msgpack codec, queues, the
+delivery model, the lifecycle capability, hibernation, the `dv_*`
+instance ABI and packaging. This file stays the record of the fork's
+language, compiler and runtime state; anything downstream of the ABI
+belongs there.
 
 This document exists so the state of the fork is readable from the tree
 rather than reconstructed each time. Update it in the same commit as the

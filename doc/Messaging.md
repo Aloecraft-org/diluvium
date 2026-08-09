@@ -1,0 +1,1334 @@
+# Diluvium Messaging, Supervision, and Hibernation
+
+Status: design, ready for implementation
+Target: Diluvium 5.5 (current build3)
+
+Scope note: this document covers host embedding and the capability plumbing
+that reaches it, which `doc/ROADMAP.md` previously placed out of scope for
+this repository. That boundary has moved; see the scope paragraph at the top
+of the roadmap, which now points here.
+
+---
+
+## 1. Purpose
+
+This document specifies the messaging and lifecycle foundation for Diluvium. It
+covers five interlocking pieces:
+
+1. An embedded msgpack codec, exposed to Lua and used internally as the canonical
+   value-encoding format.
+2. A queue subsystem: named, guest-declared, bounded message queues addressed by
+   integer handle, usable both within a program and across the host boundary.
+3. A delivery model with a deliberately weak guarantee, so that routing, discovery,
+   broadcast, and retry live in Diluvium programs rather than in the runtime.
+4. Supervision and lifecycle, so Diluvium programs can manage other Diluvium
+   programs.
+5. Hibernate and restore, so a program can snapshot itself at a point it nominates
+   and be brought back later.
+
+This work is independent of any particular application. It belongs in Diluvium.
+
+### 1.1 Why this is the enabling piece
+
+- Waiting becomes a yield rather than a block, which is the only form that works on
+  the browser main thread and the only form compatible with hibernation.
+- Every waiting capability routes through one chokepoint, so permissions, logging,
+  and test mocking are uniform rather than per-capability.
+- One wire format serves intra-program messaging, cross-boundary messaging, and
+  snapshot encoding.
+- Supervision becomes a capability rather than a runtime feature, so supervision
+  policy is itself a rewritable Diluvium program.
+
+### 1.2 Relationship to a future hostcall document
+
+Section 8 states the rule that decides whether a capability is a direct call or a
+queue protocol, and it is deliberately short. The capability inventory, the token
+model, and the per-capability permission points are separate work, and when they
+acquire real content they should move to their own document rather than growing
+this one. That split is planned, not forgotten. It has not happened yet because a
+one-page rule in its own file drifts from the document that owns the mechanism it
+describes.
+
+---
+
+## 2. Non-goals
+
+Explicitly out of scope:
+
+- decQuad and decimal numerics. Section 5.5 reserves the ext code only.
+- Request/response correlation, RPC helpers, retry, and broadcast fan-out. These
+  are Lua-level libraries and specialized agents, not runtime features. See
+  Section 7.4 for why this is a load-bearing decision rather than a deferral.
+- Multi-consumer queues with acknowledgement and redelivery.
+- Any package manager or dynamic module resolution beyond what already exists.
+- Mid-execution hibernation below a C frame that carries no continuation. See
+  Section 10.2 for what this does and does not exclude.
+- Snapshot authentication. Deferred behind a checkable precondition; see 10.10.
+
+---
+
+## 3. Inherited constraints
+
+Pre-existing project constraints. Not up for renegotiation during implementation.
+
+| Constraint | Implication |
+|---|---|
+| Core Lua patches must stay separable from layered logic for upstream syncs | Parts 1 through 5 require zero *new* core files; see 3.1 for the two existing ones they touch. Part 6 requires reading core internal headers but still zero edits to existing core files. |
+| Tiny compiled binary is a primary product claim | Everything is size-budgeted and the swarm layer is a separate library. See 3.2. |
+| 100% backward compatibility with standard Lua | New surfaces are library tables, not syntax. No grammar changes. **And no removal of existing capability:** in particular, yielding across `pcall` is legal Lua and must remain legal. See 8.4. |
+| Targets: mac, windows, arm64 (rpi), musl/portable, wasm | The C ABI and packaging must cover all five. |
+
+### 3.1 Core patch policy, stated precisely
+
+There is a distinction that matters here and it should be maintained deliberately:
+
+- **Patching core files** means editing `ldo.c`, `lstate.h`, `lvm.c`, and so on.
+  This creates merge conflicts on every upstream sync. **Do none of this.**
+- **Depending on core internal headers** means a new file that includes
+  `lstate.h` and reads fields from `CallInfo`, `UpVal`, and friends. This creates
+  a compile break when upstream changes those structs, which is loud and
+  localized rather than a silent merge hazard.
+
+Parts 1 through 5 need neither. Every mechanism they use is in the public API:
+`lua_yieldk`, `lua_callk`, `lua_pcallk`, `lua_isyieldable`, `lua_resume`,
+`lua_status`, `lua_sethook`.
+
+Two existing files are touched, both already on the allowlist in
+`script/patch_series.sh`:
+
+- `lua.c`, whose allowlist reason is already *"Diluvium branding; REPL input
+  handling moved to drepl.c"*. The coroutine-entered call driver follows that
+  same precedent: the mechanism lives in `drepl.c`, and `lua.c` keeps only a
+  delegation. Do not grow `lua.c` with a new mechanism.
+- `onelua.c`, to include new layered sources in the amalgamation.
+
+Part 6 needs the second kind of dependency. Confine it to a single new source
+file that acts as an accessor shim. Nothing outside that file may include a core
+internal header. When upstream moves a field, exactly one file fails to compile.
+
+If an implementation path appears to require editing a core file not already on
+the allowlist, stop and raise it.
+
+### 3.2 Size budget
+
+Measure and report stripped object size for each component on the musl and wasm
+targets, via `script/build_stats.sh`, which already fails over a threshold. Wire a
+gate per milestone so a budget overrun is refused rather than merely logged.
+
+Working targets, to be revised with real numbers:
+
+- msgpack codec: under 25 KB
+- queue subsystem: under 15 KB
+- instance C ABI shim: under 10 KB
+- hibernate: under 30 KB
+- swarm layer: separate library, not counted against the above
+
+The total is roughly 8% against the advertised ~1 MiB runtime. That is the reason
+the codec is compiled in rather than vendored per host: one copy serves the Lua
+surface, the queue encoding, and the snapshot encoder.
+
+---
+
+## 4. Architecture
+
+### 4.0 The only boundary is the instance
+
+Read this before anything else in the document, because it removes most of the
+complexity the rest might otherwise seem to imply.
+
+**There is exactly one isolation boundary in this system: the instance.** An
+instance has its own heap, its own queues, its own capability set, its own budget,
+and its own snapshot. Nothing else crosses it but msgpack bytes.
+
+There is exactly one kind of program. Diluvium is Lua 5.5 with extensions; there is
+no separate host language, no supervisor language, and no privileged program type.
+"Supervisor", "coordinator", "handler", "router", and "agent" are all words for a
+program that happens to hold a particular capability. None of them is a type, none
+has a lifecycle of its own, and none appears anywhere in the runtime.
+
+Because upvalues and object references cannot leave a `lua_State`, there is no rule
+needed to prevent them crossing an instance boundary. It is structurally impossible
+rather than enforced.
+
+### 4.1 Layers
+
+Four layers. Keeping them separate is what stops the runtime from growing a
+scheduler.
+
+| Layer | What it owns | Where it lives |
+|---|---|---|
+| Guest libraries | msgpack, queues, yield semantics, hibernate entry point | inside the Diluvium binary |
+| Instance ABI | embedding one instance: load, run, push, pop | `dv_*` C ABI |
+| Swarm layer | instance table, parentage, capability sets, lifecycle drain, budget enforcement, snapshot cache | separate optional library (`libdiluvium-swarm`), built on the instance ABI |
+| Programs | everything else, including all supervision and routing behavior | Diluvium |
+
+An app embedding a single scripting sandbox links only the first two and never
+pays for the rest. A multi-instance host links the swarm layer as well.
+
+The swarm layer cannot spawn anything by itself, because spawning means
+something different in every environment: a wasm instance, a task, a worker, a
+process, a job on another machine. The portable part is bookkeeping. The host
+supplies a small vtable for creating, destroying, and driving execution contexts.
+
+```
+  Diluvium program (agent / supervisor / router)
+        |  msgpack.*   queue.*   hibernate()
+        v
+  +-------------------------------------------+
+  |  Layered Diluvium libraries (new)          |
+  +-------------------------------------------+
+        |  public Lua C API (+ accessor shim for hibernate)
+        v
+  +-------------------------------------------+
+  |  Core Lua 5.5 (no edits)                   |
+  +-------------------------------------------+
+        |  dv_* instance ABI
+        v
+  +-------------------------------------------+
+  |  Swarm layer (optional, separate lib)      |
+  |  instance table, endpoints, budgets, cache |
+  +-------------------------------------------+
+        |  host vtable: create / destroy / drive
+        v
+  +-------------------------------------------+
+  |  Host: tokio, wasmtime, JS, Python, C      |
+  +-------------------------------------------+
+```
+
+### 4.2 The one seam the layer table understates
+
+Endpoint references serialize as ext 0x02 (5.5), and resolving one means asking the
+swarm layer's instance table. Taken naively that makes the codec depend on the
+swarm layer, which would contradict the table above.
+
+It does not have to. The codec takes an **optional resolver callback**. With no
+resolver installed, ext 0x02 decodes to an opaque value carrying its raw bytes
+rather than failing, and encoding an endpoint reference is an error naming the
+missing resolver. The swarm layer installs a resolver; a single-instance embedder
+never does and never links it.
+
+State the seam as an injected interface, so it is designed rather than discovered.
+
+---
+
+## 5. Part 1: msgpack codec
+
+### 5.1 Source
+
+Start from Redis's `lua_cmsgpack.c`. Self-contained, no external msgpack-c
+dependency, well tested at scale. BSD licensed, which is Apache-2.0 compatible for
+inclusion: retain the original copyright header and add a NOTICE entry.
+
+Expect real porting work. It targets Lua 5.1.
+
+### 5.2 Required porting changes
+
+| Issue | Action |
+|---|---|
+| `luaL_register` | Replace with `luaL_newlib` |
+| `lua_objlen` | Replace with `lua_rawlen` |
+| `lua_setfenv` if present | Remove, use upvalue-based state |
+| No integer subtype in 5.1 | Branch on `lua_isinteger`. Encode integers as msgpack int, floats as float64. Round-tripping an integer must yield an integer. |
+| Recursion depth | Keep the existing depth cap. It is the only protection against cyclic input in the plain codec. |
+| Cyclic tables | Must raise a clean Lua error, not crash or truncate. Add a test. |
+
+Note that the hibernate encoder in Part 6 *does* handle cycles, via backreferences.
+The plain `msgpack.encode` does not. These are two entry points into shared
+encoding machinery, not two codecs.
+
+### 5.3 Array vs map disambiguation
+
+Specify this explicitly rather than inheriting Redis's behavior by accident.
+
+**Rule:** a table encodes as a msgpack array if and only if it has at least one
+element, its keys form a dense integer sequence `1..n`, and it has no other keys.
+Every other table, including the empty table, encodes as a map.
+
+Provide explicit overrides so programmers never have to reason about the heuristic
+when shape matters:
+
+```lua
+msgpack.encode(msgpack.as_array(t))
+msgpack.encode(msgpack.as_map(t))
+```
+
+Encode-time markers, not persistent types. Implement as a lightweight tagged
+wrapper the encoder recognizes and unwraps.
+
+### 5.4 Lua API
+
+```lua
+msgpack.encode(value)            -> string
+msgpack.decode(str)              -> value
+msgpack.decode(str, offset)      -> value, next_offset
+msgpack.as_array(t)              -> tagged wrapper
+msgpack.as_map(t)                -> tagged wrapper
+```
+
+Errors are raised, not returned, consistent with the standard library.
+
+### 5.5 Ext code registry
+
+| Code | Meaning | Status |
+|---|---|---|
+| 0x01 | Decimal value | Reserved for decQuad. Do not implement. |
+| 0x02 | Endpoint reference | Implemented in Part 3. Requires a resolver; see 4.2. |
+| 0x03 | Proto reference by hash | Implemented in Part 6. |
+| 0x04 | Backreference | Implemented in Part 6. |
+| 0x05 | Persisted userdata | Implemented in Part 6. |
+| 0x06 | Closure | Implemented in Part 6. |
+| 0x07 | C function by permanent name | Implemented in Part 6. |
+| 0x08 - 0x0F | Diluvium core, unassigned | Reserved. |
+| 0x10 - 0x7F | Application-defined | Free for host and program use. |
+
+Decoding an unknown ext code in 0x00-0x0F must be a clean error naming the code.
+Ext 0x01 specifically must say decQuad is not yet implemented rather than producing
+a generic unknown-ext error.
+
+Decoding an unknown code in the application range must surface the raw bytes and
+code to the program rather than failing, so applications can define types without a
+runtime change.
+
+Codes 0x03 through 0x07 are only valid inside a snapshot stream. `msgpack.decode`
+must reject them.
+
+### 5.6 Non-encodable values
+
+Encoding a function, coroutine, or userdata without a hook is an error outside a
+snapshot context. The error message must name the offending value's type and its
+key path within the containing table.
+
+This message is the main diagnostic a programmer gets when their state is not
+serializable. It is worth making good.
+
+---
+
+## 6. Part 2: Queue subsystem
+
+### 6.1 Model
+
+- Queues are **declared by the guest program**, not the host. The host attaches to
+  queues that exist; it does not create them.
+- Queues are **volatile**. They do not outlive the program instance except through
+  an explicit snapshot.
+- Queues are **bounded**, always. There is no unbounded option.
+- Queues are **dumb**: no designated producer or consumer, no acknowledgement, no
+  redelivery. Either side may push and pop.
+- The only guarantee is that `push` reports whether the message was accepted. See
+  Part 3.
+- Queues can be **enabled and disabled**, so a program going down rejects new
+  messages cleanly rather than accepting messages it will drop.
+
+### 6.2 Handles
+
+`declare` and `lookup` return a dense integer handle. All subsequent operations
+take the handle. No string matching on the hot path.
+
+Handles are **runtime identity, not durable identity.** They are valid only for the
+current instance incarnation. A program must not store a handle in state expected
+to outlive the instance. On restore, handles are re-resolved by name (Section 10.8).
+
+Document this prominently. Storing a handle and restoring it later is the obvious
+mistake and it fails by silently addressing the wrong queue.
+
+### 6.3 Lua API
+
+```lua
+queue.declare(name, opts)     -> id
+queue.lookup(name)            -> id | nil
+queue.destroy(id)
+
+queue.push(id, value)         -> ok, status
+queue.pop(id)                 -> value, status      -- never yields
+queue.wait(ids, timeout_ms)   -> id, value, status  -- yields
+
+queue.enable(id)
+queue.disable(id)
+
+queue.len(id)                 -> integer
+queue.capacity(id)            -> integer
+queue.state(id)               -> "enabled" | "disabled"
+```
+
+`opts` fields:
+
+| Field | Default | Meaning |
+|---|---|---|
+| `capacity` | 64 | Maximum queued messages. Must be > 0. |
+| `on_full` | `"reject"` | One of `"reject"`, `"drop_oldest"`, `"drop_newest"`, `"block"`. |
+| `exported` | `false` | Whether the host can see and attach to this queue. |
+| `direction` | `"both"` | One of `"both"`, `"guest_write"`, `"guest_read"`. Recorded but not enforced in this milestone. Reserved so the wire format does not change when enforcement lands. |
+
+`on_full = "block"` yields the caller until space is available or the queue is
+disabled. All other policies return immediately.
+
+`queue.pop` never yields. On an empty queue it returns `nil` and status `"empty"`.
+Programs that want to wait use `queue.wait`.
+
+`queue.wait` takes a list of handles and yields with a wait-set. It resumes when
+any listed queue has a message, when the timeout elapses, or when a listed queue is
+disabled or destroyed. Return the handle that fired.
+
+### 6.4 Status values
+
+String statuses at the Lua level. No numeric codes.
+
+| Status | Meaning |
+|---|---|
+| `"ok"` | Accepted |
+| `"full"` | At capacity, not accepted |
+| `"disabled"` | Queue disabled, not accepted |
+| `"empty"` | Nothing to pop |
+| `"dropped_oldest"` | Accepted, oldest message evicted |
+| `"timeout"` | `queue.wait` elapsed |
+| `"closed"` | Queue destroyed while waiting |
+| `"gone"` | Endpoint no longer resolvable. See Part 3. |
+
+A full, disabled, or gone destination is a **normal outcome, not an error.** Do not
+raise.
+
+### 6.5 Encoding
+
+All values pushed to a queue are msgpack-encoded at push and decoded at pop,
+including for queues that never cross the host boundary.
+
+Deliberate, with a known cost. Reasons:
+
+- Value semantics rather than reference sharing. A pushed table cannot be mutated
+  by the sender afterward.
+- Queue contents are already bytes when a snapshot is taken.
+- One serializability rule for programmers, not two.
+
+If profiling shows this matters for high-frequency internal queues (the
+`proc_50ms` feeding `proc_500ms` pattern), a `local` queue kind that skips encoding
+is an additive change. Do not build it now. Do record encode and decode timings in
+the benchmark suite so the decision can be revisited with numbers.
+
+### 6.6 Reserved names
+
+`inbox` and `outbox` are reserved per-instance defaults, auto-declared at startup
+with `exported = true`. A program may re-declare them with different options before
+first use. (Confirmed; open question 4 is closed.)
+
+Names are namespaced with `/`, for example `sensors/gps`. (Confirmed; open question
+3 is closed.) The separator is structural only in this milestone; no hierarchical
+semantics are implemented. Capability scoping over name patterns is future work and
+must not be designed away.
+
+---
+
+## 7. Part 3: Delivery model and endpoints
+
+This part exists because the naive design leaks routing policy into the runtime.
+It is short, and it is the most important section in the document.
+
+### 7.1 The problem
+
+A destination may be resident in this process, hibernated to a snapshot cache, in
+another worker, on another machine, on a build agent, or gone. If the queue layer
+tries to know the difference, it grows a router, a discovery mechanism, a retry
+policy, and a timeout policy, all in C, all in the binary, all wrong for somebody.
+
+### 7.2 The guarantee
+
+**`push` reports whether the message was accepted into the next hop. Nothing more.**
+
+The next hop may be:
+
+- a local queue owned by this instance
+- a host-managed endpoint bound by the swarm layer
+- the inbox of a relay agent that has taken responsibility for finding the
+  destination
+
+All three are indistinguishable to the sender, and all three have identical
+semantics: accepted, or one of `"full"`, `"disabled"`, `"gone"`.
+
+**`push` never waits on the destination's liveness.** It may yield on local
+capacity when `on_full = "block"`, and that is the only case in which it waits at
+all. A broadcaster fanning out to two hundred agents cannot be stalled by one slow
+or absent destination.
+
+There is no delivery confirmation, no ordering guarantee across endpoints, and no
+retry. Those are application concerns.
+
+### 7.3 Endpoints
+
+```lua
+endpoint.bind(ref, name)   -> id      -- resolve now, get a queue handle
+endpoint.status(id)        -> "live" | "gone"
+```
+
+`ref` is an opaque instance reference obtained from the lifecycle protocol
+(Part 5), never constructed by the guest. `bind` returns an ordinary queue handle,
+so everything downstream is unchanged.
+
+An endpoint handle refers to something whose lifetime the holder does not control.
+It is a descriptor to a pipe whose far end can close. When the far end is gone,
+push returns `"gone"` immediately. It never blocks and never raises.
+
+Endpoint references serialize as msgpack ext 0x02 so they can be passed in
+messages, which is how a coordinator hands a handler's address to a peer. See 4.2
+for the resolver seam this implies.
+
+### 7.4 Why routing lives in agents
+
+Because the delivery guarantee is weak and uniform, every richer convention is
+expressible as a specialized Diluvium program:
+
+- **Broadcast.** One broadcaster agent holds write capability to every agent's
+  `broadcast` queue; nobody else does. Fan-out is an ordinary loop of pushes, each
+  of which may be rejected. Capability attenuation, not runtime support, is what
+  prevents chaos.
+- **Store and forward.** An agent that accepts a message, immediately answers
+  "accepted", and then takes responsibility for locating the destination, waking a
+  hibernated instance, or reaching across a network. The weak guarantee is exactly
+  what makes this composable: the relay's answer means the same thing as a direct
+  push's answer.
+- **Discovery, retry, dead-lettering, priority.** Same pattern.
+
+This is the payoff for keeping the core dumb. Conventions become programs that can
+be inspected, replaced, and rewritten at runtime, rather than C that has to be
+right for every topology at once.
+
+**Do not add broadcast, multicast, retry, or delivery confirmation to the queue
+layer.** If an application needs them, it writes an agent.
+
+### 7.5 Host-managed endpoints
+
+The swarm layer may bind an endpoint to something that is not a resident local
+queue: a snapshot in the cache, a socket to another node, a worker channel. It does
+this behind `endpoint.bind`, and the guest cannot tell.
+
+The one requirement: **accepting a message must be O(1) and must not depend on the
+destination being reachable.** If the swarm layer cannot accept in bounded time,
+it must return `"gone"` and let an agent handle it. A host-side buffer for a
+non-resident instance is legitimate as long as it is bounded and drains in FIFO
+order ahead of live pushes on restore. A host-side buffer that grows without bound
+or that waits on a network is not.
+
+---
+
+## 8. Part 4: Yield-aware hostcalls
+
+### 8.1 The rule
+
+**Direct hostcalls for operations that cannot wait. Queues for everything that
+can.**
+
+Pure operations (crypto, math, string utilities, encoding) stay direct C calls.
+Anything with latency (network, sensors, LLM calls, timers, inter-instance
+messaging) is a queue protocol.
+
+Apply this to new capabilities from here on. There are no existing hostcalls in
+this repository to retrofit, so the rule is prospective; when one is added that
+violates it, note it for a later pass rather than bending the rule.
+
+### 8.2 Coroutine hosting
+
+Agents run inside a coroutine, always, entered via `lua_resume`. Lua will not
+permit a yield from the main thread unless it was resumed, so this is structural
+rather than stylistic.
+
+Both the agent-hosting path and the REPL/kernel path must be coroutine-entered from
+the start. This is the piece most likely to be painful to retrofit; the *entry
+shape* is the irreversible part, and adding `queue.wait` on top of an
+already-coroutine-entered path is additive and local. Do the entry shape first, as
+its own milestone, with no yielding capability attached (see 13, M0).
+
+**Implementation constraints, established against this tree:**
+
+1. The driver lives in `drepl.c`, on-top code using only the public C API and
+   already shared by the native interpreter and the WASM host. `lua.c` keeps a
+   delegation only. Three entry paths converge on it: `docall` in `lua.c`, and
+   `repl_eval` and `run_lua` in `wasm_stubs.c`.
+
+2. **The inner protected call must be `lua_pcallk` with a non-NULL continuation,
+   and it must execute inside a resumed C closure.** `lua_pcallk` takes the
+   continuation branch only when `k != NULL` *and* `yieldable(L)` is already true
+   (`lapi.c`). Otherwise it falls through to `luaD_pcall`, whose `f_call` uses
+   `luaD_callnoyield`, and `nyci` sets the very bit `yieldable()` tests
+   (`lstate.h`) — making everything beneath it non-yieldable. A freshly created
+   thread that has never been resumed is not yieldable, so a driver that makes a
+   thread and calls `lua_pcallk` on it directly falls into exactly that trap. The
+   body must be pushed as a C closure and entered via `lua_resume`, with the
+   `lua_pcallk` happening inside it.
+
+   This is why the milestone's acceptance criterion is that
+   `coroutine.isyieldable()` returns **true** at the deepest point of each
+   converted path. "Nothing yields and the suite is green" does not prove the
+   conversion achieved anything; that assertion does.
+
+3. Preserving the existing message handler at the same position keeps stderr
+   byte-identical, so no traceback assertions churn. Building a better traceback
+   from the dead-but-unwound thread is a genuine improvement and should be its
+   own change with its own test updates, never a side effect of a plumbing
+   conversion.
+
+4. `globalL` in `lua.c` is what `laction` installs a `lua_sethook` on for SIGINT.
+   It must point at the **running thread**, not the main state, or interrupting a
+   runaway loop silently stops working. Nothing in the suite presses Ctrl-C, so
+   this regression ships green unless tested deliberately.
+
+5. Error objects and the traceback live on the **thread's** stack, not the
+   caller's. Every caller that reads the message needs an `lua_xmove`.
+
+6. Write the `LUA_YIELD` branch even while nothing can reach it, and make it a
+   loud explicit error rather than a silent fallthrough.
+
+### 8.3 Wait-set protocol
+
+When a coroutine parks, the host receives the list of queue handles being waited on
+and a timeout in milliseconds, or a sentinel for none.
+
+The host owns the clock. There is no in-runtime timer. Timeouts are relative
+durations sourced from a monotonic clock, never wall time.
+
+The host resumes with the handle that fired, or with the timeout indication.
+
+### 8.4 Non-yieldable contexts
+
+Before yielding, check `lua_isyieldable`. If false, raise a clear Lua error naming
+the situation.
+
+**`pcall` is not on this list.** Yielding across `pcall` has been legal since Lua
+5.2 and works in this tree: `luaB_pcall` goes through `lua_pcallk` with a
+`finishpcall` continuation, and `yieldable()` counts non-yieldable C calls, which
+that path does not increment. `test/coroutine.lua` exercises it. Adding such a
+restriction would break the backward-compatibility constraint outright, because
+`pcall(function() coroutine.yield() end)` is legal Lua today.
+
+Genuinely non-yieldable:
+
+- inside a `table.sort` comparator
+- inside a `string.gsub` replacement function
+- inside a `__gc` finalizer
+- inside a metamethod invoked from C without a continuation
+- on the main thread when not resumed
+
+The message must be specific enough that a programmer knows to restructure.
+
+**This list is not shared with hibernate.** The sets differ, and conflating them is
+what produced the `pcall` error above. Hibernate's constraint is Section 10.2.
+
+### 8.5 Permission checks
+
+Capability checks happen **on entry, before the yield**, and the decision is
+captured and honored on resume. Never re-check after resume: a token revoked while
+the agent was parked would produce authorization that varies with scheduling.
+
+The token model itself is separate work. The check signature is fixed now so the
+call site does not move later:
+
+```
+(capability, resource, context) -> allow | deny
+```
+
+The token model stays entirely opaque behind it. Structure dispatch so this check
+point exists at a single obvious location. (Confirmed; open question 5 is closed.)
+
+---
+
+## 9. Part 5: Lifecycle capability
+
+### 9.1 Supervision is a capability, not a runtime feature
+
+Diluvium does not get a `spawn()` primitive. It does not own a process table or a
+scheduler. Instead, a program requests a spawn by writing to a reserved queue it
+holds capability for:
+
+```lua
+local sys = queue.lookup("system/lifecycle")
+queue.push(sys, {
+  op    = "spawn",
+  code  = handler_code_ref,
+  caps  = { "queue:work/*", "queue:system/events" },
+  budget = { instructions = 5e6, memory_kb = 512 },
+  wake_on_message = true,
+})
+```
+
+The swarm layer drains that queue and acts on it, calling `dv_new` on the
+instance ABI. What "spawn" means is the host's business: an instance, a task, a
+worker, a process, a job elsewhere. The requesting program is identical across all
+of them.
+
+There is no supervisor type. A program holding the lifecycle capability is what the
+word describes, and nothing in the runtime distinguishes it from any other program.
+Restart strategies, backoff, escalation, and topology are ordinary Diluvium
+programs. For a system where programs are generated and rewritten at runtime,
+having the supervision policy itself be rewritable is the point.
+
+### 9.1.1 Delegation is recursive and needs no support
+
+A program holding the lifecycle capability may grant it, attenuated or not, to a
+child at spawn. That child then holds it and may do the same. Supervisors create
+supervisors with no additional mechanism, because there is no type to instantiate:
+delegation is recursive for the same reason attenuation is.
+
+This makes "subtree" accurate rather than aspirational. Parentage is a single field
+per instance, depth is unbounded, and subtree kill means what it says.
+
+### 9.1.2 What the swarm layer owns, exhaustively
+
+Six things. If something proposed for this layer does not reduce to one of them,
+it belongs in a program instead.
+
+1. An instance table, because endpoints resolve against it.
+2. One parent field per instance, for subtree kill and attenuation checks.
+3. The capability set per instance, for enforcement.
+4. Draining `system/lifecycle` and calling the host vtable.
+5. Enforcing per-instance budgets (9.4). It enforces the numbers; it does not
+   decide them.
+6. The snapshot cache and `wake_on_message` delivery (9.5), including the
+   host-identity stamp of 10.10.
+
+Not in this layer: restart policy, backoff, naming, discovery, topology, routing,
+coordinator and handler roles, or anything describing how programs relate to each
+other beyond parentage.
+
+The line is mechanism versus policy. Enforcing a budget is mechanism. Choosing what
+a child's budget should be, and what to do when it is exceeded, is a program.
+
+### 9.1.3 An agent is an instance
+
+"Agent" is an application word, not a runtime concept. As this system is designed,
+the thing called an agent maps to one instance: its own heap, capability set,
+budget, and snapshot.
+
+The alternative, agents as coroutines sharing one instance, is cheaper per agent but
+shares a heap, shares a fate, and cannot be snapshotted individually, which breaks
+the swap-out-to-cache model in Section 9.5 entirely. Parts 5 through 7 assume
+instances throughout.
+
+### 9.2 Reserved system queues
+
+| Name | Direction | Contents |
+|---|---|---|
+| `system/lifecycle` | guest writes | spawn, kill, query |
+| `system/events` | guest reads | child exited, faulted, exceeded budget |
+
+Monitor semantics only. **Do not implement Erlang-style bidirectional links.**
+One-directional monitoring covers supervision; links can be layered later if
+wanted.
+
+### 9.3 Capability attenuation
+
+**A supervisor must never grant a child more capability than it holds itself.**
+Attenuation only, enforced by the swarm layer, no exceptions.
+
+This is what makes a privilege hierarchy structural rather than conventional. An
+agent that must submit a request to a reviewer does so because it holds no
+capability for the target queue, not because it was asked politely.
+
+### 9.4 Resource control
+
+The swarm layer owns per-instance limits. A guest cannot meaningfully limit
+itself, because a runaway loop never yields and nothing cooperative will stop it.
+
+| Limit | Mechanism |
+|---|---|
+| Instruction budget | `lua_sethook` count hook, public API |
+| Memory | the allocator, already pluggable |
+| Total queued messages | computable exactly, since every queue is bounded |
+| Wall clock | host side |
+
+Use the count hook to **abort, not to schedule.** Raising an error from a hook is
+fine; yielding from one reintroduces the C-frame problem and breaks hibernate.
+
+### 9.5 Failure policy
+
+| Situation | Default |
+|---|---|
+| Supervisor dies | Kill the subtree. Reparenting is harder to remove once depended on. |
+| Spawn storm | Rate-limit the lifecycle capability. A self-rewriting system will produce a fork bomb eventually, as a bug rather than an attack. |
+| Push to a dead instance | `"gone"`, immediately, never blocking |
+| Push to a non-resident instance with `wake_on_message` | Accept into a bounded host buffer, return `"ok"`, restore asynchronously, drain the buffer ahead of live pushes |
+| Push to a non-resident instance without `wake_on_message` | `"gone"` |
+
+---
+
+## 10. Part 6: Hibernate and restore
+
+### 10.1 Shape
+
+Hibernation is **self-initiated**. The program receives a request through an
+ordinary queue and calls `hibernate()` at a point it chooses.
+
+```lua
+local resumed = hibernate(opts)   -- false when snapshotting, true when restored
+```
+
+Returns twice. On snapshot it returns `false`; on restore the call returns `true`
+and execution continues from that point.
+
+### 10.2 The hard limit, stated so it is not rediscovered
+
+A frame belonging to a C function **that carries no continuation** cannot be
+captured, because its working state lives on the machine's C stack. Therefore
+hibernation is impossible below such a frame. This excludes hibernating from
+inside a `table.sort` comparator, a `string.gsub` replacement, a `load` reader, a
+metamethod invoked from C without a continuation, or a generic `for` driven by a C
+iterator.
+
+The distinction is continuations, not C-ness. A frame that yielded across `pcall`
+carries its resumption state explicitly — `u.c.k`, `u.c.ctx`, `u.c.funcidx`,
+`u.c.old_errfunc` — all plain data plus a C function pointer the permanents table
+can already resolve. Hibernating across `pcall` is therefore feasible in
+principle, unlike a comparator whose state is genuinely on the machine stack.
+
+**It is out of scope for M6 anyway**, because restoring `old_errfunc` and the
+error-handler chain correctly is fiddly and nothing needs it yet. The wording is
+"C frames without continuations" so the door stays open and nobody later concludes
+it was ruled out on principle.
+
+**Implementation requirement:** before capturing, walk the `CallInfo` chain and
+refuse if any frame other than the top one has `CIST_C` set and a null
+continuation. Return a clean error naming the situation. Never capture partially.
+
+Note the useful consequence: an agent parked on `queue.wait` has no C frame at all,
+because waiting is a yield. Idle-on-inbox is the overwhelmingly common state at
+scale, and it is capturable.
+
+### 10.3 What is captured
+
+| Category | Treatment |
+|---|---|
+| Numbers, strings, booleans, nil | Plain msgpack |
+| Tables | Msgpack map or array, with ext 0x04 backreferences for identity and cycles; metatable link and `__mode` preserved |
+| Lua closures | Ext 0x06: a Proto reference plus upvalue references. Protos deduplicated by hash. |
+| Upvalues | Serialized by identity. Two closures sharing an upvalue must still share it after a round trip. Use `lua_upvaluejoin` on restore. |
+| C closures and functions | Ext 0x07: resolved by name through a permanents table, both directions |
+| Full userdata | Ext 0x05, via a `__persist` metamethod that emits a reconstitution descriptor, never raw bytes |
+| Light userdata | **Refuse.** A bare pointer with no type information and no hook. |
+| Coroutine stack | Value stack, `CallInfo` chain with pc as a code-array offset, base and top as stack offsets, callstatus flags, vararg counts, `tbclist` for pending to-be-closed variables |
+| Open upvalues | As stack slot indices, re-opened against the reconstructed stack |
+| Queue contents | Already msgpack bytes. Serialized with the snapshot, since queues are guest-owned. |
+
+Restrict v1 to a **single thread**. An agent driving nested coroutines is out of
+scope; refuse with a clear message.
+
+### 10.4 The permanents table
+
+Every C function reachable from the program must be in it, not just hostcalls.
+`print`, `table.insert`, `string.format`, and the rest of the standard library are
+all C closures and traversal hits them immediately.
+
+Build it by walking the base libraries at init. The result must be identical on
+save and restore, which means the same runtime build and module set. Include a
+fingerprint of it in the snapshot header.
+
+### 10.5 Content-addressed code
+
+Do not choose between carrying bytecode and not carrying it. Reference by hash any
+Proto already present in the target runtime's registry; inline the ones that are
+not. A swarm of generated one-off agents sharing a common library then inlines only
+the unique part.
+
+Hashing rules:
+
+- Hash over the **stripped** dump. Line numbers and source names change with
+  whitespace edits, and a comment reflow must not invalidate every cached agent.
+  Carry unstripped debug info alongside if wanted.
+- Include runtime identity in the hash domain: Diluvium version and build, opcode
+  set, number configuration, `LUAC_FORMAT`, and the permanents fingerprint.
+- Restore requires an exact match. Mismatch is a clean refusal, never a
+  best-effort load.
+
+**This depends on dump determinism**, which this tree already has and should keep
+deliberately: the string hash seed is fixed (`luaconf.h` defines `luai_makeseed`
+as a constant, so the `lauxlib.c` fallback is dead code), `test_determinism.lua`
+asserts identical iteration order within and across processes, and string dedup
+order is write order. Add a test asserting that identical source produces
+byte-identical stripped dumps across processes, so this cannot regress silently.
+
+**It also depends on the secure-function scramble being deterministic.** See
+10.9. If the obfuscation ever acquires a per-dump nonce, content addressing breaks;
+that trade is refused in 10.9 for exactly this reason.
+
+### 10.6 Snapshot header
+
+Every snapshot carries, before any payload:
+
+| Field | Purpose |
+|---|---|
+| Format version | Refuse on mismatch |
+| Runtime identity | Version, build, opcode set, number config, `LUAC_FORMAT` |
+| Permanents fingerprint | Refuse on mismatch |
+| Capability set in effect | Refuse restore under a different one |
+| Queue name list | For handle re-resolution |
+| Host identity stamp | See 10.10 |
+
+**Capability enforcement on restore is not optional.** A snapshot taken under
+privileged capabilities must not be restorable into a context that should not have
+them. For a system with a privilege hierarchy this check is doing security work,
+and it is the check that makes the hierarchy structural rather than conventional.
+
+### 10.7 Preconditions on the program
+
+Checked at hibernate time, refused if violated:
+
+1. No C frames without continuations below the call site (10.2).
+2. No live host resources in the reachable graph. No open sockets, file handles, or
+   sessions. Because hibernation is self-initiated, the program is in a position to
+   release them first. Verify by rejecting any userdata lacking a `__persist` hook.
+3. No light userdata anywhere reachable.
+4. Single thread.
+
+### 10.8 Handle re-resolution
+
+Queue handles do not survive. On restore, re-declare queues by name from the header
+and re-resolve handles. Any handle value stored in program state is stale and must
+not be silently reused. If the analyzer can detect a handle stored in a table that
+reaches the snapshot, warn.
+
+### 10.9 Secure functions in snapshots
+
+`~function` exists so a function's constants and variable names cannot be read at
+rest. A snapshot walks the closure graph and writes Protos, so a naive
+implementation is a straightforward bypass of that feature. Section 10.6's
+capability check does not cover this: it gates *restore*, not *confidentiality*.
+
+Two rules, and both are needed because they cover different things.
+
+**1. Route Proto encoding through the real dump path.** Do not write a parallel
+Proto encoder. Section 10.5 already hashes stripped dumps, so using the actual dump
+machinery means `taintSecureStrings` and the per-string scramble flag come along for
+free. A parallel encoder is precisely how this class of bug happens a second time —
+the string-taint fix exists because scrambling decided at one site did not hold at
+another.
+
+**2. State on the record that a snapshot is as sensitive as a memory dump.**
+Scrambling covers Protos, not live data. A secure function's constants may be
+hidden while its runtime values, its upvalues, and its queue contents sit in the
+clear in the same stream. Rule 1 alone would give a false assurance, and a
+guarantee believed to be broader than it is repeats the mistake this project has
+already documented once.
+
+**Determinism requirement on the obfuscation.** Content-addressed Protos require
+identical source to produce identical bytes, so the scramble must be deterministic.
+A per-dump nonce is therefore refused: it would trade a small obfuscation gain for
+the entire snapshot dedup story. A position-varying but deterministic keystream is
+compatible and does not affect this section. Whoever changes the obfuscation must
+re-read this paragraph first.
+
+### 10.10 Restore is untrusted input: three separate jobs
+
+`dv_restore` reconstructs a `CallInfo` chain, stack offsets, pc offsets, upvalue
+slot indices, and `tbclist` directly into `lua_State` internals. Inline Protos at
+least pass through the loader and reach `lverify.c`; the stack reconstruction
+reaches nothing. The measured baseline for why this matters is in the roadmap: one
+flipped byte in a dump crashed the release interpreter about 7% of the time.
+
+Three jobs, deliberately named separately so that deferring one does not silently
+defer the others.
+
+**Validate — required in M6, justified as robustness.** A malformed snapshot that
+crashes an interpreter inside a swarm gives a crash with no provenance and no
+repro, which is expensive regardless of whether anyone is attacking. Minimum
+scope: pc offsets within the code array; base and top within stack bounds and
+monotonic across frames; upvalue slot indices in range; `tbclist` indices in range
+and ordered; `callstatus` a valid flag combination; frame functions actually
+functions; vararg counts consistent; backreference indices in range with no forward
+references; type tags valid. A structure-aware fuzzer is an acceptance criterion,
+not follow-up; `script/fuzz_struct.py` is the template.
+
+**Authenticate — deferred, behind a checkable precondition.** The condition is not
+"no sensitive data", it is **"snapshots never leave the host."** While
+`wake_on_message` pulls from a local cache on the same machine, the threat model is
+file corruption and authentication buys little. The moment a spawn target is
+another node, authentication becomes required. So the precondition is recorded
+here rather than omitted:
+
+> Snapshots are not authenticated. Restore must only ever be fed bytes produced on
+> the same host. Crossing that boundary requires authentication first.
+
+And it is made **checkable rather than merely documented**: the swarm layer stamps
+each snapshot with a host-instance identifier and refuses foreign ones. That is
+roughly twenty lines, it is not authentication and must not be described as such,
+and it converts the precondition from prose into something that fails loudly when
+someone crosses it.
+
+**Capability-check — required, per 10.6.** Authentication does not cover this. A
+legitimately produced, correctly stamped snapshot from a privileged instance is
+exactly the thing 10.6 refuses to restore into a lower-privileged context.
+
+The claim this work supports is **"a malformed snapshot is refused."** Never
+"snapshots are safe."
+
+### 10.11 Effort note
+
+This is a bounded piece of work because of what has been excluded. The stack walk
+reads fields rather than restructuring the call mechanism, and the whole category
+of problems around arbitrary threads, hooks, and C continuations is excluded by
+construction rather than handled. Expect a few hundred lines in the accessor shim
+plus the serializer, not a general-purpose persistence engine.
+
+---
+
+## 11. Part 7: C ABI
+
+### 11.1 Instance ABI principles
+
+- Bytes in, bytes out. No Lua types cross the ABI.
+- Narrow and stable. Every host binding is thin because this is small.
+- Symbol prefix `dv_`. Settled.
+
+### 11.2 Instance ABI surface
+
+```c
+/* version */
+uint32_t     dv_abi_version(void);
+
+/* lifecycle */
+dv_instance* dv_new(const dv_config* cfg);
+void         dv_free(dv_instance* inst);
+dv_status    dv_load(dv_instance* inst, const uint8_t* code, size_t len);
+
+/* queues */
+dv_queue_id  dv_queue_lookup(dv_instance* inst, const char* name);
+dv_status    dv_queue_state(dv_instance* inst, dv_queue_id id, dv_queue_info* out);
+dv_status    dv_queue_push(dv_instance* inst, dv_queue_id id,
+                           const uint8_t* msgpack, size_t len);
+dv_status    dv_queue_pop(dv_instance* inst, dv_queue_id id,
+                          uint8_t* buf, size_t cap, size_t* out_len);
+dv_status    dv_queue_peek(dv_instance* inst, dv_queue_id id,
+                           const uint8_t** ptr, size_t* out_len);
+void         dv_queue_release(dv_instance* inst, dv_queue_id id);
+
+/* scheduling */
+dv_status    dv_run(dv_instance* inst, dv_waitset* out_waitset);
+dv_status    dv_resume(dv_instance* inst, dv_queue_id fired);
+
+/* snapshots */
+dv_status    dv_snapshot(dv_instance* inst, uint8_t** out, size_t* out_len);
+dv_status    dv_restore(dv_instance* inst, const uint8_t* snap, size_t len);
+
+/* notification */
+void         dv_set_notify(dv_instance* inst,
+                           void (*cb)(void* ud, dv_queue_id id), void* ud);
+```
+
+`dv_queue_peek` returns a borrowed pointer so hosts can avoid a copy on the hot
+path; `dv_queue_release` pops it. `dv_queue_pop` remains for simple bindings.
+
+**The peek contract, stated tightly enough to be implementable.** The pointer aims
+into a Lua string owned by the guest heap, so "valid until the next call" is not
+sufficient on its own — the implementation must anchor the value in the registry
+between `peek` and `release`, and the header must forbid `dv_run` and `dv_resume`
+in between. Any Lua execution may collect an unanchored string.
+
+`dv_set_notify` avoids polling when the guest pushes to an exported queue. The
+callback fires synchronously on the calling thread during `dv_run` and must not
+re-enter the ABI.
+
+### 11.3 Status codes
+
+`DV_OK`, `DV_QUEUE_FULL`, `DV_QUEUE_DISABLED`, `DV_QUEUE_UNKNOWN`,
+`DV_QUEUE_EMPTY`, `DV_QUEUE_GONE`, `DV_IDLE`, `DV_DONE`, `DV_ERROR`,
+`DV_ABI_MISMATCH`, `DV_SNAPSHOT_MISMATCH`, `DV_BUSY`, `DV_BUFFER_TOO_SMALL`.
+
+`dv_run` returns `DV_IDLE` with a populated wait-set when the guest parks,
+`DV_DONE` on completion, `DV_ERROR` on a Lua error.
+
+### 11.4 Threading contract
+
+**One instance, one thread. The host must not call the ABI for a given instance
+from more than one thread concurrently.** State this in the header, the docs, and
+every binding. Each binding enforces it in its own idiom: the Rust wrapper is
+`!Sync`, the Python wrapper documents it, the JS wrapper is single-threaded by
+construction.
+
+### 11.5 Swarm layer ABI
+
+The multi-instance runtime layer is a separate library named **swarm**
+(`libdiluvium-swarm`), with symbol prefix `dvs_` (confirmed; open question 1 is
+closed). It owns the six items listed in 9.1.2 and requires a host-supplied
+vtable:
+
+```c
+typedef struct {
+  void* (*create)(void* ud, const dv_spawn_req* req);
+  void  (*destroy)(void* ud, void* ctx);
+  int   (*drive)(void* ud, void* ctx);
+} dv_host_vtable;
+```
+
+Everything above that vtable is portable C. Everything below is the host's.
+
+### 11.6 Version negotiation
+
+Every binding calls `dv_abi_version()` at init and refuses on mismatch. The version
+covers the ABI surface, the ext code registry, and the snapshot format. A wrapper
+newer than the library it was handed must fail loudly rather than misdecode.
+
+---
+
+## 12. Part 8: Host bindings and packaging
+
+No host ever writes a shim. Every target ships prebuilt.
+
+### 12.1 Artifact naming
+
+One archive per target triple, published to the existing release mirror under the
+stable `/release/latest/` paths:
+
+```
+diluvium-<version>-<target-triple>.{a,so,dylib,dll,wasm}
+diluvium-swarm-<version>-<target-triple>.{a,so,dylib,dll,wasm}
+diluvium-<version>-headers.tar.gz
+```
+
+The npm, crates, and PyPI packaging scripts all fetch from the mirror. No package
+gets its own retrieval logic.
+
+### 12.2 Rust (crates.io)
+
+A `-sys` crate carrying prebuilt static libraries per triple with a
+build-from-source fallback, plus a safe wrapper.
+
+The wrapper presents queues in `tokio::sync::mpsc` shape so `select!` works with no
+adaptation. Use `rmp-serde` so host code gets `Deserialize` on messages. Rust is one
+of the two demo targets and gets the most polish.
+
+### 12.3 JavaScript (npm)
+
+The `.wasm` plus a TypeScript wrapper. One package serving browser and Node; the
+browser build uses the existing embedded WASI shim.
+
+```js
+const inst = await Diluvium.load(bytecode);
+inst.queue('outbox').onMessage(msg => { /* decoded object */ });
+inst.queue('inbox').push({ hello: 'world' });
+```
+
+Bundle a small msgpack encoder rather than taking a dependency. A few KB of codec
+keeps the size story intact and avoids a transitive-dependency argument on a
+package whose pitch is smallness.
+
+### 12.4 Python (PyPI)
+
+cffi against the same ABI. Wheels for manylinux, musllinux, macOS universal2, and
+win_amd64.
+
+### 12.5 C and C++
+
+Header plus per-triple archives in the release mirror. This is also the honest
+answer for Go, C#, Java, and anything else: document the ABI, do not promise
+bindings that will not be maintained.
+
+### 12.6 Portability demo
+
+Build one demo as an acceptance artifact: the same unmodified Diluvium bytecode
+running in a browser tab exchanging messages with JavaScript, and under tokio
+exchanging messages with a socket, with nothing different but the host wrapper.
+
+Short enough to read on one screen. This is the concrete form of the
+hostcall-portability claim.
+
+---
+
+## 13. Milestones
+
+Each independently mergeable. Report stripped size deltas at each.
+
+**M0: coroutine-entered entry paths**
+The entry shape only, with no yielding capability attached. Driver in `drepl.c`;
+`docall`, `repl_eval` and `run_lua` delegating to it; `lua_pcallk` with a
+continuation inside a resumed C closure; message handler preserved so stderr is
+byte-identical; `globalL` following the running thread; `lua_xmove` at every site
+that reads an error message; a loud `LUA_YIELD` branch.
+
+Accept when: `coroutine.isyieldable()` is **true** at the deepest point of every
+converted path; the suite is back to its baseline with no assertion churn; and
+each of the three silent-failure modes in 8.2 has a test that fails when the
+mitigation is removed — Ctrl-C interrupting a runaway loop, an error message
+surviving the state hop, and the yieldability assertion itself.
+
+Sequenced first because the entry shape is the part that is painful to retrofit,
+and separated from M3 because "what does the prompt do while parked" is a UX
+question that deserves a considered answer rather than a same-day one.
+
+**M1: msgpack codec**
+Port to 5.5, integer subtype, explicit array/map rule plus `as_array`/`as_map`,
+depth cap, cyclic-input error, ext registry with reserved codes rejected cleanly,
+resolver seam per 4.2.
+Accept when: round-trip corpus passes, integers survive as integers, cyclic input
+raises, reserved ext codes produce named errors, and ext 0x02 with no resolver
+installed decodes to an opaque value rather than failing.
+
+**M2: queue subsystem, local only**
+Declare, lookup, destroy, push, pop, enable, disable, len, capacity, state. All
+`on_full` policies except `"block"`. No host boundary.
+Accept when: the status table in 6.4 is covered by tests and the
+`proc_10ms`/`proc_50ms`/`proc_500ms` pattern runs end to end in-process. Note that
+without `queue.wait` this pattern is necessarily polled; that is expected at M2.
+
+**M3: yield-aware layer**
+`queue.wait`, `on_full = "block"`, `lua_isyieldable` guard with specific
+diagnostics per 8.4, wait-set protocol, the parked outcome in the REPL contract,
+and the corresponding Lab adjustment.
+Accept when: an agent parks and resumes correctly; a wait in each genuinely
+non-yieldable context of 8.4 raises a named error; **a wait inside `pcall`
+succeeds**, since that is legal Lua; the no-C-frame assertion passes.
+
+**M4: instance C ABI plus reference host**
+Full `dv_*` surface minus snapshots, status codes, threading contract, version
+negotiation, minimal Rust host.
+Accept when: an agent exchanges messages with the Rust host across the boundary,
+including the peek/release zero-copy path with its registry anchor.
+
+**M5: endpoints and delivery model**
+`endpoint.bind`, `endpoint.status`, ext 0x02 with a live resolver, `"gone"`
+semantics.
+Accept when: a push to a dead endpoint returns `"gone"` immediately, and a relay
+agent forwarding between two instances works with no runtime support for routing.
+
+**M6: hibernate**
+Accessor shim, precondition checks, value graph with backreferences, closures and
+upvalue identity, permanents table, content-addressed Protos through the real dump
+path, snapshot header, validation pass and structure-aware fuzzer, host-identity
+stamp, `dv_snapshot` and `dv_restore`.
+Accept when: an agent parked on `queue.wait` round-trips and resumes; shared
+upvalues remain shared; a mismatched runtime identity refuses cleanly; a hibernate
+attempted below a continuation-less C frame refuses with a named error; a snapshot
+taken with a live `defer` in scope round-trips; a foreign host stamp is refused;
+the fuzzer reports no crashes.
+
+**M7: swarm layer**
+Instance table, `system/lifecycle` and `system/events`, attenuation, budgets,
+orphan policy, rate limits, snapshot cache with `wake_on_message`.
+Accept when: a supervisor spawns and restarts children; a child cannot be granted
+capability the supervisor lacks; a message to a swapped-out instance wakes it and
+arrives in order ahead of live pushes.
+
+**M8: packaging**
+Rust and JS first, then Python wheels and the header archive.
+Accept when: the portability demo runs in both environments from published
+packages, not local builds.
+
+---
+
+## 14. Test plan
+
+Lean. Cover semantics and boundaries, not permutations.
+
+- **msgpack round-trip corpus.** One file covering each type, integer vs float,
+  nested tables, forced array and map, empty table, deep nesting at the cap, cyclic
+  input.
+- **Queue semantics table.** One test per row of 6.4. These are the rows that will
+  regress.
+- **Delivery semantics.** Push to full, disabled, and gone destinations. Assert
+  none of them raise and none of them block.
+- **Yieldability of the entry path.** `coroutine.isyieldable()` true at the
+  deepest point of each converted path. This is the assertion that proves M0 did
+  something; without it, a plain `lua_pcall` regression is invisible.
+- **Interrupt.** Send SIGINT to a runaway loop in the interpreter and assert it is
+  interrupted. Untested today, and the reason the `globalL` hazard in 8.2 would
+  otherwise ship green.
+- **Error message across the state hop.** A script that errors, driven through
+  each entry path, with the message compared to the pre-conversion baseline.
+- **Yield/resume.** One test per host binding: push in, agent wakes, agent pushes
+  out, host receives.
+- **Non-yieldable rejection.** One test per context in 8.4, plus one asserting
+  that a yield inside `pcall` **succeeds**.
+- **No-C-frame assertion.** Park an agent on `queue.wait` and verify the CallInfo
+  chain has no continuation-less `CIST_C` frame below the wait. This property is
+  what makes M6 possible and it will silently break during refactoring.
+- **Hibernate round-trip.** Parked agent, shared upvalues, queue contents, handle
+  re-resolution, refusal cases from 10.7, and a live `defer` in scope. The `defer`
+  case is the highest-coverage single test available here: `defer` desugars to a
+  to-be-closed local holding a self-referential `setmetatable(t, t)`, so one test
+  exercises `tbclist` capture, closure serialization, and ext 0x04 backreferences
+  at once.
+- **Dump determinism.** Identical source produces byte-identical stripped dumps
+  across processes. Precondition for 10.5.
+- **Snapshot validation.** Structure-aware mutation of a snapshot; assert refusal,
+  never a crash. Plus a foreign host stamp refused.
+- **Attenuation.** A supervisor attempting to over-grant is refused.
+- **Cross-host portability.** Identical bytecode under two hosts, identical output.
+
+Benchmarks, reported not asserted: encode and decode throughput by message size,
+push and pop cost for local queues, snapshot size and restore latency for a
+representative agent. These inform the 6.5 revisit and the cache sizing in M7.
+
+---
+
+## 15. Open questions
+
+1. **Snapshot cache storage.** File layout and eviction policy for M7. Not
+   designed here.
+
+Closed since the first draft: the swarm prefix is `dvs_` (11.5); default `on_full`
+is `"reject"` (6.3); the queue name separator is `/`, structural only (6.6);
+`inbox` and `outbox` are auto-declared (6.6); the capability check signature is
+`(capability, resource, context) -> allow | deny` with the token model opaque
+(8.5). Also settled earlier: the instance ABI prefix is `dv_`, the multi-instance
+layer is named swarm, and an agent is one instance.
+
+---
+
+## 16. Decisions already made
+
+Settled during design. Do not relitigate during implementation.
+
+- msgpack, not protobuf. Programs are generated and rewritten at runtime, so schema
+  compilation is a poor fit, and one codec serves wire and disk.
+- Queues are guest-declared and guest-owned, not host-owned. The host is more likely
+  to swap the program than the reverse.
+- Queues are volatile, with enable and disable so a program going down rejects
+  cleanly rather than accepting messages it will drop.
+- Integer handles, not string lookup per operation.
+- Dumb queues: no designated producer or consumer, no acknowledgement. Direction
+  flags recorded but unenforced.
+- The only guarantee is that a message was accepted into the next hop.
+- Bounded always.
+- Waiting is a yield, never a block.
+- Routing, broadcast, retry, discovery, and store-and-forward are agents, not
+  runtime features.
+- Supervision is a capability expressed as a queue protocol, not a runtime
+  primitive. Diluvium never owns a process table.
+- There is one kind of program and one isolation boundary, the instance.
+  "Supervisor", "coordinator", "handler" and "agent" are roles a program plays by
+  holding a capability, never types.
+- An agent is one instance, not a coroutine in a shared instance.
+- Capability grants attenuate only, and the lifecycle capability delegates
+  recursively with no additional mechanism.
+- Hibernation is self-initiated, refuses below a continuation-less C frame, and
+  restores only against an exact runtime and bytecode match.
+- Yielding across `pcall` is legal Lua and stays legal. The yield-blocking and
+  hibernate-blocking context sets are different sets and are documented
+  separately.
+- Snapshot Proto encoding goes through the real dump path, never a parallel
+  encoder.
+- The secure-function scramble stays deterministic, because content-addressed
+  Protos depend on it.
+
+---
+
+## 17. Corrections against the first draft
+
+Recorded because the reasons generalize, and because this document is the handoff
+artifact between sessions that do not share context.
+
+- **`pcall` was listed as non-yieldable.** It is not, and has not been since Lua
+  5.2. The error came from generalizing backward from the hibernate constraint to
+  the yield constraint via a shared diagnostic; the two sets are different. M3's
+  acceptance criterion was inverted as a result and now asserts the opposite.
+- **Hibernation's limit was stated as "any C frame."** It is any C frame *without
+  a continuation*.
+- **Hibernate bypassed secure functions.** Section 10.9 is new.
+- **Restore's threat model was undifferentiated.** Section 10.10 separates
+  validate, authenticate, and capability-check so that deferring one does not
+  silently defer the others.
+- **The codec was described as layer-independent while requiring the swarm
+  layer's instance table.** Section 4.2 makes the dependency an injected
+  interface.
+- **The peek contract ignored the collector.** 11.2 now requires a registry
+  anchor.
+- **The general lesson.** The first draft was written against an abstract Lua 5.5
+  rather than against this tree, which is what produced both the `pcall` error and
+  the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,
+  `CIST_C`, `tbclist`, the dump header, `LUAC_FORMAT` — should be checked at
+  source level before the milestone that depends on them, not trusted because the
+  surrounding reasoning holds together. Those five were checked while writing this
+  revision and hold; the next set should get the same treatment.
