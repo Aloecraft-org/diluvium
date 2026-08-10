@@ -96,10 +96,10 @@ Parts 1 through 5 need neither. Every mechanism they use is in the public API:
 Two existing files are touched, both already on the allowlist in
 `script/patch_series.sh`:
 
-- `lua.c`, whose allowlist reason is already *"Diluvium branding; REPL input
-  handling moved to drepl.c"*. The coroutine-entered call driver follows that
-  same precedent: the mechanism lives in `drepl.c`, and `lua.c` keeps only a
-  delegation. Do not grow `lua.c` with a new mechanism.
+- `lua.c`, whose allowlist reason already records that REPL input handling moved
+  out to `drepl.c`. The call driver follows that precedent: the mechanism is in
+  `dtask.c` and `lua.c` keeps a delegation plus one option. Do not grow `lua.c`
+  with a new mechanism.
 - `onelua.c`, to include new layered sources in the amalgamation.
 
 Part 6 needs the second kind of dependency. Confine it to a single new source
