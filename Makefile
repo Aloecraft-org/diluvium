@@ -46,11 +46,18 @@ endif
 # Line editing is dline.c, which needs nothing but termios, so the test
 # build and the release build now use the same editor and neither links a
 # third-party library for it.
-TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_LINUX -Wl,-E -ldl
+#
+# PLATFORM_CFLAGS is factored out because it is not only the debug build that needs
+# it: the sanitizer targets link their own binaries, and hardcoding the Linux
+# variant in them broke the macOS job with 'ld: unknown options: -E'. Anything in
+# this file that invokes gcc directly must use this rather than repeat it.
+PLATFORM_CFLAGS = -DLUA_USE_LINUX -Wl,-E -ldl
 
 ifeq ($(UNAME_S),Darwin)
-    TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_POSIX
+    PLATFORM_CFLAGS = -DLUA_USE_POSIX
 endif
+
+TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g $(PLATFORM_CFLAGS)
 
 TEST_BIN:=$(CURDIR)/dist/diluvium_debug
 TEST_RUNNER:=$(CURDIR)/test/run_tests.sh
@@ -328,20 +335,29 @@ dvs_check: _build_step0
 # Not the ltests.h build: that installs its own allocator and would fight ASan for
 # the same job. TEST_CFLAGS is therefore not reused here.
 SAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g
-SAN_ENV = ASAN_OPTIONS=detect_leaks=1 \
+# detect_leaks is Linux-only: Apple's AddressSanitizer ships no LeakSanitizer, so
+# asking for it on Darwin is an error rather than a no-op. Leak coverage therefore
+# comes from the Linux job, and the Darwin run still checks addresses and undefined
+# behaviour -- stated here because "clean under the sanitizers" means slightly less
+# on one platform than the other and that should not be a surprise.
+SAN_LEAKS = detect_leaks=1
+ifeq ($(UNAME_S),Darwin)
+    SAN_LEAKS = detect_leaks=0
+endif
+SAN_ENV = ASAN_OPTIONS=$(SAN_LEAKS) \
 	  UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
 
 sanitize_checks: _build_step0
 	@set -e; \
 	for t in dv_check dtask_check dshim_check dsnap_check; do \
 	  echo "=== $$t (asan+ubsan)"; \
-	  gcc $(SAN_CFLAGS) -DLUA_USE_LINUX -Wl,-E -ldl -DMAKE_LIB \
+	  gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
 	    -I$(CURDIR)/.data -o $(CURDIR)/dist/$${t}_asan \
 	    $(CURDIR)/test/$$t.c $(CURDIR)/.data/onelua.c -lm; \
 	  $(SAN_ENV) $(CURDIR)/dist/$${t}_asan >/dev/null; \
 	done; \
 	echo "=== dvs_check (asan+ubsan)"; \
-	gcc $(SAN_CFLAGS) -DLUA_USE_LINUX -Wl,-E -ldl -DMAKE_LIB \
+	gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
 	  -I$(CURDIR)/.data -o $(CURDIR)/dist/dvs_check_asan \
 	  $(CURDIR)/test/dvs_check.c $(CURDIR)/.data/dvs.c \
 	  $(CURDIR)/.data/onelua.c -lm; \
@@ -380,7 +396,7 @@ test_libs:
 	  || echo "test C libraries did not build; attrib will skip"
 
 mp_cursor_fuzz: _build_step0
-	gcc $(SAN_CFLAGS) -DLUA_USE_LINUX -Wl,-E -ldl -DMAKE_LIB \
+	gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
 	  -I$(CURDIR)/.data -o $(CURDIR)/dist/mp_cursor_fuzz \
 	  $(CURDIR)/test/mp_cursor_fuzz.c $(CURDIR)/.data/onelua.c -lm
 	@$(SAN_ENV) $(CURDIR)/dist/mp_cursor_fuzz
