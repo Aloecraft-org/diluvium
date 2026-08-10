@@ -29,6 +29,7 @@ int ds_decodeheader_trampoline (lua_State *L);
 static int ds_encodethread (lua_State *L, int abs);
 static int ds_decodethread (lua_State *L, const unsigned char *data, size_t len);
 static int ds_buildthread (lua_State *L, int thidx);
+static int ds_hook_begin (lua_State *L, void *ud);
 static int ds_hook_finish (lua_State *L, void *ud);
 
 
@@ -333,7 +334,8 @@ static void ds_permanents (lua_State *L, char *out) {
 ** msgpack is the ordinary kind. That is what makes "refused, and here is which
 ** field differed" possible instead of an opaque no.
 */
-static void ds_buildheader (lua_State *L, const diluvium_snap_opts *opts) {
+static void ds_buildheader (lua_State *L, const diluvium_snap_opts *opts,
+                            const char *payload, size_t plen) {
   char fp[DILUVIUM_SHA256_HEX];
   char perm[DILUVIUM_SHA256_HEX];
   lua_Integer id = 0;
@@ -352,6 +354,19 @@ static void ds_buildheader (lua_State *L, const diluvium_snap_opts *opts) {
   lua_setfield(L, -2, "capabilities");
   lua_pushstring(L, (opts != NULL && opts->host != NULL) ? opts->host : "");
   lua_setfield(L, -2, "host");
+  /* The payload digest. Empty when the caller has no payload yet -- a bare
+     'diluvium_snap_header' is used by tests and by a host that only wants to
+     report its runtime identity. */
+  if (payload != NULL) {
+    unsigned char d[DILUVIUM_SHA256_SIZE];
+    char hex[DILUVIUM_SHA256_HEX];
+    diluvium_sha256(payload, plen, d);
+    diluvium_sha256_hex(d, hex);
+    lua_pushstring(L, hex);
+  }
+  else
+    lua_pushliteral(L, "");
+  lua_setfield(L, -2, "payload");
   /* The queue name list, for 10.8's re-resolution. Names and not handles: 6.2
      says a handle is runtime identity, so carrying one would be carrying the
      exact thing that must not survive. */
@@ -371,10 +386,18 @@ static void ds_buildheader (lua_State *L, const diluvium_snap_opts *opts) {
 LUA_API size_t diluvium_snap_header (lua_State *L,
                                      const diluvium_snap_opts *opts,
                                      char *out, size_t cap) {
+  return diluvium_snap_headerfor(L, opts, NULL, 0, out, cap);
+}
+
+
+LUA_API size_t diluvium_snap_headerfor (lua_State *L,
+                                        const diluvium_snap_opts *opts,
+                                        const char *payload, size_t plen,
+                                        char *out, size_t cap) {
   int base = lua_gettop(L);
   size_t len;
   const char *s;
-  ds_buildheader(L, opts);
+  ds_buildheader(L, opts, payload, plen);
   diluvium_msgpack_encode(L, -1);
   s = lua_tolstring(L, -1, &len);
   if (len > cap) {
@@ -476,6 +499,25 @@ LUA_API int diluvium_snap_checkheader (lua_State *L,
     if (!ds_field_is(L, hdr, "host", want))
       rc = DILUVIUM_SNAP_HOST_MISMATCH;
   }
+  /*
+  ** The payload digest, when the header carries one and there is a payload to
+  ** check. Last, because every other refusal says something more specific: a
+  ** corrupt payload under a foreign runtime is a foreign runtime first.
+  */
+  if (rc == DILUVIUM_SNAP_ACCEPT && used != NULL && *used < len) {
+    if (lua_getfield(L, hdr, "payload") == LUA_TSTRING) {
+      const char *want = lua_tostring(L, -1);
+      if (*want != '\0') {
+        unsigned char d[DILUVIUM_SHA256_SIZE];
+        char hex[DILUVIUM_SHA256_HEX];
+        diluvium_sha256(s + *used, len - *used, d);
+        diluvium_sha256_hex(d, hex);
+        if (strcmp(hex, want) != 0)
+          rc = DILUVIUM_SNAP_CORRUPT;
+      }
+    }
+    lua_pop(L, 1);
+  }
   lua_settop(L, base);
   if (rc != DILUVIUM_SNAP_ACCEPT && used != NULL)
     *used = 0;
@@ -502,6 +544,11 @@ LUA_API const char *diluvium_snap_why (int code) {
       return "the snapshot was taken under a different capability set";
     case DILUVIUM_SNAP_HOST_MISMATCH:
       return "the snapshot's host identity stamp is not this host's";
+    case DILUVIUM_SNAP_BAD_PAYLOAD:
+      return "the header matched but the payload after it could not be read";
+    case DILUVIUM_SNAP_CORRUPT:
+      return "the payload is not the bytes the header was written for, so the "
+             "snapshot has been truncated, altered or corrupted in transit";
     default:
       return "unknown reason";
   }
@@ -553,7 +600,16 @@ int ds_decodeheader_trampoline (lua_State *L) {
 ** Prototypes and closures (10.5, 10.9)
 ** ====================================================================== */
 
-static const char DS_PROTOS = 0;        /* hash hex -> a function with it */
+static const char DS_PROTOS = 0;        /* hash hex -> the stripped dump */
+/*
+** Prototypes inlined by the encode in progress. Separate from DS_PROTOS, and the
+** separation is the point: what a *host* registered is durable and makes a
+** snapshot reference code the target is expected to have, while what this stream
+** happened to inline is true only of this stream. Conflating them made taking a
+** snapshot quietly register its own prototypes, so the next one referenced code no
+** other runtime had.
+*/
+static const char DS_INLINED = 0;
 
 /*
 ** Hash a Lua closure's stripped dump and collect the bytes.
@@ -660,9 +716,9 @@ LUA_API int diluvium_snap_registered (lua_State *L) {
 }
 
 
-/* Is this hash in the runtime's proto registry? Pushes the dump if so. */
-static int ds_lookupproto (lua_State *L, const char *hex) {
-  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PROTOS) != LUA_TTABLE) {
+/* Look 'hex' up in one of the two tables. Pushes the dump if found. */
+static int ds_lookupin (lua_State *L, const void *key, const char *hex) {
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, key) != LUA_TTABLE) {
     lua_pop(L, 1);
     return 0;
   }
@@ -672,6 +728,32 @@ static int ds_lookupproto (lua_State *L, const char *hex) {
   }
   lua_remove(L, -2);
   return 1;
+}
+
+
+/* The host's registry: what a reference in a snapshot may name. */
+static int ds_lookupproto (lua_State *L, const char *hex) {
+  return ds_lookupin(L, &DS_PROTOS, hex);
+}
+
+
+/* This stream's: what has already been inlined and may be referenced within it. */
+static int ds_lookupinlined (lua_State *L, const char *hex) {
+  return ds_lookupin(L, &DS_INLINED, hex);
+}
+
+
+static void ds_markinlined (lua_State *L, const char *hex, int dumpidx) {
+  int abs = lua_absindex(L, dumpidx);
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_INLINED) != LUA_TTABLE) {
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_INLINED);
+  }
+  lua_pushvalue(L, abs);
+  lua_setfield(L, -2, hex);
+  lua_pop(L, 1);
 }
 
 
@@ -720,9 +802,9 @@ static int ds_encodeclosure (lua_State *L, int abs) {
   ** the second closure of one prototype in a single snapshot references the copy
   ** the first one inlined.
   */
-  known = ds_lookupproto(L, hex);
+  known = ds_lookupproto(L, hex) || ds_lookupinlined(L, hex);
   if (known)
-    lua_pop(L, 1);                      /* the registry's copy */
+    lua_pop(L, 1);                      /* the copy that was found */
   luaL_buffinit(L, &out);
   {
     char head[2];
@@ -733,11 +815,10 @@ static int ds_encodeclosure (lua_State *L, int abs) {
   luaL_addlstring(&out, (const char *)digest, DILUVIUM_SHA256_SIZE);
   if (!known) {
     luaL_addlstring(&out, dump, dumplen);
-    /* Register it, so a second closure of the same prototype later in this
-       stream is a reference rather than another copy. */
-    lua_pushvalue(L, abs);
-    diluvium_snap_register(L, -1);
-    lua_pop(L, 1);
+    /* Recorded for *this stream only*, so a second closure of the same prototype
+       later in the same snapshot is a reference rather than another copy -- without
+       making the snapshot depend on the target runtime having it. */
+    ds_markinlined(L, hex, lua_gettop(L) - 1);
   }
   luaL_pushresult(&out);
   /* Hand the finished payload to the codec as an ext object. */
@@ -783,13 +864,20 @@ static int ds_decodeclosure (lua_State *L, const unsigned char *data,
       return luaL_error(L, "snapshot: an inlined prototype does not hash to the "
                            "name it was given");
     lua_pushlstring(L, dump, dlen);
+    /* Recorded so a later reference in this same stream resolves. */
+    ds_markinlined(L, hex, lua_gettop(L));
   }
   else {
     /* 10.5: "restore requires an exact match. Mismatch is a clean refusal,
        never a best-effort load." */
-    if (!ds_lookupproto(L, hex))
-      return luaL_error(L, "snapshot: prototype %s is referenced but is not "
-                           "present in this runtime", hex);
+    /* Either the host registered it, or this same stream inlined it earlier. The
+       second case is what makes ten agents over one prototype cost one copy, and
+       the decoder has to know about it too -- looking only in the host's registry
+       refused a reference to a prototype the snapshot did carry. */
+    if (!ds_lookupproto(L, hex) && !ds_lookupinlined(L, hex))
+      return luaL_error(L, "snapshot: prototype %s is referenced but is neither "
+                           "carried by this snapshot nor registered in this "
+                           "runtime", hex);
   }
   dump = lua_tolstring(L, -1, &dlen);
   if (luaL_loadbufferx(L, dump, dlen, "=snapshot", "b") != LUA_OK)
@@ -927,8 +1015,34 @@ static int ds_hook_encode (lua_State *L, int idx, void *ud) {
       return ds_encodeclosure(L, abs);
     case LUA_TTHREAD:
       return ds_encodethread(L, abs);
+    case LUA_TUSERDATA:
+      /*
+      ** Ext 0x05 is unimplemented, deliberately, and this is the refusal 10.7
+      ** item 2 actually asks for. The message names '__persist' because that is
+      ** what a host has to supply once the positive path exists.
+      **
+      ** Why it does not exist yet is worth writing down, because the obvious
+      ** design does not work. The natural shape -- '__persist' returns a
+      ** reconstructor closure, which the graph already knows how to carry -- founders
+      ** on ordering. A userdata needs its position before the reconstructor is
+      ** written, so that a reference to it from the reconstructor's own upvalues
+      ** resolves; but on the way back the reconstructor cannot be *called* until
+      ** the whole graph exists, and by then any table that referenced the
+      ** userdata has already been given whatever placeholder stood at that
+      ** position. A program would find a placeholder where its file handle
+      ** should be, and find it silently.
+      **
+      ** Fixing that needs either a patch-up pass over every reference or an ext
+      ** that can carry a nested graph value, and both are more than a footnote.
+      ** Refusing is correct in the meantime and is what 10.7 specifies; shipping
+      ** the version that breaks when a userdata is referenced twice would not be.
+      */
+      return luaL_error(L, "snapshot: this userdata cannot be captured -- "
+                           "persisted userdata (ext 0x05, the '__persist' hook) "
+                           "is not implemented, so a program that hibernates must "
+                           "release its userdata first (10.7 item 2)");
     default:
-      return 0;                        /* userdata: not yet */
+      return 0;                        /* threads are handled above */
   }
 }
 
@@ -1102,6 +1216,7 @@ static int ds_hook_fixup (lua_State *L, int tag, const lua_Integer *ops,
 
 LUA_API const diluvium_snap_hooks *diluvium_snap_hooks_for (lua_State *L) {
   static const diluvium_snap_hooks hooks = {
+    ds_hook_begin,          /* begin */
     ds_hook_permanent,      /* permanent */
     ds_hook_encode,         /* encode */
     ds_hook_slot,           /* slot */
@@ -1475,6 +1590,18 @@ static int ds_buildthread (lua_State *L, int thidx) {
 }
 
 
+static int ds_hook_begin (lua_State *L, void *ud) {
+  (void)ud;
+  /* Clear the per-stream inlined set. Also the captured-thread set, since it is
+     only meaningful while an encode is running. */
+  lua_pushnil(L);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_INLINED);
+  lua_pushnil(L);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_CAPTURED);
+  return 1;
+}
+
+
 static int ds_hook_finish (lua_State *L, void *ud) {
   int base = lua_gettop(L);
   (void)ud;
@@ -1519,4 +1646,166 @@ static int ds_hook_finish (lua_State *L, void *ud) {
   lua_pushnil(L);
   lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_BUILT);
   return 1;
+}
+
+
+/* ======================================================================
+** Whole-instance save and restore
+** ====================================================================== */
+
+LUA_API int diluvium_snap_addpermanent (lua_State *L, const char *name) {
+  int base = lua_gettop(L);
+  int nameidx, validx, ok;
+  if (name == NULL || base < 1)
+    return 0;
+  diluvium_snap_permanents(L);
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PERM_NAME);
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PERM_VALUE);
+  if (!lua_istable(L, -2) || !lua_istable(L, -1)) {
+    lua_settop(L, base - 1);
+    return 0;
+  }
+  nameidx = base + 1;
+  validx = base + 2;
+  lua_pushstring(L, name);
+  ok = (lua_rawget(L, validx) == LUA_TNIL);
+  lua_pop(L, 1);
+  if (ok) {
+    lua_pushvalue(L, base);            /* the value the caller pushed */
+    ds_perm_put(L, nameidx, validx, name);
+  }
+  lua_settop(L, base - 1);             /* drop the tables and the value */
+  /*
+  ** The permanents fingerprint has to be recomputed, and letting it be
+  ** recomputed is the point: a host that names an extra function has a different
+  ** permanents set, and a snapshot taken under one set must be refused by the
+  ** other. Dropping the cache is what makes that happen rather than something to
+  ** remember.
+  */
+  lua_pushnil(L);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_PERM_FP);
+  return ok;
+}
+
+
+/* The root of an instance snapshot: the thread, plus the queue subsystem. */
+static void ds_buildroot (lua_State *L, int thidx) {
+  lua_createtable(L, 0, 2);
+  lua_pushvalue(L, thidx);
+  lua_setfield(L, -2, "thread");
+  diluvium_queue_pushstate(L);
+  lua_setfield(L, -2, "queues");
+}
+
+
+LUA_API void diluvium_snap_save (lua_State *L, int thidx,
+                                 const diluvium_snap_opts *opts) {
+  int abs = lua_absindex(L, thidx);
+  int base = lua_gettop(L);
+  char head[8192];
+  size_t hlen;
+  luaL_Buffer b;
+  if (lua_type(L, abs) != LUA_TTHREAD)
+    luaL_error(L, "snapshot: dv_snapshot needs a thread, not a %s",
+               luaL_typename(L, abs));
+  /* The header is built first and *after* the permanents exist, because its
+     fingerprint covers them -- and a host that named its own functions changes
+     that fingerprint. */
+  diluvium_snap_permanents(L);
+  ds_buildroot(L, abs);
+  diluvium_msgpack_encode_graph(L, -1, diluvium_snap_hooks_for(L));
+  /*
+  ** The graph's index is taken from 'lua_gettop' rather than computed. Both
+  ** guesses at computing it were wrong -- 'encode_graph' leaves its result above
+  ** the value it was given, not in its place -- and the symptom was a zero-length
+  ** graph appended to a valid header, which the restore reported as "truncated
+  ** input" and looked for all the world like a codec bug.
+  **
+  ** Read before 'luaL_buffinit', too. That pushes a placeholder in Lua 5.5, so
+  ** afterwards -1 is the placeholder and not the string.
+  */
+  {
+    int gidx = lua_gettop(L);
+    size_t glen;
+    const char *g = lua_tolstring(L, gidx, &glen);
+    if (g == NULL)
+      luaL_error(L, "snapshot: the graph did not encode to a string");
+    /* The header is written *after* the graph, because it carries the graph's
+       digest. Queues are read for the name list before either, and nothing
+       between here and there can change them. */
+    hlen = diluvium_snap_headerfor(L, opts, g, glen, head, sizeof(head));
+    if (hlen == 0)
+      luaL_error(L, "snapshot: the header does not fit in %d bytes, which means "
+                    "an implausible number of queues", (int)sizeof(head));
+    luaL_buffinit(L, &b);
+    luaL_addlstring(&b, head, hlen);
+    luaL_addlstring(&b, g, glen);
+  }
+  luaL_pushresult(&b);
+  lua_replace(L, base + 1);
+  lua_settop(L, base + 1);
+}
+
+
+/* The protected half of 'load'; see there for why this is split. */
+static int ds_loadbody (lua_State *L) {
+  size_t len, used;
+  const char *s = lua_tolstring(L, 1, &len);
+  used = (size_t)lua_tointeger(L, 2);
+  diluvium_msgpack_decode_graph(L, s + used, len - used,
+                                diluvium_snap_hooks_for(L));
+  if (!lua_istable(L, -1))
+    return luaL_error(L, "snapshot: the payload is not an instance record");
+  if (lua_getfield(L, -1, "thread") != LUA_TTHREAD)
+    return luaL_error(L, "snapshot: the payload has no thread");
+  if (lua_getfield(L, -2, "queues") != LUA_TTABLE)
+    return luaL_error(L, "snapshot: the payload has no queue state");
+  if (!diluvium_queue_setstate(L, -1))
+    return luaL_error(L, "snapshot: this instance already has queues, so a "
+                         "restore would merge two handle spaces");
+  lua_pop(L, 1);                       /* the queue state */
+  return 1;                            /* the thread */
+}
+
+
+LUA_API int diluvium_snap_load (lua_State *L, const diluvium_snap_opts *opts,
+                                const char *s, size_t len,
+                                const char **out_msg) {
+  int base = lua_gettop(L);
+  size_t used = 0;
+  int rc;
+  if (out_msg != NULL) *out_msg = NULL;
+  diluvium_snap_permanents(L);
+  rc = diluvium_snap_checkheader(L, opts, s, len, &used);
+  if (rc != DILUVIUM_SNAP_ACCEPT) {
+    if (out_msg != NULL) *out_msg = diluvium_snap_why(rc);
+    return rc;
+  }
+  /*
+  ** The payload runs under protection and the header does not, because they fail
+  ** differently. A bad header is a mismatch with a code and a sentence; a bad
+  ** payload is anything at all, and 10.10 requires that anything at all produce a
+  ** refusal rather than a crash. Nothing in here may raise past this point.
+  */
+  lua_pushcfunction(L, ds_loadbody);
+  lua_pushlstring(L, s, len);
+  lua_pushinteger(L, (lua_Integer)used);
+  if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+    if (out_msg != NULL) {
+      const char *m = lua_tostring(L, -1);
+      *out_msg = (m != NULL) ? m : "snapshot: the payload was refused";
+    }
+    /* The message is left on the stack so the pointer stays valid until the
+       caller's next operation, which is the same contract 'dv_last_error' has. */
+    return DILUVIUM_SNAP_BAD_PAYLOAD;
+  }
+  /*
+  ** The result is already at 'base + 1' -- 'lua_pcall' left its single return
+  ** value where the function was -- so there is nothing to move. A
+  ** 'lua_replace(L, base + 1)' here pops the top and stores it at its own index,
+  ** which discards it; the following 'settop' then padded with nil and the caller
+  ** got a NULL thread. Trimming is all that is wanted.
+  */
+  lua_settop(L, base + 1);
+  return DILUVIUM_SNAP_ACCEPT;
 }

@@ -343,6 +343,57 @@ dv_status dv_endpoint_close (dv_instance *inst, dv_queue_id id);
 #define DV_LAYOUT_WAITSET_FOR_WRITE	14
 #define DV_LAYOUT_COUNT			15
 
+/*
+** Hibernate and wake an instance.
+**
+** 'dv_snapshot' writes the instance's whole state -- the parked program, its call
+** chain, its reachable values, and every queue with its contents -- into 'out'.
+** The instance must be *parked*, which is the only state in which all of it is
+** written down: doc/Messaging.md 10.2 explains why, and 10.7 lists the checks.
+** Pass out == NULL to ask only for the size.
+**
+** 'host' is 10.10's identity stamp, or NULL for none. A snapshot with no stamp
+** restores anywhere; a stamped one restores only under the same string; and a
+** host that supplies one refuses a snapshot without it, or stamping would be
+** advisory.
+**
+** Returns DV_OK with '*len' set, DV_BUFFER_TOO_SMALL when 'cap' is short (with
+** '*len' set to what is needed), or DV_ERROR with 'dv_last_error' saying why.
+*/
+dv_status dv_snapshot (dv_instance *inst, const char *host,
+                       uint8_t *out, size_t cap, size_t *len);
+
+/*
+** Restore into a *fresh* instance -- one with nothing loaded and no queues.
+**
+** After DV_OK the instance is parked exactly as the snapshot's was, so the next
+** call is 'dv_waitset_get' to learn what it is waiting for and then 'dv_resume'.
+** Not 'dv_run': the program is not starting, it is continuing.
+**
+** Refuses rather than raising, and refuses on *any* input. 10.10 calls a snapshot
+** untrusted: this reconstructs a CallInfo chain and stack offsets straight into
+** the interpreter, so every field is range-checked before anything is written and
+** a malformed snapshot cannot leave a half-built instance. 'dv_last_error' says
+** which field, when it can.
+**
+** DV_SNAPSHOT_MISMATCH means the header was refused: a different runtime build, a
+** different permanents or capability set, or the wrong host stamp. DV_ERROR means
+** the header matched and the payload did not survive reading.
+*/
+dv_status dv_restore (dv_instance *inst, const char *host,
+                      const uint8_t *s, size_t len);
+
+/*
+** Reference a prototype by hash instead of carrying its bytecode (10.5).
+**
+** Register the chunk a swarm shares and every snapshot of an agent using it
+** carries a 32-byte hash in place of its code. A host that registers nothing gets
+** self-contained snapshots, which is the right default. The bytes are a compiled
+** or source chunk, same as 'dv_load'.
+*/
+dv_status dv_register_code (dv_instance *inst, const uint8_t *code, size_t len,
+                            const char *name);
+
 uint32_t dv_layout (uint32_t *out, size_t n);
 
 

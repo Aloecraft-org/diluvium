@@ -151,6 +151,13 @@ jobs:
       - name: Check that the runtime fingerprint separates builds
         run: ./test/fingerprint_check.sh
 
+      # 10.10's acceptance criterion: structure-aware mutation of a real
+      # snapshot, asserting a refusal and never a crash. It found the two
+      # validation gaps it now guards, and it found them because it loads in a
+      # separate process -- which two instances in one process cannot do.
+      - name: Fuzz the snapshot restore path
+        run: make snap_fuzz
+
       # The release build catches what the amalgamation hides: a file that uses a
       # core macro without including its header compiles in onelua.c and fails
       # here. Two such bugs reached the tree before this was in the sweep.

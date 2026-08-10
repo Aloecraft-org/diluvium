@@ -152,6 +152,25 @@ LUA_API void diluvium_msgpack_setresolver (lua_State *L,
 
 typedef struct diluvium_snap_hooks {
   /*
+  ** Called once at the start of a stream in *either* direction, before anything
+  ** is written or read, so a layer can clear per-stream state. Return 1, or 0 to
+  ** have the codec raise.
+  **
+  ** Both directions, because per-stream state is symmetric: what the encoder
+  ** inlined earlier in this snapshot is what the decoder may find a reference to,
+  ** and neither may carry over into the next stream.
+  **
+  ** The symmetric partner of 'finish', and it exists for the same kind of reason:
+  ** prototype dedup within one snapshot has to be *per stream*. The first version
+  ** deduped through the runtime's own prototype registry, which meant taking a
+  ** snapshot registered the prototypes it inlined -- so the next snapshot of the
+  ** same program referenced them instead of carrying them, silently stopped being
+  ** self-contained, and could not be restored anywhere else. It also made two
+  ** consecutive snapshots different sizes, which is how it was found: a size
+  ** enquiry disagreed with the snapshot that followed it.
+  */
+  int (*begin) (lua_State *L, void *ud);
+  /*
   ** Asked *first*, before the codec gives a value a position, for every table,
   ** function, userdata and thread.
   **

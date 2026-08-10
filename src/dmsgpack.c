@@ -1412,6 +1412,9 @@ LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
   lua_pushlightuserdata(L, &ctx);
   lua_rawsetp(L, LUA_REGISTRYINDEX, &MP_CURRENT);
 
+  if (h != NULL && h->begin != NULL && !h->begin(L, h->ud))
+    luaL_error(L, "msgpack: the snapshot layer could not start an encode");
+
   mp_encode_value(L, &ctx, abs);              /* the root */
 
   /*
@@ -1619,6 +1622,9 @@ LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
   lua_pop(L, 1);
   lua_pushlightuserdata(L, &snap);
   lua_rawsetp(L, LUA_REGISTRYINDEX, &MP_CURDEC);
+
+  if (h != NULL && h->begin != NULL && !h->begin(L, h->ud))
+    luaL_error(L, "msgpack: the snapshot layer could not start a decode");
 
   mp_decode_value(&c, 0);                     /* the root: base + 2 */
 

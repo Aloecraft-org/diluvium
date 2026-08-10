@@ -217,4 +217,30 @@ LUA_API lua_Integer diluvium_queue_next (lua_State *L, lua_Integer after,
 */
 LUA_API void diluvium_queue_pushmark (lua_State *L);
 
+
+/*
+** The whole queue subsystem's state, as one Lua value.
+**
+** This is what makes a whole-instance snapshot simple, and it is worth saying why
+** it is safe. The state is a plain table -- queue tables by handle, plus a 'names'
+** map -- holding nothing but numbers, strings and tables. The notification
+** callback and the peek anchor live under separate registry keys and are *not* in
+** it, so nothing here is a host pointer.
+**
+** Restoring it verbatim has a consequence 10.8 did not anticipate: handles
+** survive. A handle stored in program state is still that queue after a restore,
+** rather than stale, because the numbering comes back with the table. 10.8's
+** re-declare-by-name step is therefore unnecessary for a whole-instance snapshot,
+** and is still needed for the case it was written for -- moving one program's
+** state into an instance that already has queues of its own.
+**
+** 'setstate' refuses when queues already exist, because merging two numbering
+** spaces would silently give one program another's queues.
+*/
+LUA_API void diluvium_queue_pushstate (lua_State *L);
+LUA_API int diluvium_queue_setstate (lua_State *L, int idx);
+
+/* How many live queues there are. 0 means 'setstate' will be accepted. */
+LUA_API int diluvium_queue_count (lua_State *L);
+
 #endif

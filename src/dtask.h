@@ -112,6 +112,19 @@ LUA_API void diluvium_task_setwait (diluvium_task_wait fn, void *ud);
 ** continuation must re-raise on an error status or every error turns into a
 ** successful return. Both mistakes produce a build that looks fine.
 */
+/*
+** Name this file's continuation for the snapshot layer.
+**
+** Called from 'diluvium_openlibs', eagerly, and that timing is the whole point.
+** It was first registered lazily, inside the driver just before installing the
+** continuation -- which works in a process that has run an agent and fails in one
+** that has only ever *loaded* a snapshot, because there the name was never
+** registered and the restore refuses. Two instances in one process hid it, since
+** the table is process-wide; the snapshot fuzzer, which loads in a separate
+** process, found it at once.
+*/
+LUA_API void diluvium_task_registerconts (void);
+
 LUA_API void diluvium_task_pushbody (lua_State *co);
 
 #endif

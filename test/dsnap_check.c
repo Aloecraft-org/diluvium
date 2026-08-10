@@ -501,6 +501,23 @@ static void light_userdata_is_refused (lua_State *L) {
 }
 
 
+static void userdata_is_refused_by_name (lua_State *L) {
+  int base = lua_gettop(L);
+  /* 10.7 item 2. The message has to say '__persist', because that is what a host
+     will have to supply when ext 0x05 exists -- and until then it is what tells a
+     reader why their file handle cannot be hibernated. */
+  lua_newuserdatauv(L, 8, 0);
+  lua_setglobal(L, "a_userdata");
+  expect_refusal(L, "return {res = {handle = a_userdata}}",
+                 "__persist",
+                 "a userdata is refused, and the message names '__persist'");
+  expect_refusal(L, "return {res = {handle = a_userdata}}",
+                 "not implemented",
+                 "and says the feature is absent rather than the value invalid");
+  lua_settop(L, base);
+}
+
+
 static void a_shape_wrapper_is_refused (lua_State *L) {
   expect_refusal(L, "return {payload = msgpack.as_array({1, 2, 3})}",
                  "shape wrapper",
@@ -1513,7 +1530,8 @@ static void a_missing_prototype_is_refused (lua_State *L) {
       lua_pushlstring(fresh, bytes, len);
       if (lua_pcall(fresh, 1, 1, 0) != LUA_OK) {
         const char *msg = lua_tostring(fresh, -1);
-        refused = (msg != NULL && strstr(msg, "not") != NULL);
+        refused = (msg != NULL &&
+                   strstr(msg, "neither carried by this snapshot") != NULL);
         if (!refused)
           printf("      (%s)\n", (msg == NULL) ? "(none)" : msg);
       }
@@ -2219,6 +2237,7 @@ int main (void) {
   printf("\n=== snapshot graph: refusals ===\n");
   light_userdata_is_refused(L);
   a_shape_wrapper_is_refused(L);
+  userdata_is_refused_by_name(L);
   a_function_is_refused_without_hooks(L);
 
   printf("\n=== snapshot graph: malformed streams (10.10) ===\n");

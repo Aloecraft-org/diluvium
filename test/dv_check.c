@@ -666,6 +666,275 @@ static void relay_between_instances (void) {
 }
 
 
+
+
+/* ======================================================================
+** Hibernate and wake (10.1, 10.6, 10.10)
+** ====================================================================== */
+
+/* Park an instance on a queue and leave it parked. 0 on failure. */
+static int park_on_queue (dv_instance *inst, const char *src) {
+  dv_waitset ws;
+  dv_status st;
+  if (dv_load(inst, (const uint8_t *)src, strlen(src), "=agent") != DV_OK) {
+    printf("[FAIL] agent would not load: %s\n", dv_last_error(inst));
+    failures++; checks++;
+    return 0;
+  }
+  memset(&ws, 0, sizeof(ws));
+  st = dv_run(inst, &ws);
+  if (st != DV_IDLE) {
+    printf("[FAIL] the agent did not park (status %s: %s)\n",
+           dv_status_name(st), dv_last_error(inst));
+    failures++; checks++;
+    return 0;
+  }
+  return 1;
+}
+
+
+static void a_parked_instance_snapshots_and_wakes (void) {
+  static const char *src =
+    "local work = queue.declare('work', {cap = 4})\n"
+    "local log = queue.declare('log', {cap = 4})\n"
+    "local seen = 0\n"
+    "queue.push(log, 'before')\n"
+    "local id, v = queue.wait({work})\n"
+    "seen = seen + 1\n"
+    "queue.push(log, 'woke:' .. tostring(v) .. ':' .. seen)\n";
+  dv_instance *a = dv_new(NULL);
+  dv_instance *b;
+  uint8_t *buf = NULL;
+  size_t need = 0, got = 0;
+  dv_status st;
+  if (a == NULL) { ok(0, "an instance is created"); return; }
+  if (!park_on_queue(a, src)) { dv_free(a); return; }
+
+  /* A size enquiry first, which is how a host that has to allocate finds out. */
+  st = dv_snapshot(a, NULL, NULL, 0, &need);
+  ok(st == DV_OK && need > 0, "a parked instance reports its snapshot size");
+  if (st != DV_OK) {
+    printf("      (%s: %s)\n", dv_status_name(st), dv_last_error(a));
+    dv_free(a);
+    return;
+  }
+  /* And a short buffer is reported rather than overrun. */
+  {
+    uint8_t small[8];
+    size_t n = 0;
+    ok(dv_snapshot(a, NULL, small, sizeof(small), &n) == DV_BUFFER_TOO_SMALL &&
+       n == need, "a short buffer is refused and the needed size reported");
+  }
+  buf = (uint8_t *)malloc(need);
+  if (buf == NULL) { ok(0, "room for the snapshot"); dv_free(a); return; }
+  ok(dv_snapshot(a, NULL, buf, need, &got) == DV_OK && got == need,
+     "the snapshot is written");
+  printf("      (%lu bytes)\n", (unsigned long)got);
+
+  /*
+  ** The original is deliberately freed before the restore. A snapshot that only
+  ** works while its source is alive would be no use for hibernation, and sharing
+  ** a Lua state between the two would hide exactly that.
+  */
+  dv_free(a);
+
+  b = dv_new(NULL);
+  if (b == NULL) { ok(0, "a fresh instance"); free(buf); return; }
+  st = dv_restore(b, NULL, buf, got);
+  ok(st == DV_OK, "it restores into a fresh instance");
+  if (st != DV_OK) {
+    printf("      (%s: %s)\n", dv_status_name(st), dv_last_error(b));
+    dv_free(b); free(buf);
+    return;
+  }
+  /* The queues came with it, contents and all -- 'log' already holds a message
+     the program pushed before it parked. */
+  {
+    dv_queue_info info;
+    dv_queue_id log = 0, work = 0;
+    memset(&info, 0, sizeof(info));
+    log = dv_queue_lookup(b, "log");
+    work = dv_queue_lookup(b, "work");
+    ok(log != 0 && work != 0, "both queues are there, found by name");
+    ok(dv_queue_state(b, log, &info) == DV_OK && info.len == 1,
+       "and 'log' still holds what the program pushed before parking");
+  }
+  /* The wait-set survives, which is what a host asks for first. */
+  {
+    dv_waitset ws;
+    memset(&ws, 0, sizeof(ws));
+    ok(dv_waitset_get(b, &ws) == DV_OK && ws.n == 1,
+       "the restored instance reports what it is waiting for");
+    ok(ws.n == 1 && ws.ids[0] == dv_queue_lookup(b, "work"),
+       "and it is the queue it parked on");
+  }
+  /* And it wakes: push a message, resume, and the program runs on. */
+  {
+    static const uint8_t msg[] = { 0xa5, 'h', 'e', 'l', 'l', 'o' };
+    dv_queue_id work = dv_queue_lookup(b, "work");
+    dv_queue_id log = dv_queue_lookup(b, "log");
+    ok(dv_queue_push(b, work, msg, sizeof(msg)) == DV_OK,
+       "a message can be pushed to the restored queue");
+    st = dv_resume(b, work);
+    ok(st == DV_DONE, "and the restored program runs to completion");
+    if (st != DV_DONE)
+      printf("      (%s: %s)\n", dv_status_name(st), dv_last_error(b));
+    {
+      dv_queue_info info;
+      memset(&info, 0, sizeof(info));
+      ok(dv_queue_state(b, log, &info) == DV_OK && info.len == 2,
+         "having pushed its second log line");
+      /* The value proves the locals survived: 'seen' was 0 at the snapshot and
+         the program incremented it after waking. */
+      {
+        uint8_t out[64];
+        size_t n = 0;
+        dv_queue_pop(b, log, out, sizeof(out), &n);      /* 'before' */
+        n = 0;
+        if (dv_queue_pop(b, log, out, sizeof(out), &n) == DV_OK && n > 8) {
+          /* msgpack str: skip the one-byte header for a short string. */
+          ok(memcmp(out + 1, "woke:hello:1", 12) == 0,
+             "and the line says the message and the local it kept");
+          if (memcmp(out + 1, "woke:hello:1", 12) != 0)
+            printf("      (got %.*s)\n", (int)n - 1, (const char *)out + 1);
+        }
+        else
+          ok(0, "and the line says the message and the local it kept");
+      }
+    }
+  }
+  dv_free(b);
+  free(buf);
+}
+
+
+static void an_unparked_instance_refuses_to_snapshot (void) {
+  dv_instance *inst = dv_new(NULL);
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  ok(dv_snapshot(inst, NULL, NULL, 0, &n) == DV_ERROR,
+     "an instance that has not run refuses to snapshot");
+  {
+    static const char *src = "return 1";
+    dv_waitset ws;
+    memset(&ws, 0, sizeof(ws));
+    dv_load(inst, (const uint8_t *)src, strlen(src), "=done");
+    dv_run(inst, &ws);
+    ok(dv_snapshot(inst, NULL, NULL, 0, &n) == DV_ERROR,
+       "and so does one that has finished");
+  }
+  dv_free(inst);
+}
+
+
+static void a_used_instance_refuses_to_restore (void) {
+  static const char *src = "local q = queue.declare('sq', {cap = 2}) "
+                           "return queue.wait({q})";
+  dv_instance *a = dv_new(NULL);
+  dv_instance *b = dv_new(NULL);
+  uint8_t buf[8192];
+  size_t n = 0;
+  if (a == NULL || b == NULL) { ok(0, "two instances"); return; }
+  if (!park_on_queue(a, src)) { dv_free(a); dv_free(b); return; }
+  if (dv_snapshot(a, NULL, buf, sizeof(buf), &n) != DV_OK) {
+    ok(0, "the snapshot is taken");
+    dv_free(a); dv_free(b);
+    return;
+  }
+  /* 'b' has a program of its own, so restoring into it would merge two handle
+     spaces and hand one program the other's queues. */
+  dv_load(b, (const uint8_t *)"return 1", 8, "=other");
+  ok(dv_restore(b, NULL, buf, n) == DV_ERROR,
+     "restoring into an instance that has already been used is refused");
+  dv_free(a);
+  dv_free(b);
+}
+
+
+static void the_host_stamp_is_enforced_through_the_abi (void) {
+  static const char *src = "local q = queue.declare('sq', {cap = 2}) "
+                           "return queue.wait({q})";
+  dv_instance *a = dv_new(NULL);
+  uint8_t buf[8192];
+  size_t n = 0;
+  if (a == NULL) { ok(0, "an instance"); return; }
+  if (!park_on_queue(a, src)) { dv_free(a); return; }
+  if (dv_snapshot(a, "host-alpha", buf, sizeof(buf), &n) != DV_OK) {
+    printf("      (%s)\n", dv_last_error(a));
+    ok(0, "a stamped snapshot is taken");
+    dv_free(a);
+    return;
+  }
+  dv_free(a);
+  {
+    dv_instance *b = dv_new(NULL);
+    dv_instance *c = dv_new(NULL);
+    dv_instance *d = dv_new(NULL);
+    if (b == NULL || c == NULL || d == NULL) { ok(0, "three instances"); return; }
+    ok(dv_restore(b, "host-alpha", buf, n) == DV_OK,
+       "a stamped snapshot restores under its own host");
+    ok(dv_restore(c, "host-beta", buf, n) == DV_SNAPSHOT_MISMATCH,
+       "and is refused under another");
+    ok(dv_restore(d, NULL, buf, n) == DV_SNAPSHOT_MISMATCH,
+       "and by a host that expects no stamp at all");
+    dv_free(b); dv_free(c); dv_free(d);
+  }
+}
+
+
+static void garbage_is_refused_not_crashed_on (void) {
+  static const char *cases[] = {
+    "", "not a snapshot", "\xc1\xc1\xc1", "\x80", "\x81\xa1k\xc0"
+  };
+  size_t i;
+  int all = 1;
+  /* 10.10's floor: any byte string at all is a refusal. The structure-aware
+     version of this is script/fuzz_snapshot.py, which mutates a real snapshot;
+     these are the shapes a fuzzer takes a long time to reach by chance. */
+  for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    dv_instance *inst = dv_new(NULL);
+    if (inst == NULL) { all = 0; break; }
+    if (dv_restore(inst, NULL, (const uint8_t *)cases[i],
+                   strlen(cases[i])) == DV_OK)
+      all = 0;
+    dv_free(inst);
+  }
+  ok(all, "garbage is refused rather than restored");
+}
+
+
+static void a_registered_prototype_shrinks_a_snapshot (void) {
+  /* The swarm case: many agents run the *same* chunk, and the host registers it
+     once. The registered prototype has to be the very one the agents run -- the
+     first version of this registered a different chunk that merely contained
+     similar code, and the two snapshots came out the same size, which is what a
+     hash reference not matching looks like. */
+  static const char *src = "local q = queue.declare('agentq', {cap = 2})\n"
+                           "local double = function(x) return x * 2 end\n"
+                           "STASH = double\n"
+                           "return queue.wait({q})\n";
+  const char *lib = src;
+  dv_instance *a = dv_new(NULL);
+  dv_instance *b = dv_new(NULL);
+  size_t plain = 0, shrunk = 0;
+  if (a == NULL || b == NULL) { ok(0, "two instances"); return; }
+  if (!park_on_queue(a, src)) { dv_free(a); dv_free(b); return; }
+  dv_snapshot(a, NULL, NULL, 0, &plain);
+  /* The same code registered up front, which is what a host does for a shared
+     library a swarm of agents draws on. */
+  ok(dv_register_code(b, (const uint8_t *)lib, strlen(lib), "=lib") == DV_OK,
+     "a host can register a shared chunk");
+  if (park_on_queue(b, src))
+    dv_snapshot(b, NULL, NULL, 0, &shrunk);
+  printf("      (unregistered %lu bytes, registered %lu bytes)\n",
+         (unsigned long)plain, (unsigned long)shrunk);
+  ok(shrunk > 0 && shrunk < plain,
+     "and a snapshot then references the prototype instead of carrying it");
+  dv_free(a);
+  dv_free(b);
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -685,6 +954,15 @@ int main (void) {
   endpoint_refusals();
   endpoint_preauthorised();
   relay_between_instances();
+
+  printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");
+  a_parked_instance_snapshots_and_wakes();
+  an_unparked_instance_refuses_to_snapshot();
+  a_used_instance_refuses_to_restore();
+  the_host_stamp_is_enforced_through_the_abi();
+  garbage_is_refused_not_crashed_on();
+  a_registered_prototype_shrinks_a_snapshot();
+
   printf("\n%d checks, %d failed\n", checks, failures);
   return failures != 0;
 }

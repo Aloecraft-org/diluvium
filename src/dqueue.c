@@ -29,6 +29,7 @@
 
 /* Registry key; its address is the key, so it cannot collide. */
 static const char DQ_STATE = 0;
+static const char DQ_BASELINE = 0;  /* queues the runtime itself declared */
 
 /* Field names on a queue table. Kept as macros so a typo is a compile error
    in exactly one place rather than a silent nil somewhere else. */
@@ -310,6 +311,58 @@ static void dq_park_mark (lua_State *L) {
 
 LUA_API void diluvium_queue_pushmark (lua_State *L) {
   dq_park_mark(L);
+}
+
+
+LUA_API void diluvium_queue_pushstate (lua_State *L) {
+  dq_state(L);
+}
+
+
+LUA_API int diluvium_queue_count (lua_State *L) {
+  int base = lua_gettop(L);
+  lua_Integer n, i;
+  int live = 0;
+  dq_state(L);
+  n = (lua_Integer)lua_rawlen(L, -1);
+  for (i = 1; i <= n; i++) {
+    if (lua_rawgeti(L, -1, i) == LUA_TTABLE)
+      live++;
+    lua_pop(L, 1);
+  }
+  lua_settop(L, base);
+  return live;
+}
+
+
+LUA_API int diluvium_queue_setstate (lua_State *L, int idx) {
+  int abs = lua_absindex(L, idx);
+  if (!lua_istable(L, abs))
+    return 0;
+  /*
+  ** Merging two numbering spaces would silently hand one program another's
+  ** queues, so this is only ever an install into a subsystem no program has
+  ** touched -- which is not the same as an empty one. 6.6's reserved 'inbox' and
+  ** 'outbox' exist from the moment the library opens, and the snapshot's own state
+  ** carries its versions of them, so replacing the pair wholesale is exactly
+  ** right.
+  */
+  {
+    lua_Integer baseline = 0;
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DQ_BASELINE) == LUA_TNUMBER)
+      baseline = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if ((lua_Integer)diluvium_queue_count(L) > baseline)
+      return 0;
+  }
+  if (lua_getfield(L, abs, "names") != LUA_TTABLE) {
+    lua_pop(L, 1);
+    return 0;                          /* not a queue state table */
+  }
+  lua_pop(L, 1);
+  lua_pushvalue(L, abs);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DQ_STATE);
+  return 1;
 }
 
 
@@ -726,9 +779,6 @@ static int dq_wait (lua_State *L) {
   lua_pushinteger(L, timeout);
   for (i = 1; i <= n; i++)
     lua_rawgeti(L, 1, i);
-  /* Named where it is installed, so a snapshot of an agent parked on 'wait' can
-     write down which continuation it is waiting in. See diluvium_shim_addcont. */
-  diluvium_shim_addcont("dqueue.wait", dq_wait_k);
   return lua_yieldk(L, 3 + n, 0, dq_wait_k);
 }
 
@@ -1136,5 +1186,19 @@ LUAMOD_API int luaopen_dqueue (lua_State *L) {
       lua_pop(L, 1);  /* the handle: a program looks it up by name */
     }
   }
+  /*
+  ** Remember how many queues the runtime itself created, so 'setstate' can tell
+  ** a fresh instance from a used one. Counting zero would be wrong: every
+  ** instance starts with these two, so "refuse when any queue exists" refused
+  ** every restore -- which is how this was found.
+  */
+  lua_pushinteger(L, diluvium_queue_count(L));
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DQ_BASELINE);
+  /*
+  ** Name 'wait''s continuation now, not when a program parks on it. A process
+  ** that only ever *loads* a snapshot never reaches the park, and the restore
+  ** would then refuse a name it could perfectly well have known.
+  */
+  diluvium_shim_addcont("dqueue.wait", dq_wait_k);
   return 1;
 }

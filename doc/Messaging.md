@@ -123,7 +123,7 @@ said would happen:
 | msgpack codec | under 25 KB | 16.0 KB, snapshot mode included |
 | queue subsystem | under **20 KB** | 17.6 KB — `dqueue.c` 15.0 + `dendpoint.c` 2.6 |
 | instance C ABI | under 10 KB | 6.1 KB |
-| hibernate | under 30 KB | 20.1 KB so far — `dshim.c`, `dhash.c`, `dsnap.c` |
+| hibernate | under 30 KB | 22.7 KB — `dshim.c`, `dhash.c`, `dsnap.c` |
 | swarm layer | separate library, not counted | not built |
 
 The queue target moved from 15 KB, and the reason is worth recording rather than
@@ -1070,6 +1070,21 @@ does apply — but this is the one place in a restore whose result depends on
 collector behaviour rather than on the format, and it is worth knowing before
 something is built on top of it.
 
+**Userdata is refused, and why ext 0x05 is not implemented.** The natural design
+is the one Pluto and eris use: `__persist` returns a reconstructor closure, which
+this format already knows how to carry — its prototype is content-addressed, its
+upvalues become fixups, and whatever it closed over travels as graph values. It
+founders on ordering. The userdata needs its position *before* the reconstructor is
+written, so a reference to it from the reconstructor's own upvalues resolves; but on
+the way back the reconstructor cannot be *called* until the whole graph exists, and
+by then any table that referenced the userdata has already been handed whatever
+placeholder stood at that position. The program would find a placeholder where its
+file handle should be, and find it silently.
+
+Fixing that needs either a patch-up pass over every reference to the userdata or an
+ext that can carry a nested graph value. Until then a userdata is refused with a
+message naming `__persist`, which is what 10.7 item 2 asks for.
+
 **Shape wrappers are refused.** `msgpack.as_array(t)`, `as_map` and `ext` are
 encoding directives, not program state, and their hidden metatable is shared
 runtime furniture that must not enter a snapshot's object graph. Silently
@@ -1442,9 +1457,30 @@ dv_status    dv_resume(dv_instance* inst, dv_queue_id fired);
 dv_status    dv_waitset_get(dv_instance* inst, dv_waitset* out);
 
 /* snapshots */
-dv_status    dv_snapshot(dv_instance* inst, uint8_t** out, size_t* out_len);
-dv_status    dv_restore(dv_instance* inst, const uint8_t* snap, size_t len);
+dv_status    dv_snapshot(dv_instance* inst, const char* host,
+                         uint8_t* out, size_t cap, size_t* len);
+dv_status    dv_restore(dv_instance* inst, const char* host,
+                         const uint8_t* snap, size_t len);
+dv_status    dv_register_code(dv_instance* inst, const uint8_t* code,
+                         size_t len, const char* name);
+```
 
+`dv_snapshot` writes into a caller-supplied buffer rather than returning an
+allocation, so it matches every other call on this surface and a wasm host needs no
+free. Pass `out == NULL` for a size enquiry. The `host` argument is 10.10's identity
+stamp, and it appears on both calls because the check is symmetric: an unstamped
+snapshot restores anywhere, a stamped one only under the same string, and a host
+that supplies one refuses a snapshot without it.
+
+`dv_restore` needs a *fresh* instance and says so; afterwards the instance is parked
+exactly as the snapshot's was, so the next call is `dv_waitset_get` and then
+`dv_resume` — not `dv_run`, because the program is continuing rather than starting.
+
+`dv_register_code` is 10.5 from a host's side: register the chunk a swarm shares and
+every agent's snapshot carries a hash in place of its code. A host that registers
+nothing gets self-contained snapshots, which is the right default.
+
+```c
 /* notification */
 void         dv_set_notify(dv_instance* inst,
                            void (*cb)(void* ud, dv_queue_id id), void* ud);
@@ -1795,8 +1831,8 @@ lazily. Registered references are consulted first, so the two compose.
 Not done: `"gone"` for a non-resident instance with `wake_on_message`, which is
 9.5 and belongs to the swarm layer.
 
-**M6: hibernate** — everything but userdata `__persist`, the structure-aware
-fuzzer, and `dv_snapshot`/`dv_restore`.
+**M6: hibernate** — done, except userdata `__persist`, which is refused by name
+and whose absence is explained in 10.3.
 Accessor shim, precondition checks, value graph with backreferences, closures and
 upvalue identity, permanents table, content-addressed Protos through the real dump
 path, snapshot header, validation pass and structure-aware fuzzer, host-identity
@@ -1805,7 +1841,7 @@ Accept when: an agent parked on `queue.wait` round-trips and resumes; shared
 upvalues remain shared; a mismatched runtime identity refuses cleanly; a hibernate
 attempted below a continuation-less C frame refuses with a named error; a snapshot
 taken with a live `defer` in scope round-trips; a foreign host stamp is refused;
-the fuzzer reports no crashes.
+the fuzzer reports no crashes. **All met.**
 
 *Done so far.* `src/dshim.c` and `src/dshim.h` — 1.5 KB of the size budget, and
 the only file in the tree that reads Lua's internal headers, which is the whole
@@ -1961,9 +1997,49 @@ suite: `LUAI_MAXSTACK` is defined in `ldo.c` rather than any header (the debug
 build sees it only because `ltests.h` redefines it), and `luaC_objbarrier` needed
 `lgc.h`. The platform build belongs in the sweep for that reason.
 
-Not done: userdata `__persist` (ext 0x05), the structure-aware fuzzer, and
-`dv_snapshot`/`dv_restore`. The header's capability field is still compared against
-an empty set until M7.
+*Then the ABI and the fuzzer.* `dv_snapshot`, `dv_restore` and
+`dv_register_code`; `test/dv_check.c` is 128 checks and `script/fuzz_snapshot.py`
+runs 430 mutants with no crashes. 22.7 KB of the 30 KB budget.
+
+A whole-instance snapshot carries the parked thread *and the queue subsystem's
+state*, which turned out to simplify 10.8 rather than implement it: the state is a
+plain table of numbers, strings and tables, so restoring it verbatim brings the
+queues, their contents and the program's own handles back unchanged. Handles do not
+go stale after all. 10.8's re-declare-by-name step is still needed for the case it
+was written for — moving one program's state into an instance that already has
+queues — and `diluvium_queue_setstate` refuses that rather than merging two
+numbering spaces.
+
+Three bugs of one kind, and the kind is the lesson: **naming must not depend on
+history.** The permanents fingerprint travels in the header, so a set that grew
+lazily made a snapshot from a started instance unreadable by a fresh one. The
+driver's continuation, registered where it was installed, was missing in a process
+that had only ever *loaded* a snapshot. Both were registered eagerly instead. Two
+instances in one process hid the second one completely, because the continuation
+table is process-wide; the fuzzer, which loads in a separate process, found it on
+its first run.
+
+Encoding was also *registering* the prototypes it inlined, so a second snapshot of
+the same program referenced them, silently stopped being self-contained, and could
+not be restored anywhere else. Found because a size enquiry disagreed with the
+snapshot that followed it. Prototype dedup is now per stream, on both sides.
+
+The fuzzer's 13 crashes split into two kinds, which is why 10.10 now has two
+layers. Three were real validation gaps — `nyield` unchecked, and a frame's `is_c`
+and `nresults` allowed to disagree with the `callstatus` the restore actually
+writes, so a C frame could claim to be Lua and have the VM read `u.l.savedpc` out
+of the wrong union member. The rest are not checkable at all: whether a pc is the
+*right* offset inside its own prototype is not a question any local check can
+answer. So the header now carries a SHA-256 of the payload. Measured: 4 crashes
+with neither layer, 3 with the field checks, 0 with both. The digest is integrity
+and not authentication — it catches corruption, and the field checks are what
+stands between a deliberately rewritten snapshot and the interpreter.
+
+Not done: userdata `__persist` (ext 0x05). Refused by name, with a message saying
+so, which is what 10.7 item 2 specifies — and 10.3 records why the obvious design
+does not work, because that is worth more than a half-implementation that breaks
+when a userdata is referenced twice. The header's capability field is still
+compared against an empty set until M7.
 
 **M7: swarm layer**
 Instance table, `system/lifecycle` and `system/events`, attenuation, budgets,
@@ -2059,8 +2135,12 @@ Lean. Cover semantics and boundaries, not permutations.
   thing that depends on `u2.nyield` being carried.
 - **Dump determinism.** Identical source produces byte-identical stripped dumps
   across processes. Precondition for 10.5.
-- **Snapshot validation.** Structure-aware mutation of a snapshot; assert refusal,
-  never a crash. Plus a foreign host stamp refused.
+- **Snapshot validation** (`script/fuzz_snapshot.py`, `make snap_fuzz`).
+  Structure-aware mutation of a snapshot; assert refusal, never a crash. Plus a
+  foreign host stamp refused. 430 mutants, 0 crashes. It runs the restore as a
+  *subprocess*, which is not incidental twice over: a crash cannot be asserted from
+  inside the process it happens in, and loading in a fresh process is what caught a
+  continuation name that a same-process test could never have missed.
 - **Attenuation.** A supervisor attempting to over-grant is refused.
 - **Cross-host portability.** Identical bytecode under two hosts, identical output.
 
@@ -2204,6 +2284,22 @@ artifact between sessions that do not share context.
   not a header, and the debug build compiles anyway because `ltests.h` redefines
   it; `luaC_objbarrier` needed `lgc.h`. Both failed only in `make build_platform`,
   which is now part of the sweep.
+- **Naming must not depend on history.** Three bugs of one shape: the permanents
+  set, the driver's continuation, and the prototype registry all grew as a side
+  effect of what an instance happened to have done. The permanents *fingerprint*
+  travels in the header, so a set that grew lazily refused a snapshot from a
+  started instance; a continuation registered where it is installed is missing in a
+  process that only loads; and a prototype registered by the act of inlining it
+  made the next snapshot reference code no other runtime had. All three are now
+  eager or per-stream.
+- **§10.8's handle re-resolution is unnecessary for a whole-instance snapshot.**
+  The queue subsystem's state is a plain table, so restoring it verbatim brings
+  handles back unchanged rather than stale. The step is still needed for the case
+  10.8 was written for, and merging two numbering spaces is refused.
+- **§10.10 needs two layers, not one.** Field validation cannot answer whether a
+  frame's pc is the *right* in-range offset, so the header carries a digest of the
+  payload. Measured against the fuzzer: 4 crashes with neither, 3 with field checks
+  alone, 0 with both. The digest is integrity, not authentication.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

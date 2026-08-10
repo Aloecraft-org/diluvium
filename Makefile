@@ -302,6 +302,15 @@ dsnap_check: _build_step0
 	  $(CURDIR)/test/dsnap_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dsnap_check
 
+# The snapshot fuzzer's target: a snapshot in, a verdict out, as a subprocess --
+# because the thing being checked is that a malformed snapshot does not crash,
+# and a crash cannot be asserted from inside the process it happens in.
+snap_fuzz: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/snap_harness \
+	  $(CURDIR)/test/snap_harness.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/script/fuzz_snapshot.py --bin $(CURDIR)/dist/snap_harness
+
 dshim_check: _build_step0
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
 	  -o $(CURDIR)/dist/dshim_check \

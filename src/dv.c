@@ -25,6 +25,8 @@
 #include "dlibs.h"
 #include "dendpoint.h"
 #include "dqueue.h"
+#include "dshim.h"
+#include "dsnap.h"
 #include "dtask.h"
 #include "dv.h"
 
@@ -139,6 +141,20 @@ dv_instance *dv_new (const dv_config *cfg) {
   }
   luaL_openlibs(inst->L);
   diluvium_openlibs(inst->L);   /* msgpack and queue, including inbox/outbox */
+  /*
+  ** Name this library's own C function, per 10.4: the message handler sits in the
+  ** driver's frame on every instance's thread, so without a name no parked
+  ** instance could be snapshotted at all.
+  **
+  ** Registered here, at creation, and not lazily when the thread is built --
+  ** because the permanents *fingerprint* travels in the snapshot header and 10.4
+  ** requires the set to be identical on save and restore. Registering it on first
+  ** use made the set depend on whether an instance had run yet, so a snapshot from
+  ** a started instance was refused by a fresh one with "the permanents set
+  ** differs". Found exactly that way.
+  */
+  lua_pushcfunction(inst->L, dv_msghandler);
+  diluvium_snap_addpermanent(inst->L, "dv.msghandler");
   return inst;
 }
 
@@ -503,4 +519,157 @@ dv_status dv_resume (dv_instance *inst, dv_queue_id fired) {
   diluvium_queue_fire(inst->co, (lua_Integer)fired, why);
   status = lua_resume(inst->co, inst->L, 2, &nres);
   return settle(inst, status, nres, NULL);
+}
+
+
+/* ======================================================================
+** Hibernate and wake (10.1, 10.6, 10.10)
+** ====================================================================== */
+
+/*
+** A snapshot is taken of a *parked* instance, and that is not a limitation of
+** this implementation -- it is 10.2. A program that is running has state on the
+** machine's C stack, and nothing can write that down. A parked one has all of it
+** in the thread.
+**
+** Everything below goes through a protected call, because the snapshot layer
+** raises: it is written for a caller that can let an error escape, and the ABI is
+** the one caller that cannot.
+*/
+
+static int dv_save_body (lua_State *L) {
+  diluvium_snap_opts opts;
+  const char *host = (const char *)lua_touserdata(L, 2);
+  memset(&opts, 0, sizeof(opts));
+  opts.host = host;
+  diluvium_snap_save(L, 1, &opts);
+  return 1;
+}
+
+
+dv_status dv_snapshot (dv_instance *inst, const char *host,
+                       uint8_t *out, size_t cap, size_t *len) {
+  lua_State *L;
+  int base;
+  size_t n;
+  const char *bytes;
+  if (len != NULL) *len = 0;
+  if (inst == NULL)
+    return DV_ERROR;
+  L = inst->L;
+  if (!inst->started || inst->finished) {
+    set_error(inst, "dv_snapshot: nothing is parked; a snapshot is taken of a "
+                    "program waiting on a queue, not of one that has not run or "
+                    "has finished");
+    return DV_ERROR;
+  }
+  if (!inst->parked) {
+    set_error(inst, "dv_snapshot: the program is running; only a parked program "
+                    "has all of its state written down");
+    return DV_ERROR;
+  }
+  base = lua_gettop(L);
+  lua_pushcfunction(L, dv_save_body);
+  lua_rawgeti(L, LUA_REGISTRYINDEX, inst->co_ref);
+  lua_pushlightuserdata(L, (void *)host);
+  if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+    const char *msg = lua_tostring(L, -1);
+    set_error(inst, (msg != NULL) ? msg : "dv_snapshot: refused");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  bytes = lua_tolstring(L, -1, &n);
+  if (len != NULL) *len = n;
+  if (out == NULL) {
+    lua_settop(L, base);
+    return DV_OK;                       /* size enquiry */
+  }
+  if (n > cap) {
+    lua_settop(L, base);
+    return DV_BUFFER_TOO_SMALL;
+  }
+  memcpy(out, bytes, n);
+  lua_settop(L, base);
+  return DV_OK;
+}
+
+
+dv_status dv_restore (dv_instance *inst, const char *host,
+                      const uint8_t *s, size_t len) {
+  lua_State *L;
+  diluvium_snap_opts opts;
+  const char *msg = NULL;
+  int base, rc, nres;
+  if (inst == NULL || s == NULL)
+    return DV_ERROR;
+  L = inst->L;
+  if (inst->started || inst->chunk_ref != LUA_NOREF) {
+    set_error(inst, "dv_restore: this instance has already been used; restore "
+                    "into a fresh one");
+    return DV_ERROR;
+  }
+  memset(&opts, 0, sizeof(opts));
+  opts.host = host;
+  base = lua_gettop(L);
+  rc = diluvium_snap_load(L, &opts, (const char *)s, len, &msg);
+  if (rc != DILUVIUM_SNAP_ACCEPT) {
+    set_error(inst, (msg != NULL) ? msg : "dv_restore: refused");
+    lua_settop(L, base);
+    return (rc == DILUVIUM_SNAP_BAD_PAYLOAD) ? DV_ERROR : DV_SNAPSHOT_MISMATCH;
+  }
+  /* The restored thread becomes this instance's, and the instance takes on the
+     state the snapshot's was in: started, parked, with a wait-set to report. */
+  inst->co = lua_tothread(L, -1);
+  if (inst->co == NULL) {
+    set_error(inst, "dv_restore: the snapshot layer accepted the bytes but "
+                    "produced no thread");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  inst->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  inst->started = 1;
+  inst->finished = 0;
+  inst->parked = 1;
+  nres = diluvium_shim_nyield(inst->co);
+  inst->pending = nres;
+  memset(&inst->ws, 0, sizeof(inst->ws));
+  if (!diluvium_queue_waitset(inst->co, nres, &inst->ws)) {
+    /*
+    ** Parked on something other than a queue -- a bare 'coroutine.yield', say.
+    ** Restoring it is fine and resuming it is the host's business, but there is
+    ** no wait-set to report, so say so rather than hand back a zeroed one that
+    ** looks like a wait on nothing.
+    */
+    inst->ws.n = 0;
+    inst->ws.timeout_ms = -1;
+  }
+  lua_settop(L, base);
+  return DV_OK;
+}
+
+
+dv_status dv_register_code (dv_instance *inst, const uint8_t *code, size_t len,
+                           const char *name) {
+  lua_State *L;
+  int base;
+  if (inst == NULL || code == NULL)
+    return DV_ERROR;
+  L = inst->L;
+  base = lua_gettop(L);
+  if (luaL_loadbufferx(L, (const char *)code, len,
+                       (name != NULL) ? name : "=registered",
+                       (inst->flags & DV_FLAG_TEXT_ONLY) ? "t" : NULL)
+      != LUA_OK) {
+    const char *msg = lua_tostring(L, -1);
+    set_error(inst, (msg != NULL) ? msg : "dv_register_code: would not load");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  if (!diluvium_snap_register(L, -1)) {
+    set_error(inst, "dv_register_code: the chunk is not a Lua function");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  lua_settop(L, base);
+  return DV_OK;
 }

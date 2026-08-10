@@ -11,6 +11,7 @@
 
 #include "lauxlib.h"
 #include "dlibs.h"
+#include "dtask.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
 #include "dendpoint.h"
@@ -25,6 +26,9 @@ static const luaL_Reg diluvium_libs[] = {
 
 
 LUA_API void diluvium_openlibs (lua_State *L) {
+  /* Name the driver's continuation. Not a library, so it has no open function of
+     its own to do it, and it has to happen before any snapshot is loaded. */
+  diluvium_task_registerconts();
   const luaL_Reg *lib;
   for (lib = diluvium_libs; lib->name != NULL; lib++) {
     luaL_requiref(L, lib->name, lib->func, 1);  /* set a global too */

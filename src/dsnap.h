@@ -82,6 +82,12 @@ LUA_API size_t diluvium_snap_header (lua_State *L,
                                      const diluvium_snap_opts *opts,
                                      char *out, size_t cap);
 
+/* The same, for a header that is to cover a payload: its digest goes in. */
+LUA_API size_t diluvium_snap_headerfor (lua_State *L,
+                                        const diluvium_snap_opts *opts,
+                                        const char *payload, size_t plen,
+                                        char *out, size_t cap);
+
 
 /*
 ** Check a header against this runtime.
@@ -102,11 +108,34 @@ LUA_API size_t diluvium_snap_header (lua_State *L,
 #define DILUVIUM_SNAP_PERMANENTS_MISMATCH 4
 #define DILUVIUM_SNAP_CAPABILITY_MISMATCH 5
 #define DILUVIUM_SNAP_HOST_MISMATCH	6
+#define DILUVIUM_SNAP_BAD_PAYLOAD	7  /* the header was fine; the rest is not */
+#define DILUVIUM_SNAP_CORRUPT		8  /* the payload is not the bytes that were written */
 
 LUA_API int diluvium_snap_checkheader (lua_State *L,
                                        const diluvium_snap_opts *opts,
                                        const char *s, size_t len,
                                        size_t *used);
+
+/*
+** On the payload digest, and what it is and is not for.
+**
+** The header carries a SHA-256 of the payload, and a mismatch is
+** DILUVIUM_SNAP_CORRUPT. This is *integrity*, not authentication: there is no
+** key, so an attacker who edits a snapshot can recompute the digest. It exists
+** because 10.10's real-world case is corruption -- a truncated file, a bad disk,
+** a buggy transport -- and because the frame metadata contains fields no
+** validator can check semantically. A frame's pc is checked to be inside its
+** prototype's code, and that is all any local check can say; whether it is the
+** *right* offset inside that code is not a question the format can answer, and
+** resuming at the wrong one executes real instructions against a stack that does
+** not match them.
+**
+** So the two layers do different jobs and both are needed. The digest turns every
+** accidental corruption into a clean refusal. The field checks in
+** 'diluvium_shim_checkframes' are what stands between a *deliberately* rewritten
+** snapshot, digest and all, and the interpreter's internals. The fuzzer measures
+** the first and the field checks are what its findings were fixed with.
+*/
 
 /* A sentence naming a refusal, for the diagnostic a person actually reads. */
 LUA_API const char *diluvium_snap_why (int code);
@@ -155,7 +184,54 @@ LUA_API int diluvium_snap_registered (lua_State *L);
 ** Handed to 'diluvium_msgpack_encode_graph' and '..._decode_graph'. Valid for as
 ** long as 'L' is; the state it needs lives in the registry, not in the struct.
 */
+/*
+** Name a C function of your own as a permanent.
+**
+** What 10.4's refusal message tells a host to do. A host that registers C
+** functions the guest can reach -- a hostcall, a message handler -- has to name
+** them, because a C function's code is in the host binary and there is nothing to
+** serialize. Called after 'diluvium_snap_permanents' has built the standard set;
+** the value is taken from the top of the stack and popped.
+**
+** Returns 1, or 0 if the value is not nameable or the name is taken.
+*/
+LUA_API int diluvium_snap_addpermanent (lua_State *L, const char *name);
+
+
 LUA_API const diluvium_snap_hooks *diluvium_snap_hooks_for (lua_State *L);
+
+
+/*
+** Save and restore a whole instance.
+**
+** 'save' takes the suspended thread at 'thidx' and writes header plus graph. What
+** travels with the thread is the queue subsystem's state -- see
+** 'diluvium_queue_pushstate' -- so a restored program finds its queues, their
+** contents and its own handles exactly as it left them.
+**
+** Leaves one string on the stack. Raises on failure, because everything it can
+** fail on is a property of the *current* state rather than of untrusted input:
+** a thread that cannot be captured, a value that cannot be encoded. The
+** asymmetry with 'load' below is deliberate.
+*/
+LUA_API void diluvium_snap_save (lua_State *L, int thidx,
+                                 const diluvium_snap_opts *opts);
+
+/*
+** The other direction. Pushes the restored thread and installs the queue state.
+**
+** Returns DILUVIUM_SNAP_ACCEPT and pushes the thread, or a refusal code having
+** pushed nothing -- and on a code of DILUVIUM_SNAP_BAD_HEADER, 'diluvium_snap_why'
+** is only half the answer, so a message is pushed *as a string* instead when
+** 'out_msg' is not NULL. 10.10 calls this untrusted input: it must not raise, and
+** it must not crash on any byte string whatsoever.
+**
+** Refuses when the target already has queues, since two numbering spaces cannot
+** be merged without silently handing one program another's queues.
+*/
+LUA_API int diluvium_snap_load (lua_State *L, const diluvium_snap_opts *opts,
+                                const char *s, size_t len,
+                                const char **out_msg);
 
 
 /*

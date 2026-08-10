@@ -430,6 +430,18 @@ LUA_API int diluvium_shim_checkframes (lua_State *co,
       return DILUVIUM_RES_NRESULTS;
     if (f->callstatus & ~cast(unsigned long, DSHIM_KNOWN_FLAGS))
       return DILUVIUM_RES_CALLSTATUS;
+    /*
+    ** 'is_c' and 'nresults' are *also* encoded in 'callstatus', and the restore
+    ** writes 'callstatus' -- so a record whose separate fields disagree with it
+    ** would be validated against one value and executed against the other. Set a
+    ** C frame's callstatus to 0 and the VM reads 'u.l.savedpc' out of a C frame's
+    ** union. The snapshot fuzzer found exactly that, thirteen times over; checking
+    ** that the two agree is what closes it.
+    */
+    if (f->is_c != ((f->callstatus & cast(unsigned long, CIST_C)) ? 1 : 0))
+      return DILUVIUM_RES_CALLSTATUS;
+    if (f->nresults != get_nresults(cast(l_uint32, f->callstatus)))
+      return DILUVIUM_RES_NRESULTS;
     {
       const TValue *fn = s2v(co->stack.p + (f->func_index - 1));
       if (!ttisfunction(fn))
@@ -493,6 +505,14 @@ LUA_API int diluvium_shim_restore (lua_State *co,
                                    lua_KFunction *ks, int nyield) {
   int i;
   if (frames == NULL || n < 1)
+    return 0;
+  /*
+  ** 'nyield' is reported by 'lua_resume' as the number of results a yield
+  ** produced, and a host moves that many values off the thread. A record claiming
+  ** more than the stack holds therefore reaches past it. Checked here rather than
+  ** in 'checkframes' because it is a property of the thread, not of a frame.
+  */
+  if (nyield < 0 || nyield > diluvium_shim_stacksize(co))
     return 0;
   co->ci = &co->base_ci;
   co->base_ci.func.p = co->stack.p;
