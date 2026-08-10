@@ -1,0 +1,7 @@
+src/diluvium/_dv.c
+src/diluvium/_dv.o
+src/diluvium/*.so
+build/
+dist/
+*.egg-info/
+__pycache__/

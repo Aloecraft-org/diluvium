@@ -238,6 +238,45 @@ dv_status dv_resume (dv_instance *inst, dv_queue_id fired);
 dv_status dv_waitset_get (dv_instance *inst, dv_waitset *out);
 
 
+/* ---------------------------------------------------------------- layout -- */
+
+/*
+** Report the size and field offsets of the structs above.
+**
+** This exists for wasm. A binding that reaches the ABI through WebAssembly has
+** no 'offsetof': it reads fields out of linear memory at offsets it worked out
+** somehow, and wasm32 is ILP32 -- so every struct holding a pointer or a
+** 'size_t' is laid out differently there than on the LP64 host where a
+** developer would have measured it. Hardcoding those numbers is a bug that
+** cannot be caught by testing on the machine that wrote them.
+**
+** 'out' is filled with DV_LAYOUT_COUNT values, in the order of the DV_LAYOUT_*
+** indices. 'n' is how many the caller has room for; fewer than
+** DV_LAYOUT_COUNT is not an error, so a newer runtime can add entries without
+** breaking an older binding.
+**
+** Returns the number of values written.
+*/
+#define DV_LAYOUT_CONFIG_SIZE		0
+#define DV_LAYOUT_CONFIG_ABI		1
+#define DV_LAYOUT_CONFIG_FLAGS		2
+#define DV_LAYOUT_QUEUE_INFO_SIZE	3
+#define DV_LAYOUT_QUEUE_INFO_CAPACITY	4
+#define DV_LAYOUT_QUEUE_INFO_LEN	5
+#define DV_LAYOUT_QUEUE_INFO_ENABLED	6
+#define DV_LAYOUT_QUEUE_INFO_EXPORTED	7
+#define DV_LAYOUT_QUEUE_INFO_DIRECTION	8
+#define DV_LAYOUT_QUEUE_INFO_ON_FULL	9
+#define DV_LAYOUT_WAITSET_SIZE		10
+#define DV_LAYOUT_WAITSET_N		11
+#define DV_LAYOUT_WAITSET_IDS		12
+#define DV_LAYOUT_WAITSET_TIMEOUT	13
+#define DV_LAYOUT_WAITSET_FOR_WRITE	14
+#define DV_LAYOUT_COUNT			15
+
+uint32_t dv_layout (uint32_t *out, size_t n);
+
+
 /* ---------------------------------------------------------- notification -- */
 
 /*

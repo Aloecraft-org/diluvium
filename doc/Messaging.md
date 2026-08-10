@@ -1470,6 +1470,25 @@ Accept when: a supervisor spawns and restarts children; a child cannot be grante
 capability the supervisor lacks; a message to a swapped-out instance wakes it and
 arrives in order ahead of live pushes.
 
+**M4b: Python and JavaScript bindings** — Python done, JS partly.
+`bindings/python` (cffi in API mode, 17 tests) and `bindings/js` (a bundled
+msgpack codec, 15 tests). `bindings/README.md` records the five wrapper decisions
+every binding must copy rather than rediscover, since each was found the hard way
+in the first one.
+
+`dv_layout` is new and exists for wasm: a binding reaching the ABI through
+WebAssembly has no `offsetof`, and wasm32 is ILP32 — so every struct holding a
+pointer or a `size_t` is laid out differently there than on the LP64 machine a
+developer would measure it on. That is a bug no local test can catch, so the
+runtime reports its own layout instead.
+
+The JS codec is checked against vectors generated **by** `src/dmsgpack.c`, so
+cross-implementation agreement on the wire format is a measured fact rather than
+two readings of the same spec. The JS *wasm wrapper* is unverified: building
+`diluvium.wasm` needs the wasi-sdk in a container, which was unavailable, so CI's
+`js-binding` job is the first place it runs. Stated in `bindings/README.md`
+rather than implied.
+
 **M8: packaging**
 Rust and JS first, then Python wheels and the header archive.
 Accept when: the portability demo runs in both environments from published

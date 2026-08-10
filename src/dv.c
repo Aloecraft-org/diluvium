@@ -286,6 +286,40 @@ void dv_set_notify (dv_instance *inst,
 }
 
 
+/* ---------------------------------------------------------------- layout -- */
+
+uint32_t dv_layout (uint32_t *out, size_t n) {
+  /* Written with 'offsetof' rather than by hand, so this is measured by the
+     compiler that built the runtime the binding is actually talking to. That is
+     the whole point: on wasm32 these differ from the LP64 numbers a developer
+     would get from running a test locally. */
+  static const uint32_t table[DV_LAYOUT_COUNT] = {
+    (uint32_t)sizeof(dv_config),
+    (uint32_t)offsetof(dv_config, abi_version),
+    (uint32_t)offsetof(dv_config, flags),
+    (uint32_t)sizeof(dv_queue_info),
+    (uint32_t)offsetof(dv_queue_info, capacity),
+    (uint32_t)offsetof(dv_queue_info, len),
+    (uint32_t)offsetof(dv_queue_info, enabled),
+    (uint32_t)offsetof(dv_queue_info, exported),
+    (uint32_t)offsetof(dv_queue_info, direction),
+    (uint32_t)offsetof(dv_queue_info, on_full),
+    (uint32_t)sizeof(dv_waitset),
+    (uint32_t)offsetof(dv_waitset, n),
+    (uint32_t)offsetof(dv_waitset, ids),
+    (uint32_t)offsetof(dv_waitset, timeout_ms),
+    (uint32_t)offsetof(dv_waitset, for_write)
+  };
+  size_t i;
+  size_t want = (n < DV_LAYOUT_COUNT) ? n : DV_LAYOUT_COUNT;
+  if (out == NULL)
+    return DV_LAYOUT_COUNT;
+  for (i = 0; i < want; i++)
+    out[i] = table[i];
+  return (uint32_t)want;
+}
+
+
 /* ------------------------------------------------------------ scheduling -- */
 
 static void export_waitset (const diluvium_waitset *ws, dv_waitset *out);

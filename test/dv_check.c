@@ -393,8 +393,27 @@ static void top_level_yield (void) {
 }
 
 
+static void layout (void) {
+  /* The numbers a wasm binding depends on, checked here so a native build
+     notices if a struct changes shape. It cannot catch a wasm32-versus-LP64
+     difference -- nothing running on this machine can -- which is exactly why
+     the binding asks the runtime rather than hardcoding them. */
+  uint32_t v[DV_LAYOUT_COUNT];
+  eq_i(dv_layout(NULL, 0), DV_LAYOUT_COUNT, "dv_layout reports how many it has");
+  eq_i(dv_layout(v, DV_LAYOUT_COUNT), DV_LAYOUT_COUNT, "and fills them all in");
+  eq_i(v[DV_LAYOUT_WAITSET_N], 0, "the wait-set count is first");
+  ok(v[DV_LAYOUT_WAITSET_IDS] == 4, "the handles follow it");
+  ok(v[DV_LAYOUT_WAITSET_TIMEOUT] > v[DV_LAYOUT_WAITSET_IDS],
+     "the timeout comes after the handles");
+  ok(v[DV_LAYOUT_WAITSET_SIZE] >= v[DV_LAYOUT_WAITSET_FOR_WRITE] + 1,
+     "and every field is inside the struct");
+  eq_i(dv_layout(v, 2), 2, "a short buffer is filled as far as it goes");
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
+  layout();
   version();
   run_to_completion();
   errors();

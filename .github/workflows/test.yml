@@ -156,6 +156,55 @@ jobs:
         working-directory: bindings/rust
         run: cargo run --quiet --example echo
 
+  python-binding:
+    name: Python binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Install
+        run: pip install cffi msgpack pytest
+
+      # API mode: the extension compiles src/ here, so a mismatch between the
+      # cdef and the real header fails the build rather than the first call.
+      - name: Build the extension
+        working-directory: bindings/python
+        run: python3 build_ffi.py
+
+      - name: Test
+        working-directory: bindings/python
+        run: PYTHONPATH=src python3 -m pytest tests -q
+
+  js-binding:
+    name: JavaScript binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # The codec is testable on its own, and it is checked against vectors
+      # produced by src/dmsgpack.c rather than against the spec -- so this asserts
+      # cross-implementation agreement on the wire format.
+      - name: Test the codec
+        working-directory: bindings/js
+        run: npm test
+
+      # The wasm wrapper needs a real module, which needs the wasi-sdk. This is
+      # the only place it gets exercised; see bindings/README.md.
+      - name: Build the wasm runtime
+        run: make build_wasm
+
+      - name: Integration test against the real wasm
+        working-directory: bindings/js
+        run: node test/instance.integration.mjs ../../dist/diluvium_wasi.wasm
+
   patch-guard:
     name: Core patch guard
     needs: resolve
