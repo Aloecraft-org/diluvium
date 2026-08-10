@@ -395,6 +395,34 @@ test_libs:
 	  && echo "test C libraries built" \
 	  || echo "test C libraries did not build; attrib will skip"
 
+# libdiluvium-swarm, as an actual library.
+#
+# 4.1, 11.5 and 12.1 all call the swarm layer a separate library and 12.1 lists
+# 'diluvium-swarm-<version>-<triple>.{a,so,dylib,dll,wasm}' among the release
+# artifacts -- and nothing built one. dvs.c was only ever compiled as part of a test
+# binary, so the milestone's central structural claim had never been produced in the
+# form it claims. This is the archive; per-triple shared libraries belong to
+# build.yml and M8's packaging.
+#
+# The symbol check is the point as much as the archive is. Compiling without lua.h
+# shows the layer boundary holds for the *preprocessor*; checking that the object
+# references no 'lua' symbol shows it holds for the *linker*, which is the claim
+# actually being made -- that a host can link this against the instance ABI alone.
+# nm prefixes symbols with an underscore on Darwin, hence the optional one.
+build_swarm_lib: _build_step0
+	gcc -O2 -fPIC -c -I$(CURDIR)/.data -o $(CURDIR)/dist/dvs.o $(CURDIR)/.data/dvs.c
+	ar rcs $(CURDIR)/dist/libdiluvium-swarm.a $(CURDIR)/dist/dvs.o
+	@leaked=$$(nm -u $(CURDIR)/dist/dvs.o | awk '{print $$NF}' \
+	    | grep -E '^_?lua' || true); \
+	  if [ -n "$$leaked" ]; then \
+	    echo "the swarm layer references core Lua symbols, so 4.1's boundary is"; \
+	    echo "broken -- it must reach the runtime only through dv_* and the codec:"; \
+	    echo "$$leaked"; \
+	    exit 1; \
+	  fi
+	@echo "libdiluvium-swarm.a built; undefined symbols are dv_*, the msgpack"
+	@echo "cursor and libc only, so the layer boundary holds at link time"
+
 mp_cursor_fuzz: _build_step0
 	gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
 	  -I$(CURDIR)/.data -o $(CURDIR)/dist/mp_cursor_fuzz \
@@ -430,7 +458,7 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
-        snap_fuzz sanitize_checks mp_cursor_fuzz test_libs
+        snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua

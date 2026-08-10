@@ -176,6 +176,15 @@ jobs:
       - name: Fuzz the msgpack token cursor
         run: make mp_cursor_fuzz
 
+      # The swarm layer as an actual library, which nothing built until now: 4.1,
+      # 11.5 and 12.1 all call it a separate library and 12.1 lists a
+      # diluvium-swarm archive among the release artifacts, but dvs.c was only ever
+      # compiled into a test binary. The step also checks the layer boundary at the
+      # *linker* -- no 'lua' symbol may appear in dvs.o -- which is the claim being
+      # made, and a stronger one than compiling without lua.h.
+      - name: Build libdiluvium-swarm and check its symbol boundary
+        run: make build_swarm_lib
+
       # The release build catches what the amalgamation hides: a file that uses a
       # core macro without including its header compiles in onelua.c and fails
       # here. Two such bugs reached the tree before this was in the sweep.
