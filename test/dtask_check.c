@@ -4,7 +4,7 @@
 **
 ** These are in C rather than in a .lua file for a plain reason: the driver
 ** has no Lua binding, on purpose. Its callers are the host ABI and, later,
-** an opt-in agent mode on the CLI -- not guest code. Until one of those
+** an opt-in task mode on the CLI -- not guest code. Until one of those
 ** exists there is nothing for the .lua suite to call, and inventing a
 ** global to make it testable would add a guest-visible surface for the sake
 ** of a test.

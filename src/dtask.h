@@ -18,7 +18,7 @@
 ** branching on 'coroutine.isyieldable()' to decide whether to yield would
 ** change behaviour in ordinary scripts. So 'lua.c' keeps stock semantics
 ** and this door is separate: the CLI is the conformance surface, and the
-** host ABI is where agents run.
+** host ABI is where coroutine-hosted tasks run.
 **
 ** This is on-top code: nothing here is in the core patch series, and it
 ** uses only the public C API.

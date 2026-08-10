@@ -261,7 +261,7 @@ failing_test_cases:
 
 # Contract tests for the coroutine-hosted call driver. C rather than Lua
 # because the driver has no guest binding by design -- its callers are the
-# host ABI and, later, an opt-in agent mode -- so there is nothing for the
+# host ABI and, later, an opt-in task mode -- so there is nothing for the
 # .lua suite to call yet. Built with the same debug flags as the suite, since
 # 'api_check' is where a stack-arithmetic mistake surfaces as an abort
 # instead of silent corruption.

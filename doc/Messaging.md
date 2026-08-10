@@ -542,11 +542,17 @@ There are therefore two front doors, deliberately:
 | The `dv_*` ABI, via `dtask.c` | Coroutine-hosted. Yieldable top level, parks on queues. | This document |
 
 The consequence worth stating plainly: **a program using `queue.wait` is not
-runnable by `diluvium foo.lua`.** The intended fix is an opt-in agent mode on the
-CLI (`diluvium --agent foo.lua`) that enters through the driver. That is a new
-path rather than a conversion, so it is conformance-safe, and it is also what
-would let agent semantics be tested from the ordinary `.lua` suite instead of
-only from a C harness. Not built yet.
+runnable by `diluvium foo.lua`.** The intended fix is an opt-in task mode on the
+CLI (`diluvium --task foo.lua`) that enters through the driver, making the CLI a
+reference host rather than only a script runner. That is a new path rather than a
+conversion, so it is conformance-safe, and it is also what would let messaging
+semantics be tested from the ordinary `.lua` suite instead of only from a C
+harness. Not built yet.
+
+"Task" rather than "agent" deliberately: 4.0 makes "agent" an application word for
+a program holding a capability, so naming a runtime entry point after it would be
+exactly the leak that section exists to prevent. The runtime words here are
+instance and task.
 
 ### 8.2.1 Why not the existing entry paths
 
