@@ -1808,3 +1808,215 @@ LUAMOD_API int luaopen_dmsgpack (lua_State *L) {
 * TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE
 * SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 ******************************************************************************/
+
+
+/* ======================================================================
+** The read-only token cursor. See dmsgpack.h for why it is here.
+** ====================================================================== */
+
+LUA_API void diluvium_mp_open (diluvium_mp_cursor *c, const void *s,
+                               size_t len) {
+  c->p = (const unsigned char *)s;
+  c->left = len;
+}
+
+
+/* Take 'n' bytes big-endian. The caller has already checked the length. */
+static uint64_t mpc_be (diluvium_mp_cursor *c, int width) {
+  uint64_t n = 0;
+  int i;
+  for (i = 0; i < width; i++)
+    n = (n << 8) | c->p[i];
+  c->p += width;
+  c->left -= (size_t)width;
+  return n;
+}
+
+
+static int mpc_have (diluvium_mp_cursor *c, size_t n) {
+  return c->left >= n;
+}
+
+
+static int mpc_bad (diluvium_mp_token *out) {
+  out->kind = DILUVIUM_MP_BAD;
+  return 0;
+}
+
+
+LUA_API int diluvium_mp_read (diluvium_mp_cursor *c, diluvium_mp_token *out) {
+  unsigned char t;
+  memset(out, 0, sizeof(*out));
+  if (c->left == 0) {
+    out->kind = DILUVIUM_MP_END;
+    return 0;
+  }
+  t = c->p[0];
+  c->p++;
+  c->left--;
+  /* The fixed-form ranges first, since they are most of a real message. */
+  if (t <= 0x7f) { out->kind = DILUVIUM_MP_INT; out->i = t; return 1; }
+  if (t >= 0xe0) {
+    out->kind = DILUVIUM_MP_INT;
+    out->i = (long long)(signed char)t;
+    return 1;
+  }
+  if ((t & 0xf0) == 0x80) {
+    out->kind = DILUVIUM_MP_MAP; out->len = t & 0x0f; return 1;
+  }
+  if ((t & 0xf0) == 0x90) {
+    out->kind = DILUVIUM_MP_ARRAY; out->len = t & 0x0f; return 1;
+  }
+  if ((t & 0xe0) == 0xa0) {
+    size_t n = t & 0x1f;
+    if (!mpc_have(c, n)) return mpc_bad(out);
+    out->kind = DILUVIUM_MP_STR;
+    out->p = (const char *)c->p;
+    out->len = n;
+    c->p += n; c->left -= n;
+    return 1;
+  }
+  switch (t) {
+    case 0xc0: out->kind = DILUVIUM_MP_NIL; return 1;
+    case 0xc2: out->kind = DILUVIUM_MP_BOOL; out->b = 0; return 1;
+    case 0xc3: out->kind = DILUVIUM_MP_BOOL; out->b = 1; return 1;
+    case 0xc4: case 0xc5: case 0xc6:          /* bin 8, 16, 32 */
+    case 0xd9: case 0xda: case 0xdb: {        /* str 8, 16, 32 */
+      int w = (t == 0xc4 || t == 0xd9) ? 1 : (t == 0xc5 || t == 0xda) ? 2 : 4;
+      size_t n;
+      if (!mpc_have(c, (size_t)w)) return mpc_bad(out);
+      n = (size_t)mpc_be(c, w);
+      if (!mpc_have(c, n)) return mpc_bad(out);
+      out->kind = DILUVIUM_MP_STR;
+      out->p = (const char *)c->p;
+      out->len = n;
+      c->p += n; c->left -= n;
+      return 1;
+    }
+    case 0xca: case 0xcb: {                   /* float 32, 64 */
+      int w = (t == 0xca) ? 4 : 8;
+      unsigned char buf[8];
+      if (!mpc_have(c, (size_t)w)) return mpc_bad(out);
+      memcpy(buf, c->p, (size_t)w);
+      c->p += w; c->left -= (size_t)w;
+      mp_memrevifle(buf, (size_t)w);
+      out->kind = DILUVIUM_MP_FLOAT;
+      if (w == 4) { float g; memcpy(&g, buf, 4); out->f = (double)g; }
+      else { double g; memcpy(&g, buf, 8); out->f = g; }
+      return 1;
+    }
+    case 0xcc: case 0xcd: case 0xce: case 0xcf: {   /* uint 8..64 */
+      int w = 1 << (t - 0xcc);
+      uint64_t v;
+      if (!mpc_have(c, (size_t)w)) return mpc_bad(out);
+      v = mpc_be(c, w);
+      /* A uint64 above the signed range would wrap, and a caller reading a
+         budget or a count would then act on a negative number. Refused rather
+         than truncated, matching what the Lua decoder does with the same value. */
+      if (w == 8 && (v >> 63) != 0) return mpc_bad(out);
+      out->kind = DILUVIUM_MP_INT;
+      out->i = (long long)v;
+      return 1;
+    }
+    case 0xd0: case 0xd1: case 0xd2: case 0xd3: {   /* int 8..64 */
+      int w = 1 << (t - 0xd0);
+      uint64_t v;
+      if (!mpc_have(c, (size_t)w)) return mpc_bad(out);
+      v = mpc_be(c, w);
+      out->kind = DILUVIUM_MP_INT;
+      /* Sign-extend through unsigned arithmetic; shifting a negative signed
+         value is what the Lua decoder was rewritten to avoid. */
+      switch (w) {
+        case 1: out->i = (long long)(signed char)(unsigned char)v; break;
+        case 2: out->i = (long long)(short)(unsigned short)v; break;
+        case 4: out->i = (long long)(int)(unsigned int)v; break;
+        default: out->i = (long long)(int64_t)v; break;
+      }
+      return 1;
+    }
+    case 0xdc: case 0xdd: {                   /* array 16, 32 */
+      int w = (t == 0xdc) ? 2 : 4;
+      if (!mpc_have(c, (size_t)w)) return mpc_bad(out);
+      out->kind = DILUVIUM_MP_ARRAY;
+      out->len = (size_t)mpc_be(c, w);
+      return 1;
+    }
+    case 0xde: case 0xdf: {                   /* map 16, 32 */
+      int w = (t == 0xde) ? 2 : 4;
+      if (!mpc_have(c, (size_t)w)) return mpc_bad(out);
+      out->kind = DILUVIUM_MP_MAP;
+      out->len = (size_t)mpc_be(c, w);
+      return 1;
+    }
+    case 0xd4: case 0xd5: case 0xd6: case 0xd7: case 0xd8: {  /* fixext */
+      size_t n = (size_t)1 << (t - 0xd4);
+      if (!mpc_have(c, n + 1)) return mpc_bad(out);
+      out->kind = DILUVIUM_MP_EXT;
+      out->code = c->p[0];
+      out->p = (const char *)(c->p + 1);
+      out->len = n;
+      c->p += n + 1; c->left -= n + 1;
+      return 1;
+    }
+    case 0xc7: case 0xc8: case 0xc9: {        /* ext 8, 16, 32 */
+      int w = (t == 0xc7) ? 1 : (t == 0xc8) ? 2 : 4;
+      size_t n;
+      if (!mpc_have(c, (size_t)w + 1)) return mpc_bad(out);
+      n = (size_t)mpc_be(c, w);
+      out->code = c->p[0];
+      c->p++; c->left--;
+      if (!mpc_have(c, n)) return mpc_bad(out);
+      out->kind = DILUVIUM_MP_EXT;
+      out->p = (const char *)c->p;
+      out->len = n;
+      c->p += n; c->left -= n;
+      return 1;
+    }
+    default:
+      return mpc_bad(out);                    /* 0xc1, which nothing may emit */
+  }
+}
+
+
+LUA_API int diluvium_mp_skip (diluvium_mp_cursor *c) {
+  diluvium_mp_token tok;
+  size_t pending = 1;
+  /*
+  ** Iterative rather than recursive, and counted rather than nested: a hostile
+  ** message can nest as deeply as it likes, and a recursive skip would meet the C
+  ** stack before it met an error. The count is the number of values still owed.
+  */
+  while (pending > 0) {
+    if (!diluvium_mp_read(c, &tok))
+      return 0;
+    pending--;
+    if (tok.kind == DILUVIUM_MP_ARRAY)
+      pending += tok.len;
+    else if (tok.kind == DILUVIUM_MP_MAP) {
+      if (tok.len > (size_t)-1 / 2)
+        return 0;
+      pending += tok.len * 2;
+    }
+  }
+  return 1;
+}
+
+
+LUA_API int diluvium_mp_field (diluvium_mp_cursor *c, const char *key) {
+  diluvium_mp_token tok;
+  size_t klen = strlen(key);
+  size_t n;
+  if (!diluvium_mp_read(c, &tok) || tok.kind != DILUVIUM_MP_MAP)
+    return 0;
+  for (n = tok.len; n > 0; n--) {
+    diluvium_mp_token k;
+    if (!diluvium_mp_read(c, &k))
+      return 0;
+    if (k.kind == DILUVIUM_MP_STR && k.len == klen &&
+        memcmp(k.p, key, klen) == 0)
+      return 1;                               /* the cursor is on the value */
+    if (!diluvium_mp_skip(c))
+      return 0;
+  }
+  return 0;
+}

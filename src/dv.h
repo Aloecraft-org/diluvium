@@ -344,6 +344,40 @@ dv_status dv_endpoint_close (dv_instance *inst, dv_queue_id id);
 #define DV_LAYOUT_COUNT			15
 
 /*
+** Per-instance limits (9.4).
+**
+** A guest cannot meaningfully limit itself: a runaway loop never yields, and
+** nothing cooperative will stop it. So the limits live out here, and 9.4 is
+** emphatic about what the instruction budget is for -- **abort, not schedule**.
+** The count hook raises an error; it does not yield, because yielding from a hook
+** puts a Lua frame under the yield with CIST_HOOKYIELD set and 10.7 refuses to
+** hibernate that. Budgeting by yielding would quietly cost hibernation.
+**
+** 'instructions' is a VM instruction count, 0 for no limit. 'memory_kb' caps the
+** instance's heap, 0 for no limit; an allocation past it fails, which Lua reports
+** as an ordinary out-of-memory error the program can even catch.
+**
+** Set before 'dv_run'. Setting a limit on a running instance is refused, because
+** a budget that changed mid-flight would make "exceeded" mean nothing.
+*/
+dv_status dv_set_budget (dv_instance *inst, uint64_t instructions,
+                         uint64_t memory_kb);
+
+/*
+** What the instance has spent. Either pointer may be NULL.
+**
+** 'instructions' is exact to the hook's granularity, which is why the granularity
+** is small; 'memory_kb' is the high-water mark rather than the current figure,
+** because a supervisor deciding whether a child needs more wants the peak.
+*/
+dv_status dv_usage (dv_instance *inst, uint64_t *instructions,
+                    uint64_t *memory_kb);
+
+/* Did this instance stop because it ran out of budget? */
+int dv_exceeded (dv_instance *inst);
+
+
+/*
 ** Hibernate and wake an instance.
 **
 ** 'dv_snapshot' writes the instance's whole state -- the parked program, its call

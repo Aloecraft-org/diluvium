@@ -79,6 +79,76 @@ LUA_API void diluvium_msgpack_setresolver (lua_State *L,
 
 
 /*
+** A read-only token cursor, with no 'lua_State' anywhere in sight.
+**
+** The swarm layer (11.5, symbol prefix 'dvs_') is a separate library built on the
+** instance ABI, and it has to read the msgpack in a 'system/lifecycle' request to
+** know what was asked for. It cannot use the decoder above, because that pushes
+** Lua values and so needs a state -- and giving the swarm layer a state of its own
+** just to parse a map would make 4.1's layer boundary a fiction.
+**
+** The alternative was a second msgpack reader inside the swarm library, which 5
+** rejects on principle ("having one codec rather than three"). So the cursor lives
+** here instead, beside the writer and the format tables it has to agree with: two
+** entry points, one file that owns the wire format.
+**
+** It reports tokens rather than building values, which is all a caller reading a
+** known shape needs, and it has no allocation and no failure mode beyond "the
+** bytes ran out" or "that is not a type I know".
+*/
+typedef enum diluvium_mp_kind {
+  DILUVIUM_MP_END = 0,          /* no bytes left */
+  DILUVIUM_MP_BAD,              /* not a msgpack type this cursor reads */
+  DILUVIUM_MP_NIL,
+  DILUVIUM_MP_BOOL,
+  DILUVIUM_MP_INT,              /* signed and unsigned both land here */
+  DILUVIUM_MP_FLOAT,
+  DILUVIUM_MP_STR,              /* also bin: both are 'p' and 'len' */
+  DILUVIUM_MP_ARRAY,            /* 'len' elements follow */
+  DILUVIUM_MP_MAP,              /* 'len' key/value pairs follow */
+  DILUVIUM_MP_EXT               /* 'code', then 'p' and 'len' */
+} diluvium_mp_kind;
+
+typedef struct diluvium_mp_token {
+  diluvium_mp_kind kind;
+  int b;                        /* BOOL */
+  long long i;                  /* INT */
+  double f;                     /* FLOAT */
+  const char *p;                /* STR, EXT: into the caller's buffer */
+  size_t len;                   /* STR, EXT, ARRAY, MAP */
+  int code;                     /* EXT */
+} diluvium_mp_token;
+
+typedef struct diluvium_mp_cursor {
+  const unsigned char *p;
+  size_t left;
+} diluvium_mp_cursor;
+
+/* Point a cursor at some bytes. */
+LUA_API void diluvium_mp_open (diluvium_mp_cursor *c, const void *s, size_t len);
+
+/*
+** Read one token. Returns 1, or 0 at the end or on a byte the cursor does not
+** read (with 'kind' set to END or BAD, so a caller can tell those apart).
+**
+** A container reports its length; its contents are the tokens that follow. A
+** caller that wants to skip one calls 'diluvium_mp_skip'.
+*/
+LUA_API int diluvium_mp_read (diluvium_mp_cursor *c, diluvium_mp_token *out);
+
+/* Skip the value that starts here, container and all. 1 on success. */
+LUA_API int diluvium_mp_skip (diluvium_mp_cursor *c);
+
+/*
+** Find 'key' at the top level of the map the cursor is on, leaving the cursor at
+** its value and returning 1. On 0 the cursor is spent, so a caller looking up
+** several keys reopens between them -- which is what makes this a cursor and not
+** an index, and is fine for maps of a dozen fields.
+*/
+LUA_API int diluvium_mp_field (diluvium_mp_cursor *c, const char *key);
+
+
+/*
 ** Snapshot mode.
 **
 ** A snapshot is the same wire format with three differences the plain codec

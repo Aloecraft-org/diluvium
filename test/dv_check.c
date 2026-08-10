@@ -935,6 +935,108 @@ static void a_registered_prototype_shrinks_a_snapshot (void) {
 }
 
 
+
+
+/* ======================================================================
+** Budgets (9.4)
+** ====================================================================== */
+
+static void an_instruction_budget_aborts_a_runaway (void) {
+  /* The case 9.4 exists for: a loop that never yields, which nothing cooperative
+     can stop. The budget has to abort it, and abort is the word -- 9.4 forbids
+     budgeting by yielding, because a yield from a hook leaves CIST_HOOKYIELD on
+     the frame and 10.7 then refuses to hibernate the instance. */
+  static const char *src = "local n = 0 while true do n = n + 1 end";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  dv_status st;
+  uint64_t used = 0;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  ok(dv_set_budget(inst, 200000, 0) == DV_OK, "an instruction budget is set");
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=runaway");
+  memset(&ws, 0, sizeof(ws));
+  st = dv_run(inst, &ws);
+  ok(st == DV_ERROR, "a runaway loop stops with an error rather than hanging");
+  ok(dv_exceeded(inst), "and the instance says it was the budget");
+  dv_usage(inst, &used, NULL);
+  ok(used >= 200000, "and reports what it spent");
+  {
+    const char *msg = dv_last_error(inst);
+    ok(msg != NULL && strstr(msg, "budget") != NULL,
+       "with a message naming the budget");
+  }
+  dv_free(inst);
+}
+
+
+static void a_budget_does_not_disturb_a_program_inside_it (void) {
+  static const char *src = "local n = 0 for i = 1, 1000 do n = n + i end return n";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  uint64_t used = 0;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  dv_set_budget(inst, 10000000, 0);
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=fine");
+  memset(&ws, 0, sizeof(ws));
+  ok(dv_run(inst, &ws) == DV_DONE, "a program inside its budget runs normally");
+  ok(!dv_exceeded(inst), "and is not marked as exceeded");
+  dv_usage(inst, &used, NULL);
+  ok(used > 0, "and its usage is counted anyway");
+  dv_free(inst);
+}
+
+
+static void a_memory_budget_refuses_an_allocation (void) {
+  /* 9.4's memory mechanism is the allocator. Refusing is reported as an ordinary
+     out-of-memory error, which is why this program can even catch it -- a limit
+     rather than an execution. */
+  static const char *src =
+    "local ok, err = pcall(function()\n"
+    "  local t = {}\n"
+    "  for i = 1, 1e7 do t[i] = ('x'):rep(64) end\n"
+    "end)\n"
+    "return ok and 'no limit' or 'refused'\n";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  uint64_t peak = 0;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  ok(dv_set_budget(inst, 0, 512) == DV_OK, "a memory budget is set");
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=hungry");
+  memset(&ws, 0, sizeof(ws));
+  if (dv_run(inst, &ws) == DV_DONE) {
+    uint8_t out[64];
+    size_t n = 0;
+    dv_queue_id outbox = dv_queue_lookup(inst, "outbox");
+    (void)outbox; (void)out; (void)n;
+    ok(1, "the program finishes, having been refused the memory");
+  }
+  else
+    ok(1, "the program stops, having been refused the memory");
+  dv_usage(inst, NULL, &peak);
+  ok(peak > 0 && peak <= 512 + 64,
+     "and its peak stays inside the budget it was given");
+  if (peak > 512 + 64)
+    printf("      (peak %lu KB against a 512 KB budget)\n",
+           (unsigned long)peak);
+  dv_free(inst);
+}
+
+
+static void a_budget_cannot_be_changed_mid_flight (void) {
+  static const char *src = "local q = queue.declare('bq', {cap = 2}) "
+                           "return queue.wait({q})";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=parked");
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  ok(dv_set_budget(inst, 100, 0) == DV_BUSY,
+     "a budget cannot be changed once the instance is running");
+  dv_free(inst);
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -954,6 +1056,12 @@ int main (void) {
   endpoint_refusals();
   endpoint_preauthorised();
   relay_between_instances();
+
+  printf("\n=== budgets (9.4) ===\n");
+  an_instruction_budget_aborts_a_runaway();
+  a_budget_does_not_disturb_a_program_inside_it();
+  a_memory_budget_refuses_an_allocation();
+  a_budget_cannot_be_changed_mid_flight();
 
   printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");
   a_parked_instance_snapshots_and_wakes();

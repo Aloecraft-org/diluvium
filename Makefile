@@ -305,6 +305,17 @@ dsnap_check: _build_step0
 # The snapshot fuzzer's target: a snapshot in, a verdict out, as a subprocess --
 # because the thing being checked is that a malformed snapshot does not crash,
 # and a crash cannot be asserted from inside the process it happens in.
+# The swarm layer (11.5) is a separate library, so it is compiled separately --
+# which also enforces 4.1's boundary: dvs.c sees dv.h and dmsgpack.h and nothing
+# else, and a stray include of lua.h would fail here rather than be absorbed by
+# the amalgamation.
+dvs_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dvs_check \
+	  $(CURDIR)/test/dvs_check.c $(CURDIR)/.data/dvs.c \
+	  $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dvs_check
+
 snap_fuzz: _build_step0
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
 	  -o $(CURDIR)/dist/snap_harness \

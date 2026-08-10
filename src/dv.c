@@ -48,6 +48,13 @@ struct dv_instance {
                         uint32_t *token);
   void *endpoint_ud;
   uint32_t flags;
+  /* Budgets (9.4). Zero means no limit. */
+  uint64_t insn_limit;
+  uint64_t insn_used;
+  uint64_t mem_limit;          /* bytes */
+  uint64_t mem_used;
+  uint64_t mem_peak;
+  int exceeded;
 };
 
 
@@ -123,6 +130,103 @@ static int dv_msghandler (lua_State *L) {
 
 /* -------------------------------------------------------------- lifecycle -- */
 
+/*
+** The counting allocator. 9.4 lists "the allocator, already pluggable" as the
+** memory mechanism, and this is that: refusing an allocation past the limit is
+** reported by Lua as an ordinary out-of-memory error, which a program can even
+** catch -- so a memory budget is a limit rather than an execution.
+**
+** The high-water mark is tracked as well as the current figure, because a
+** supervisor deciding whether a child needs a larger budget wants the peak and not
+** whatever happened to be live when it asked.
+*/
+static void *dv_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
+  dv_instance *inst = (dv_instance *)ud;
+  if (nsize == 0) {
+    free(ptr);
+    if (inst != NULL) {
+      inst->mem_used -= (osize < inst->mem_used) ? osize : inst->mem_used;
+    }
+    return NULL;
+  }
+  if (inst != NULL && inst->mem_limit != 0) {
+    uint64_t after = inst->mem_used - (uint64_t)osize + (uint64_t)nsize;
+    if (after > inst->mem_limit) {
+      inst->exceeded = 1;
+      return NULL;                /* Lua turns this into an out-of-memory error */
+    }
+  }
+  {
+    void *p = realloc(ptr, nsize);
+    if (p == NULL)
+      return NULL;
+    if (inst != NULL) {
+      inst->mem_used = inst->mem_used - (uint64_t)osize + (uint64_t)nsize;
+      if (inst->mem_used > inst->mem_peak)
+        inst->mem_peak = inst->mem_used;
+    }
+    return p;
+  }
+}
+
+
+/* How many VM instructions between hook calls. */
+#define DV_HOOK_STEP	1000
+
+/*
+** The instruction hook. Raises, never yields -- 9.4 says abort rather than
+** schedule, and the reason is 10.7: a yield from a hook leaves CIST_HOOKYIELD on
+** the frame and makes the instance uncapturable. Budgeting by yielding would have
+** cost hibernation silently.
+*/
+static void dv_insn_hook (lua_State *L, lua_Debug *ar) {
+  dv_instance *inst;
+  (void)ar;
+  lua_getfield(L, LUA_REGISTRYINDEX, "diluvium.instance");
+  inst = (dv_instance *)lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  if (inst == NULL)
+    return;
+  inst->insn_used += DV_HOOK_STEP;
+  if (inst->insn_limit != 0 && inst->insn_used >= inst->insn_limit) {
+    inst->exceeded = 1;
+    lua_sethook(L, NULL, 0, 0);   /* once is enough; the error is on its way */
+    luaL_error(L, "instruction budget of %I exceeded",
+               (lua_Integer)inst->insn_limit);
+  }
+}
+
+
+dv_status dv_set_budget (dv_instance *inst, uint64_t instructions,
+                         uint64_t memory_kb) {
+  if (inst == NULL)
+    return DV_ERROR;
+  if (inst->started) {
+    set_error(inst, "dv_set_budget: the instance is already running; a budget "
+                    "that changed mid-flight would make 'exceeded' mean nothing");
+    return DV_BUSY;
+  }
+  inst->insn_limit = instructions;
+  inst->mem_limit = memory_kb * 1024u;
+  return DV_OK;
+}
+
+
+dv_status dv_usage (dv_instance *inst, uint64_t *instructions,
+                    uint64_t *memory_kb) {
+  if (inst == NULL)
+    return DV_ERROR;
+  if (instructions != NULL) *instructions = inst->insn_used;
+  if (memory_kb != NULL) *memory_kb = inst->mem_peak / 1024u;
+  return DV_OK;
+}
+
+
+int dv_exceeded (dv_instance *inst) {
+  return (inst != NULL && inst->exceeded) ? 1 : 0;
+}
+
+
 dv_instance *dv_new (const dv_config *cfg) {
   dv_instance *inst;
   if (cfg != NULL && cfg->abi_version != 0 &&
@@ -134,11 +238,16 @@ dv_instance *dv_new (const dv_config *cfg) {
   inst->chunk_ref = LUA_NOREF;
   inst->co_ref = LUA_NOREF;
   inst->flags = (cfg != NULL) ? cfg->flags : 0u;
-  inst->L = luaL_newstate();
+  /* 'lua_newstate' rather than 'luaL_newstate', so the allocator is ours and a
+     memory budget is possible at all. The instance is anchored in the registry
+     because the instruction hook is handed a 'lua_State' and nothing else. */
+  inst->L = lua_newstate(dv_alloc, inst, 0);
   if (inst->L == NULL) {
     free(inst);
     return NULL;
   }
+  lua_pushlightuserdata(inst->L, inst);
+  lua_setfield(inst->L, LUA_REGISTRYINDEX, "diluvium.instance");
   luaL_openlibs(inst->L);
   diluvium_openlibs(inst->L);   /* msgpack and queue, including inbox/outbox */
   /*
@@ -454,6 +563,12 @@ dv_status dv_run (dv_instance *inst, dv_waitset *out_waitset) {
   if (!lua_checkstack(inst->co, 4)) {
     set_error(inst, "dv_run: cannot grow the thread's stack");
     return DV_ERROR;
+  }
+  if (inst->insn_limit != 0) {
+    /* Armed on the thread, not on the main state: the program runs there, and
+       'diluvium_task_sethook' exists because a hook set on one does not follow
+       the other. */
+    lua_sethook(inst->co, dv_insn_hook, LUA_MASKCOUNT, DV_HOOK_STEP);
   }
   diluvium_task_pushbody(inst->co);
   lua_pushcfunction(inst->co, dv_msghandler);

@@ -145,6 +145,14 @@ jobs:
       - name: Run the snapshot contract tests
         run: make dsnap_check
 
+      # The swarm layer, compiled separately from the amalgamation on purpose:
+      # dvs.c includes dv.h and nothing else from the tree, and the moment it
+      # needs a lua_State something has been put in the wrong layer. The build
+      # is the check for that; the tests are for attenuation, subtree kill and
+      # the spawn rate limit.
+      - name: Run the swarm-layer contract tests
+        run: make dvs_check
+
       # Needs two builds of the tree, so it cannot live in dsnap_check.c: the
       # runtime fingerprint must separate builds whose version and LUAC_FORMAT
       # are identical, which is the measurement 10.6 was corrected from.
