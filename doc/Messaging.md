@@ -2172,9 +2172,20 @@ it comes back rather than from a call returning `true`. For the idle-on-inbox ca
 10.2 calls "the overwhelmingly common state at scale" those are the same thing; for a
 program that wants to hibernate mid-computation they are not, and the gap is real.
 
-**M4b: Python and JavaScript bindings** — Python done, JS partly.
+**M4b: Python and JavaScript bindings** — both done, the JS one only as of M8.
 `bindings/python` (cffi in API mode, 17 tests) and `bindings/js` (a bundled
-msgpack codec, 15 tests). `bindings/README.md` records the five wrapper decisions
+msgpack codec, 15 tests, plus 11 for the WASI host).
+
+The JS wasm wrapper was recorded here as unverified for two milestones, and the
+reason it stayed that way is worth more than the fix: the only job that loaded a real
+module needed a container, and that job had been failing on every run since before it
+was written. So "unverified" was accurate and also understated — it was not merely
+unchecked, it was *known-broken by a signal nobody was reading*. It instantiated the
+module with no imports at all. Fixed under M8 along with the two other standing CI
+failures, and the integration test has now passed: a real `diluvium_wasi.wasm` loads,
+runs a program, reads a queue's capacity through `dv_layout`, and carries an error
+across with its traceback. The same applies to `diluvium-wasmtime`, which could not
+load any module at all. `bindings/README.md` records the five wrapper decisions
 every binding must copy rather than rediscover, since each was found the hard way
 in the first one.
 
@@ -2186,10 +2197,12 @@ runtime reports its own layout instead.
 
 The JS codec is checked against vectors generated **by** `src/dmsgpack.c`, so
 cross-implementation agreement on the wire format is a measured fact rather than
-two readings of the same spec. The JS *wasm wrapper* is unverified: building
-`diluvium.wasm` needs the wasi-sdk in a container, which was unavailable, so CI's
-`js-binding` job is the first place it runs. Stated in `bindings/README.md`
-rather than implied.
+two readings of the same spec. The JS *wasm wrapper* was unverified for the same
+reason `dv_layout` exists — building `diluvium.wasm` needs the wasi-sdk in a
+container, which was unavailable — and CI's `js-binding` job was the only place it
+would ever run. That job has now passed (see M8), so the wrapper is verified; what is
+still true is that it cannot be verified here, which is why the WASI host it needs got
+its own container-free tests.
 
 **M8: packaging** — not started, but the ground was cleared first.
 Rust and JS first, then Python wheels and the header archive.
@@ -2197,7 +2210,9 @@ Accept when: the portability demo runs in both environments from published
 packages, not local builds.
 
 *Before any of that*, the three CI jobs that had been failing on every run were
-fixed. Packaging is the milestone that publishes what CI says is good, so starting
+fixed, and the run after the fix was green — which also closed the "wasm wrapper
+unverified" gap M4b had been carrying, since the jobs that verify it are the ones
+that had never passed. Packaging is the milestone that publishes what CI says is good, so starting
 it with three red jobs would have meant publishing on the strength of a signal
 nobody was reading. All three failed for the same structural reason rather than by
 coincidence: **each was the only place a property was checked, and none of them

@@ -18,8 +18,8 @@ transcription. What took thought was the *wrapper* decisions, and they generalis
 | :--- | :--- |
 | `rust/` | Complete. `diluvium-sys` (raw FFI, builds the amalgamation) and `diluvium` (safe wrapper, `rmp-serde`). 16 tests, a doctest, an example host. |
 | `python/` | Complete. cffi in API mode, so a version mismatch fails at build time rather than at the first call. 17 tests. |
-| `js/` | Codec complete and cross-checked against the C implementation (15 tests), plus the WASI host (11 tests). **The wrapper's end-to-end path is still CI-only**: loading a real `diluvium.wasm` needs the wasi-sdk in a container. See below. |
-| `rust/diluvium-wasmtime/` | Compiles, and the engine configuration has tests (3). **The end-to-end path is still CI-only**: it needs a real `.wasm`. Gives containment and fuel metering; see below. |
+| `js/` | Complete, and now verified end to end. Codec cross-checked against the C implementation (15 tests), WASI host (11 tests), and the wrapper against a real `diluvium.wasm` in CI. Loading a real module still needs the wasi-sdk in a container, so that last part runs only there. See below. |
+| `rust/diluvium-wasmtime/` | Complete, and now verified end to end: engine configuration (3 tests) plus the sandboxed example against a real `.wasm` in CI. Needs the container for that last part. Gives containment and fuel metering; see below. |
 
 ## The JS wrapper's gap, stated plainly
 
@@ -56,9 +56,18 @@ because this wrapper is meant to run in a browser too. Two decisions worth knowi
   created after the grow unless something writes *before* it, and the first version
   passed with the bug present.
 
-It is still not the same as loading a real module. `js/test/wasi.test.js` proves the
-import object is complete and behaves; whether the exports the wrapper reads are the
-ones the runtime provides is a question only `make build_wasm` answers.
+`js/test/wasi.test.js` proves the import object is complete and behaves; whether the
+exports the wrapper reads are the ones the runtime provides is a question only `make
+build_wasm` answers -- **and it has now answered it**. The integration test loads a
+real `diluvium_wasi.wasm`, runs a program, reads `inbox`'s capacity through
+`dv_layout`, and carries an error across with its traceback. So this file has moved
+from reviewed code to working code, which it had never been before.
+
+What remains true is narrower and worth keeping: nothing here can be run without a
+container, so a regression in the wrapper's struct reads surfaces in CI and nowhere
+else. That is why the WASI host got its own tests rather than being left to the
+integration step -- one of the two failure modes now has local cover, and the other
+does not.
 
 Two things were done to shrink what can be wrong in it: every struct offset comes
 from `dv_layout` instead of a constant, and every allocation inside the guest's
