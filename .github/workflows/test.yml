@@ -86,9 +86,11 @@ jobs:
     needs: resolve
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    # macOS is advisory for now: the debug build has never been exercised there,
-    # so a failure should surface without blocking the pipeline. Flip
-    # experimental to false once it has been green for a few runs.
+    # Both entries are experimental: false, so neither is advisory -- macOS was
+    # promoted after it had been green for a while and the comment saying otherwise
+    # outlived the change. Kept as a matrix field rather than deleted because the
+    # next platform added will want it, and a job whose failure is ignored should
+    # have to say so out loud.
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -114,6 +116,203 @@ jobs:
             --bin dist/diluvium_debug \
             --timeout 300 \
             ${{ inputs.include_skipped && '--include-skipped' || '' }}
+
+      # The call driver has no guest binding, so run_tests.sh cannot reach it.
+      # Same debug flags as the suite: 'api_check' is where its stack
+      # arithmetic fails loudly instead of corrupting silently.
+      - name: Run the call-driver contract tests
+        run: make dtask_check
+
+      # The instance ABI, written against dv.h alone. Runs everywhere the suite
+      # does, so the surface hosts depend on is covered even where cargo is not.
+      - name: Run the instance-ABI contract tests
+        run: make dv_check
+
+      # The accessor shim is the only file that reads Lua's internal structs,
+      # so an upstream rename breaks the build; these catch the quieter
+      # failure, where the fields keep their names and change their meaning.
+      # They also hold the invariant hibernation rests on -- no
+      # continuation-less C frame below a yield.
+      - name: Run the accessor-shim contract tests
+        run: make dshim_check
+
+      # SHA-256 against the published vectors. Checked against the standard and
+      # not against itself, because 10.5 makes a Proto's hash a security
+      # boundary: a collision is a snapshot naming one function and being handed
+      # another. Builds without Lua, which is also part of the contract.
+      - name: Run the SHA-256 conformance tests
+        run: make dhash_check
+
+      # The snapshot value graph and header.
+      - name: Run the snapshot contract tests
+        run: make dsnap_check
+
+      # The swarm layer, compiled separately from the amalgamation on purpose:
+      # dvs.c includes dv.h and nothing else from the tree, and the moment it
+      # needs a lua_State something has been put in the wrong layer. The build
+      # is the check for that; the tests are for attenuation, subtree kill and
+      # the spawn rate limit.
+      - name: Run the swarm-layer contract tests
+        run: make dvs_check
+
+      # Needs two builds of the tree, so it cannot live in dsnap_check.c: the
+      # runtime fingerprint must separate builds whose version and LUAC_FORMAT
+      # are identical, which is the measurement 10.6 was corrected from.
+      - name: Check that the runtime fingerprint separates builds
+        run: ./test/fingerprint_check.sh
+
+      # 10.10's acceptance criterion: structure-aware mutation of a real
+      # snapshot, asserting a refusal and never a crash. It found the two
+      # validation gaps it now guards, and it found them because it loads in a
+      # separate process -- which two instances in one process cannot do.
+      - name: Fuzz the snapshot restore path
+        run: make snap_fuzz
+
+      # The token cursor on hostile input. It is the parser the swarm layer uses
+      # for 'system/lifecycle', and guests write those, so it is a trust boundary
+      # that nothing had tested on malformed bytes -- the only cross-check fed it
+      # what the encoder produced. 400,000 inputs under ASan; it found an overflow
+      # that only bites where size_t is 32 bits, which is wasm32.
+      - name: Fuzz the msgpack token cursor
+        run: make mp_cursor_fuzz
+
+      # Prints what a resident instance costs; asserts nothing. 18.2's profile A
+      # drops hibernation, so a deployment's density is bounded by the resident
+      # figure and not by a snapshot's size -- and that figure had never been
+      # measured. It is here so the number appears in every run's log and a drift
+      # is visible in the diff between two runs, which is the whole use for it.
+      - name: Measure what a resident instance costs
+        run: make footprint
+
+      # The swarm layer as an actual library, which nothing built until now: 4.1,
+      # 11.5 and 12.1 all call it a separate library and 12.1 lists a
+      # diluvium-swarm archive among the release artifacts, but dvs.c was only ever
+      # compiled into a test binary. The step also checks the layer boundary at the
+      # *linker* -- no 'lua' symbol may appear in dvs.o -- which is the claim being
+      # made, and a stronger one than compiling without lua.h.
+      - name: Build libdiluvium-swarm and check its symbol boundary
+        run: make build_swarm_lib
+
+      # The release build catches what the amalgamation hides: a file that uses a
+      # core macro without including its header compiles in onelua.c and fails
+      # here. Two such bugs reached the tree before this was in the sweep.
+      - name: Build the platform target, which links each file separately
+        run: make build_platform
+
+      # Needs a signal and a subprocess, so it cannot live in run_tests.sh.
+      # The --task case is the one that regresses silently.
+      - name: Check that Ctrl-C interrupts a runaway loop
+        run: ./test/interrupt_check.sh --bin dist/diluvium_debug
+
+  rust-binding:
+    name: Rust binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # No toolchain action: the runner image ships a stable Rust, and pinning
+      # one here would hide the version skew a published crate actually meets.
+      - name: Versions
+        run: cargo --version && rustc --version && cc --version | head -1
+
+      # The -sys crate compiles the amalgamation from source, so this also
+      # checks that src/ builds with -DMAKE_LIB outside the project Makefile.
+      - name: Test the binding
+        working-directory: bindings/rust
+        run: cargo test --all
+
+      - name: The example host runs
+        working-directory: bindings/rust
+        run: cargo run --quiet --example echo
+
+  wasmtime-binding:
+    name: wasmtime binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Build
+        working-directory: bindings/rust
+        run: cargo build -p diluvium-wasmtime --examples
+
+      # These need no container, which is the point of them: the engine has to
+      # accept the exception-handling instructions the wasi-sdk emits for Lua's
+      # setjmp/longjmp, and for weeks nothing checked that anywhere a developer
+      # would see it -- the only module the crate ever loaded came from the step
+      # below. A hand-written module with a 'throw' in it is enough.
+      - name: Run the engine-configuration tests
+        working-directory: bindings/rust
+        run: cargo test -p diluvium-wasmtime
+
+      # Needs the wasi-sdk in a container, so this is the only place the crate is
+      # exercised against a real module. See bindings/README.md.
+      - name: Build the wasm runtime
+        run: make build_wasm
+
+      - name: The sandboxed example runs
+        working-directory: bindings/rust
+        run: cargo run -p diluvium-wasmtime --example sandboxed -- ../../dist/diluvium_wasi.wasm
+
+  python-binding:
+    name: Python binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Install
+        run: pip install cffi msgpack pytest
+
+      # API mode: the extension compiles src/ here, so a mismatch between the
+      # cdef and the real header fails the build rather than the first call.
+      - name: Build the extension
+        working-directory: bindings/python
+        run: python3 build_ffi.py
+
+      - name: Test
+        working-directory: bindings/python
+        run: PYTHONPATH=src python3 -m pytest tests -q
+
+  js-binding:
+    name: JavaScript binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # Two things, neither needing a container. The codec is checked against
+      # vectors produced by src/dmsgpack.c rather than against the spec, so this
+      # asserts cross-implementation agreement on the wire format. And the WASI
+      # host is checked against a hand-assembled module that imports
+      # wasi_snapshot_preview1 -- because the wrapper instantiated with no imports
+      # at all for weeks, and the only step that would have noticed was the one
+      # below that needs the wasi-sdk.
+      - name: Test the codec and the WASI host
+        working-directory: bindings/js
+        run: npm test
+
+      # The wasm wrapper needs a real module, which needs the wasi-sdk. This is
+      # the only place it gets exercised; see bindings/README.md.
+      - name: Build the wasm runtime
+        run: make build_wasm
+
+      - name: Integration test against the real wasm
+        working-directory: bindings/js
+        run: node test/instance.integration.mjs ../../dist/diluvium_wasi.wasm
 
   patch-guard:
     name: Core patch guard
@@ -180,6 +379,16 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ./test/run_tests.sh --bin dist/diluvium_asan --timeout 900
+
+      # The contract tests, which the sweep had been missing entirely. The step
+      # above builds onelua.c and runs the *Lua* suite, so it covers the runtime a
+      # program reaches and not the C ABI a host reaches -- and dvs.c is not in the
+      # amalgamation at all, so the newest code with the most raw malloc/free in the
+      # tree had never met a sanitizer. This found undefined behaviour in the SHA-256
+      # update on its first run: lua_dump signals end-of-dump by calling the writer
+      # with (NULL, 0), and memcpy's parameters are non-null whatever the length.
+      - name: Contract tests under the sanitizers
+        run: make sanitize_checks
 
       # The compiler and the analyzer walk instruction operands by hand, so
       # they are exactly where a decoding mistake hides. This is what caught
@@ -413,3 +622,29 @@ jobs:
           else
             echo "::warning::secure chunk contains plaintext constants (known: handoff findings 3 and 4)"
           fi
+
+      - name: Check that no single-byte XOR pass recovers the markers
+        run: |
+          set -eu
+          # The grep above passes for any scramble at all, including one
+          # repeated byte -- which it was until the keystream landed, leaving
+          # the strings one 'tr' pass from readable. Sweeping all 256 keys
+          # tests the shape of the encoding rather than a constant, so this
+          # cannot pass again by accident if someone simplifies the scramble.
+          python3 - <<'PY'
+          import sys
+          markers = [b"MARKER_DIRECT_CONSTANT", b"MARKER_NESTED_CONSTANT",
+                     b"MARKER_SHARED_ENCLOSING", b"MARKER_SHARED_SIBLING"]
+          bad = 0
+          for path in ("/tmp/secure_probe.out", "/tmp/secure_probe_debug.out"):
+              blob = open(path, "rb").read()
+              for key in range(256):
+                  flipped = bytes(b ^ key for b in blob)
+                  for m in markers:
+                      if m in flipped:
+                          print("RECOVERED %s from %s with XOR 0x%02x"
+                                % (m.decode(), path, key))
+                          bad = 1
+          print("no single-byte XOR pass recovers a marker" if not bad else "")
+          sys.exit(bad)
+          PY

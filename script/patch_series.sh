@@ -47,12 +47,12 @@ lobject.h   is_encrypted flag on Proto
 lfunc.c     is_encrypted initialization
 ldump.c     XOR scramble of code/constant strings for secure protos; taint pass
 lundump.c   XOR unscramble per string flag; forced copy of fixed buffers
-lundump.h   LUAC_FORMAT 0x45 (Diluvium bytecode format byte)
+lundump.h   LUAC_FORMAT 0x46 (Diluvium bytecode format byte)
 lvm.c       type-test R[A] in OP_SETLIST before reading it as a table (corrupt-bytecode guard the load-time verifier cannot make; other opcodes already test via luaV_fastget)
 ltm.c       same table type-test for the vararg-table path in luaT_getvarargs
 luaconf.h   fixed string hash seed (deterministic pairs order)
 lua.h       Diluvium version/branding strings
-lua.c       Diluvium branding; REPL input handling moved to drepl.c
+lua.c       Diluvium branding; REPL input handling moved to drepl.c; --task delegates to dtask.c
 onelua.c    include analyze.c; rename ltests.c resetCI (amalgamation clash)
 '
 

@@ -39,8 +39,8 @@ typedef struct {
 
 /*
 ** Diluvium: XOR-scramble a block in place. This is obfuscation, not
-** cryptography (single-byte key). Applied to the code and string
-** constants of secure functions.
+** cryptography. Applied to the code and string constants of secure
+** functions.
 **
 ** The instruction stream is scrambled iff its own proto is secure, so
 ** its position in the tree decides it. Strings cannot work that way:
@@ -52,14 +52,47 @@ typedef struct {
 ** position would store such a string in the clear. Instead the dump
 ** decides per string (see 'taintSecureStrings') and records the decision
 ** in the string's own header, which is what 'loadString' reads.
+**
+** The keystream is generated rather than being one repeated byte, for a
+** reason that is about the claim rather than about cryptography. A single
+** constant means one 'tr' or 'xxd' pass over the whole file recovers
+** every hidden string at once, which is barely more than the text editor
+** the README says this defends against. Against a keystream an attacker
+** has to implement it -- trivial from these public sources, but no longer
+** one shell command. That is the whole of the improvement and it should
+** not be described as more.
+**
+** Two properties are load-bearing elsewhere and must survive any future
+** change here:
+**
+**   Deterministic. Identical input must give identical output, with no
+**   nonce and no state carried between blocks. 'doc/Messaging.md' plans to
+**   content-address prototypes by hashing their stripped dump, which
+**   requires byte-identical dumps for identical source. A per-dump nonce
+**   would trade this obfuscation for that entire scheme.
+**
+**   Self-inverse. A second pass restores the original, which is what lets
+**   'lundump.c' hold a copy of exactly this function under another name.
+**
+** The stream is seeded from the block length so that blocks do not all
+** share one keystream prefix. Same length plus same contents still gives
+** same output, which is what dedup needs.
 */
-#define DILUVIUM_XOR_KEY	0xBE
+#define DILUVIUM_XOR_SEED	0xBE5CA1EDu
 
 static void diluvium_scramble (void *data, size_t size) {
   unsigned char *p = (unsigned char *)data;
+  l_uint32 k = (DILUVIUM_XOR_SEED ^ cast(l_uint32, size)) & 0xFFFFFFFFu;
   size_t i;
-  for (i = 0; i < size; i++)
-    p[i] ^= DILUVIUM_XOR_KEY;
+  if (k == 0)  /* xorshift is stuck at zero, which would leave plaintext */
+    k = DILUVIUM_XOR_SEED;
+  for (i = 0; i < size; i++) {  /* xorshift32 */
+    k ^= (k << 13) & 0xFFFFFFFFu;
+    k ^= k >> 17;
+    k ^= (k << 5) & 0xFFFFFFFFu;
+    k &= 0xFFFFFFFFu;
+    p[i] ^= cast_uchar(k >> 24);
+  }
 }
 
 

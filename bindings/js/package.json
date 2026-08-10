@@ -1,0 +1,16 @@
+{
+  "name": "diluvium",
+  "version": "0.1.0",
+  "description": "Embed a Diluvium program: bounded message queues, cooperative parking",
+  "license": "Apache-2.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.js",
+    "./msgpack": "./src/msgpack.js"
+  },
+  "files": ["src", "diluvium.wasm", "README.md"],
+  "scripts": {
+    "test": "node --test test/*.test.js"
+  },
+  "engines": { "node": ">=18" }
+}

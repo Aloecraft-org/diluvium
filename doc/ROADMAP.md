@@ -1,8 +1,13 @@
 # Diluvium Roadmap
 
 Scope: the standalone runtime and compiler in this repository. Host
-embedding, capability plumbing and anything downstream of them are tracked
-elsewhere and deliberately kept out of this file.
+embedding and capability plumbing were previously tracked elsewhere and
+kept out of this file; that boundary has moved. They now live in
+`doc/Messaging.md`, which specifies the msgpack codec, queues, the
+delivery model, the lifecycle capability, hibernation, the `dv_*`
+instance ABI and packaging. This file stays the record of the fork's
+language, compiler and runtime state; anything downstream of the ABI
+belongs there.
 
 This document exists so the state of the fork is readable from the tree
 rather than reconstructed each time. Update it in the same commit as the
@@ -378,6 +383,38 @@ the dump stores things has to be re-checked against secure functions,
 because the security property is about the encoding and not only about
 the values.
 
+### The scramble itself, finally looked at
+
+Both rounds above were about *where* the scramble is applied. Neither
+touched what it is, and it was a single repeated byte from the day the
+feature was written -- `git log -S 0xBE` lands on the original commit and
+nothing after it. That passed every test, including the CI audit, because
+every test asked whether `strings` finds the constants. It does not. `tr`
+does, in one pass, which is about one step above the text editor the
+README says this defends against.
+
+It is now a generated keystream (`LUAC_FORMAT` 0x46), seeded from the
+block length so blocks do not share a prefix, deterministic and
+self-inverse. The tests changed shape more than the code did:
+`test_secure_dump.lua` sweeps all 256 single-byte keys instead of checking
+the one in `ldump.c`, and the CI audit does the same over real `luac`
+output -- a property of the encoding rather than a fact about a constant,
+so simplifying the scramble back cannot pass again by accident. Both were
+verified failing on the previous scheme before being committed.
+
+Two constraints now bind anyone editing this, and both are recorded in
+`ldump.c` beside the code: it must stay **deterministic**, because
+`doc/Messaging.md` content-addresses prototypes by the hash of their
+stripped dump and a per-dump nonce would break that while round-tripping
+perfectly, and it must stay **self-inverse**, because `lundump.c` holds
+the same function under another name.
+
+The honest claim is unchanged in kind and stronger in degree: this is
+obfuscation, not encryption. Recovering a secure function's strings takes
+reading these public sources and implementing the keystream. That is
+trivial for anyone who wants to, and no longer a one-liner for anyone who
+does not.
+
 ### `~function` after an expression
 
 `~` is also the binary xor operator, and Lua expressions span newlines,
@@ -638,6 +675,12 @@ images are not, so an unexplained jump is usually one of those moving.
 
 ## Open
 
+- **The M0–M7 audit's confirmed defects.** 35 confirmed, 32 refuted; roughly 24
+  distinct. Listed with consequences in `doc/Messaging.md` section 18, together
+  with three release profiles — the useful framing is that ten of the defects are
+  hibernation and are therefore optional for a deployment that keeps agent state
+  at the application level. Profile A (trusted programs, resident instances) needs
+  four small fixes and is the nearest usable release.
 - Contract calling convention, kernel framing, libm embedding — carried
   from the handoff, all still open.
 - Float reduction order, needed before any vector work.

@@ -1,0 +1,38 @@
+[package]
+name = "diluvium-wasmtime"
+version = "0.1.0"
+edition = "2021"
+# Declared so cargo's MSRV-aware resolver will not silently pick a wasmtime that
+# needs a newer compiler than CI has. The CI job deliberately uses whatever stable
+# the runner ships rather than pinning a toolchain, so the constraint has to live
+# here: wasmtime 47's own MSRV is 1.94.0, which is the current stable and no
+# headroom at all. 43 asks for 1.91.0 and has the same exception-handling support,
+# which is the only thing this crate needs from a recent wasmtime.
+rust-version = "1.91"
+license = "Apache-2.0"
+description = "Host a Diluvium program as a sandboxed wasm module under wasmtime"
+
+[dependencies]
+# 'gc-null' is not optional here, and the reason is not garbage collection:
+# wasmtime gates the exception-handling proposal behind 'gc', and the wasi-sdk
+# lowers Lua's setjmp/longjmp onto EH instructions ('-mllvm -wasm-enable-sjlj').
+# Without it the module is refused at parse with "exceptions proposal not
+# enabled", which is what CI reported on every run for weeks.
+#
+# The *null* collector specifically: 'gc' alone builds and then fails at
+# Engine::new with "none of the collectors are available", and a guest that only
+# needs EH never allocates a GC object, so a collector that cannot collect is the
+# right one. Picking 'gc-drc' would buy reference-counting nothing uses.
+#
+# 'anyhow' makes wasmtime's error type work with '?' again; its own error type no
+# longer implements std::error::Error, so '.context()' needs an explicit
+# 'map_err(anyhow::Error::from)' at the call sites regardless.
+wasmtime = { version = "43", default-features = false, features = ["cranelift", "runtime", "std", "gc-null", "anyhow"] }
+wasmtime-wasi = "43"
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }
+wat = "1.255.0"

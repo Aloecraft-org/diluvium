@@ -1,0 +1,6 @@
+# A workspace, so `cargo test` at this level covers the -sys crate and the safe
+# wrapper together. Published separately: diluvium-sys carries the C, diluvium
+# carries everything a host actually wants to call.
+[workspace]
+members = ["diluvium-sys", "diluvium", "diluvium-wasmtime"]
+resolver = "2"

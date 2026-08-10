@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "cffi>=1.15"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "diluvium"
+version = "0.1.0"
+description = "Embed a Diluvium program: bounded message queues, cooperative parking"
+requires-python = ">=3.9"
+license = { text = "Apache-2.0" }
+dependencies = ["cffi>=1.15", "msgpack>=1.0"]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -43,16 +43,29 @@ typedef struct {
 
 
 /*
-** Diluvium: reverse the dump-side XOR scramble. Symmetric with
-** diluvium_scramble in ldump.c; see the note there.
+** Diluvium: reverse the dump-side XOR scramble. The keystream is
+** self-inverse, so this is 'diluvium_scramble' from ldump.c byte for byte,
+** including the length-derived seed -- both sides pass the same length,
+** which is what keeps them in step without storing anything. Read the note
+** in ldump.c before changing either; the two must not drift, and a chunk
+** written by a build whose keystream differs decodes to garbage rather than
+** failing, which is why LUAC_FORMAT covers this.
 */
-#define DILUVIUM_XOR_KEY	0xBE
+#define DILUVIUM_XOR_SEED	0xBE5CA1EDu
 
 static void diluvium_unscramble (void *data, size_t size) {
   unsigned char *p = (unsigned char *)data;
+  l_uint32 k = (DILUVIUM_XOR_SEED ^ cast(l_uint32, size)) & 0xFFFFFFFFu;
   size_t i;
-  for (i = 0; i < size; i++)
-    p[i] ^= DILUVIUM_XOR_KEY;
+  if (k == 0)
+    k = DILUVIUM_XOR_SEED;
+  for (i = 0; i < size; i++) {  /* xorshift32 */
+    k ^= (k << 13) & 0xFFFFFFFFu;
+    k ^= k >> 17;
+    k ^= (k << 5) & 0xFFFFFFFFu;
+    k &= 0xFFFFFFFFu;
+    p[i] ^= cast_uchar(k >> 24);
+  }
 }
 
 

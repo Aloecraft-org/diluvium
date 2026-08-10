@@ -1,0 +1,14 @@
+[package]
+name = "diluvium"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Embed a Diluvium program: bounded message queues, cooperative parking"
+
+[dependencies]
+diluvium-sys = { path = "../diluvium-sys", version = "0.1.0" }
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

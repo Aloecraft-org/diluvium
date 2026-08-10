@@ -1,0 +1,38 @@
+Diluvium
+Copyright 2026 Aloecraft
+
+This product includes software developed at Aloecraft, licensed under the
+Apache License, Version 2.0. See LICENSE.
+
+This distribution bundles third-party code, listed below. Each file carries
+the full notice for the code it contains; this file is the index.
+
+--------------------------------------------------------------------------------
+Lua
+--------------------------------------------------------------------------------
+
+Diluvium is a fork of Lua 5.5.1.
+
+  Copyright (C) 1994-2025 Lua.org, PUC-Rio.
+
+Licensed under the MIT license. The notice is in src/lua.h, which every source
+file in src/ refers to as "Copyright Notice in lua.h".
+
+  https://www.lua.org/license.html
+
+--------------------------------------------------------------------------------
+lua-cmsgpack
+--------------------------------------------------------------------------------
+
+src/dmsgpack.c derives from lua-cmsgpack 0.4.0 -- specifically its msgpack
+format-byte tables, its integer and collection header width ladders, and its
+runtime endianness swap. The buffer, the integer decoding, the float width
+policy, the array-versus-map rule and everything concerning ext codes were
+written for Diluvium; the header of that file records which is which and why.
+
+  Copyright (C) 2012 Salvatore Sanfilippo.  All rights reserved.
+
+Licensed under the MIT license. The notice is reproduced in full at the foot
+of src/dmsgpack.c.
+
+  https://github.com/antirez/lua-cmsgpack

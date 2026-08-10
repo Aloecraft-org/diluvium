@@ -19,10 +19,18 @@
 #   status            released | unreleased | tagged
 #                     `tagged` means the tag exists but no GitHub release
 #                     was published for it.
-#   stable            A real release rather than a candidate. GitHub's own
-#                     `prerelease` flag is not usable here -- every release
-#                     in this repository is flagged false, candidates
-#                     included -- so this field is the truth.
+#   stable            A real release rather than a candidate. This field is
+#                     the truth and GitHub's `prerelease` flag is derived
+#                     from it: `release.yml`'s preflight reads it through
+#                     `changelog.py release-check` and then PATCHes the flag
+#                     after publishing, because the release action will set
+#                     that flag but not clear it. Historically every release
+#                     here was flagged false regardless, candidates
+#                     included; that is what the derivation fixed.
+#                     False is not only for candidates. A release whose
+#                     supported configuration is narrower than the feature
+#                     set it ships is not stable either, and 5.5.1_build3 is
+#                     the first of those.
 #   latest            Optional. Exactly one entry carries `latest: true`;
 #                     that is what a `latest/` path should resolve to.
 #   mirror            Whether the release mirror should carry it. This
@@ -51,15 +59,171 @@ releases:
 
   - version: "5.5.1_build3"
     tag: v5.5.1_build3
-    date: null
-    status: unreleased
-    stable: true
+    date: 2026-08-10
+    status: released
+    stable: false
     mirror: false
     lua_base: "5.5.1"
-    bytecode_format: 0x45
+    bytecode_format: 0x46
     summary: |
-      In progress. The release that closes finding 8: compiled chunks are
-      checked at load time instead of being trusted.
+      **A pre-release, deliberately.** Not because it is unfinished or
+      untested -- the suite, the sanitizers and the fuzzers are green, and the
+      feature set below is complete -- but because the configuration it is
+      *supported in* is narrower than the feature set it ships. Hibernation is
+      switched off and should stay off; the capability layer is a structuring
+      device rather than a security boundary, so every program loaded must be
+      one you wrote or templated. Both are spelled out under **Known issues**,
+      which is the part of these notes to read before deploying anything.
+
+      `latest` stays on 5.5.1_build2 for that reason, and the release mirror
+      does not carry this one. A deployment that wants it should name the tag.
+
+      Two things in it, and the second is the larger one.
+
+      Compiled chunks are checked at load time instead of being trusted,
+      which closes finding 8.
+
+      And Diluvium becomes a messaging runtime: a program can hold bounded
+      queues, park on them, and be driven by a host that moves bytes between
+      instances -- with a C ABI for embedding one instance, an optional
+      library for supervising many, and snapshot and restore underneath. The
+      design and its milestones are `doc/Messaging.md`; what is finished, what
+      is deliberately switched off, and what a deployment is accepting are in
+      **Known issues** below and in section 18 of that document.
+
+      Read the profiles in 18.2 before deploying this. The short version:
+      **hibernation is off by default and should stay off** in this release,
+      and the capability layer is a structuring device rather than a security
+      boundary while the `debug` library is available to guests. Everything
+      else in the messaging feature set is finished and tested.
+
+    upgrading: |
+      Nothing in the messaging work changes an existing program: the new
+      libraries are additions, and a program that does not call them behaves
+      as before. The two new libraries are opened for every state, so a
+      program with its own global named `queue`, `endpoint` or `msgpack`
+      will find it shadowed.
+
+      `LUAC_FORMAT` is 0x46. Chunks compiled by an earlier Diluvium will
+      be refused at the header and must be recompiled from source. The
+      layout did not change; the secure-function scramble did, and a
+      chunk scrambled under the old one would still parse and decode to
+      garbage, so the format byte is what turns a silent misread into a
+      refusal.
+
+    added:
+      - |
+        `msgpack`: a codec that round-trips a Lua value graph.
+
+        Encode, decode, `as_array` and `as_map` for the shapes msgpack can
+        represent but Lua cannot distinguish (an empty table is a map, not an
+        array -- one of several places this bites), and `msgpack.ext` for
+        application ext codes 0x10 to 0x7F. Codes below 0x10 are reserved by
+        the registry in section 5.5 and are refused in both directions, so a
+        program cannot write bytes only the runtime is supposed to mean
+        something by.
+
+        Integers stay integers and floats stay floats across a round trip,
+        which is a property the queue layer depends on rather than a nicety.
+
+      - |
+        `queue`: bounded message queues, and a program that can park on one.
+
+        `queue.declare`, `lookup`, `push`, `pop`, `len`, `capacity`,
+        `destroy`, `disable`, and `queue.wait` over a set of them with an
+        optional timeout. Queues are bounded on purpose: a full queue blocks
+        the sender or fails the push, so backpressure is visible instead of
+        being absorbed by memory growth.
+
+        A program that calls `queue.wait` with nothing to read parks, and its
+        host decides when it runs again. That is the whole shape of the
+        runtime: no threads, no scheduler, no callbacks -- a program is a
+        coroutine that stops when it has nothing to do.
+
+      - |
+        `endpoint`: a queue handle for something that is not in this state.
+
+        A program receives an *endpoint reference* in a message and calls
+        `endpoint.bind`, and what it gets back is an ordinary queue handle --
+        `push`, `len`, `wait` all work unchanged. A sender cannot tell an
+        endpoint from a local queue and does not need to.
+
+        The runtime never learns what a reference means. The host resolves it,
+        either through a callback or by pre-authorising bytes with
+        `dv_endpoint_allow`, and then moves bytes between instances itself. A
+        three-instance relay is five lines of Lua and no C on either side.
+
+      - |
+        `diluvium --task`: run a program that waits.
+
+        The CLI grew a second entry mode, hosted on a coroutine, so a program
+        that parks on `queue.wait` can be run from the command line and driven
+        to completion. Ctrl-C interrupts a runaway loop in both modes.
+
+      - |
+        The instance ABI (`dv.h`, `libdiluvium`): one sandboxed instance,
+        embeddable in about a dozen calls.
+
+        `dv_new`, `dv_load`, `dv_run`, `dv_resume`, `dv_free`; queue push and
+        pop by name; endpoint resolution; `dv_set_budget`, `dv_usage`,
+        `dv_exceeded`; `dv_snapshot` and `dv_restore`. An instance never runs
+        unbounded: a budget caps instructions and memory, and exceeding one
+        stops the program with an error rather than the process with an abort.
+
+        The header is self-contained -- no Lua header, no internal type -- and
+        the contract tests are written against it alone, which is how that
+        claim is kept true. Bindings for Rust (including a wasmtime host),
+        Python and JavaScript ship with it, and the JavaScript one carries a
+        portable WASI preview-1 host so a `.wasm` build runs in Node with no
+        native dependency.
+
+      - |
+        Snapshot and restore: a running program's state as bytes.
+
+        A parked instance can be written out and read back -- the value graph
+        including cycles and shared references, closures with their upvalues,
+        suspended coroutines with their frames, and content-addressed
+        prototypes so a snapshot names code rather than carrying it. A
+        permanents table keeps host objects out of the bytes.
+
+        Restore treats its input as hostile: a header with a runtime
+        fingerprint, structural validation, and a structure-aware fuzzer that
+        mutates real snapshots and asserts a refusal rather than a crash. See
+        **Known issues** for what is not finished here.
+
+      - |
+        `libdiluvium-swarm` (`dvs.h`): supervising many instances, as a
+        separate library.
+
+        An instance table, one parent link each, a capability set per
+        instance, and a step function that drains each program's
+        `system/lifecycle` queue and acts on what it finds -- spawn, kill,
+        hibernate, query. Capabilities attenuate: a supervisor can never grant
+        a child more than it holds, and `dvs_kill` takes the subtree because
+        reparenting is harder to remove once something depends on it. Spawns
+        are rate-limited per step, because a self-rewriting system produces a
+        fork bomb eventually as a bug rather than an attack.
+
+        There is no supervisor type, and that is the design rather than an
+        omission: a supervisor is a program holding one capability. Restart
+        strategies, backoff, routing and topology are ordinary Diluvium
+        programs, which for a system whose programs are generated at runtime
+        is the entire point.
+
+        An app embedding a single sandbox links none of this.
+
+      - |
+        `make footprint`: what a resident instance costs, measured.
+
+        42 KB for an instance parked on a queue -- 41 MB for a thousand, 410
+        MB for ten thousand, roughly 25,000 on a 1 GB machine. Measured
+        through `dv_usage` rather than RSS so the number is the same on every
+        machine. It prints and asserts nothing: a threshold here would fail
+        when someone adds a library rather than when something is wrong.
+
+        This is the number to plan capacity with, and it had been guessed at
+        from a snapshot's size (about 1.8 KB), which is the wrong figure once
+        instances stay resident.
 
     security:
       - |
@@ -106,6 +270,203 @@ releases:
         `load(bytes, name, "t")` remains the complete mitigation, and
         inspecting a chunk with `diluvium_compiler -r` remains safer than
         running it.
+
+      - |
+        A secure (`~`) function's strings no longer fall out of a single
+        XOR pass over the dump.
+
+        The scramble was one repeated byte, and had been since the feature
+        was written; the two rounds of fixes before this one were about
+        *where* it was applied, never what it was. So `strings` on a dump
+        found nothing, exactly as advertised -- and `tr` or two lines of
+        `xxd` recovered every hidden string at once, which is not
+        meaningfully better than the text editor the README says a secure
+        function defends against. The gap was between the claim and the
+        constant, not in the coverage.
+
+        It is now a generated keystream, seeded from the block length so
+        blocks do not all share a prefix. `test_secure_dump.lua` sweeps all
+        256 single-byte keys rather than checking the one in `ldump.c`, so
+        the test states a property of the encoding instead of a fact about
+        a number, and the CI obfuscation audit does the same sweep over the
+        real `luac` output. Verified to fail on the previous scheme.
+
+        Two properties are now asserted because other work depends on them.
+        The scramble is deterministic -- no nonce, nothing carried between
+        blocks -- because content-addressing prototypes by the hash of
+        their stripped dump needs identical source to give identical bytes,
+        and a nonce would have broken that silently, round-tripping
+        perfectly while the cache stopped working. And it is self-inverse,
+        which is what lets the loader hold the same function under another
+        name.
+
+        This is still obfuscation and still not encryption. What changed is
+        that recovering the strings now takes reading these sources and
+        implementing the keystream -- trivial for anyone who wants to, and
+        no longer one shell command for anyone who does not.
+
+      - |
+        An endpoint reference could be forged by a guest, two ways. One is
+        closed; the other is why the capability layer is not yet a security
+        boundary.
+
+        Section 7.3 claims a reference "cannot be forged" because there is no
+        constructor anywhere. There was one: `msgpack.decode` is callable by
+        the program, and it ran the host's resolver on whatever bytes it was
+        handed -- so a program could write `msgpack.decode('\xd4\x02' .. name)`
+        and get a genuine reference to any peer the host had authorised.
+        Proven end to end against a host that had authorised one peer and
+        delivered nothing, where the guest reached that peer's queue. The
+        reference was a guessable name, not a capability.
+
+        Bytes that arrive from the host now resolve; bytes a program decodes
+        itself surface as an inert opaque value. And they cannot be pushed
+        back out to be re-decoded by the trusted path, because reserved ext
+        codes are now refused at the point they would be written.
+
+        **Not closed:** `debug.getmetatable` reaches the reference metatable
+        and `debug.getregistry` reaches everything else, so a program holding
+        one real reference can still mint one to any peer name it can guess.
+        No scheme that keeps a reference's identity inside the runtime fixes
+        that while the `debug` library is open to guests, which is why
+        narrowing that library is the first item of the next profile rather
+        than a patch here.
+
+      - |
+        A reserved ext code could be written from a program.
+
+        `msgpack.ext` refuses codes below 0x10, but the wrapper it returns is
+        an ordinary table: `w = msgpack.ext(0x10, s)` and then `w[3] = 0x02`
+        produced exactly what the constructor had just refused. The check now
+        runs where the bytes are written, because a constructor cannot vouch
+        for a value that stays mutable.
+
+        Filed as tidiness and turned out to be the security fix: it is what
+        stops a decoded endpoint reference from being laundered back through a
+        queue into the host's trusted delivery path.
+
+    fixed:
+      - |
+        The swarm layer's own audit found fourteen defects in it, and the four
+        that a supervisor would hit first are fixed.
+
+        A clean exit was reported to the parent as `"faulted"`, because the
+        instance's last error is sticky and nothing cleared it -- so a
+        supervisor restarted healthy children. Certain to happen, not a corner
+        case. A kill or hibernate request narrowed a 64-bit id to 32 bits,
+        which destroyed a *different live instance* instead of refusing the
+        request. A spawn's code was truncated at the first zero byte, and the
+        child ran a prefix while the parent was told the spawn succeeded --
+        harmless for source, silent corruption for bytecode. And a budget
+        written the way section 9.1 documents it, nested under `budget = {...}`,
+        was ignored: the child ran unbudgeted, which let a program escape its
+        own budget through a child and hang the host's step loop.
+
+        Also: a fault's detail was read from an instance the same function had
+        already freed; a capability wildcard could *widen* a grant instead of
+        narrowing it; querying a hibernated instance dereferenced a null; and
+        subtree kill recursed once per link where its own comment said it did
+        not (measured before fixing: not reachable on any machine that could
+        hold the instances, and fixed anyway so the code matches the comment).
+
+      - |
+        A reference could not be passed in a message, which is the shape a
+        router has.
+
+        A reference is an opaque object, so it went onto the wire as a plain
+        one-element array: a program could use an endpoint it was handed but
+        could not hand one on. The codec's resolver seam had an encode hook
+        for exactly this and nothing implemented it -- and could not have, since
+        the hook was only offered values the codec could not encode, and this
+        one it could. Asserted now on the wire and end to end through two
+        instances.
+
+      - |
+        A five-byte message could make the decoder ask for 131 MB.
+
+        A map header claiming a huge length pre-sized a table before any
+        bytes were read. Table pre-sizing is now clamped by what is actually
+        left in the buffer. Found by feeding the token cursor 400,000 hostile
+        inputs under AddressSanitizer, which also found an integer overflow
+        that only bites where `size_t` is 32 bits -- which is wasm32, one of
+        the platforms this ships for.
+
+      - |
+        `dv_resume` invented a timeout that had never elapsed.
+
+        A host naming a queue that was live, enabled and empty was told
+        `"timeout"` -- to a program that had passed no timeout, which would
+        then take that branch and index the nil it was handed. It now stays
+        parked and reports idle, which the host may retry. The CLI host had
+        always done this correctly, so two in-tree hosts of one protocol had
+        disagreed.
+
+      - |
+        Three CI jobs had been red on every run, and the tests that only ran
+        there were the reason to care.
+
+        The wasm job needed a wasmtime feature that had been renamed, the Rust
+        binding pinned a wasmtime four major versions back, and a
+        library-loading test needed a container it did not have. Asking the
+        same question of everything else found more: no contract test had ever
+        run under a sanitizer (which found undefined behaviour on its first
+        run), the token cursor had never seen malformed input, four of six
+        skipped tests were skipped for reasons that were factually wrong, and
+        `libdiluvium-swarm` -- named as a release artifact -- was never built
+        by anything. All six now run, and the swarm library's layer boundary is
+        checked at the linker rather than by inspection.
+
+    known_issues:
+      - |
+        **Hibernation is switched off by default, and this release recommends
+        leaving it off.**
+
+        `dvs_hibernate` refuses unless a host calls `dvs_allow_hibernation`
+        first. The reason is a defect the layer above cannot work around: the
+        thread record does not carry `u2.funcidx`, so an error raised in a
+        *restored* program unwinds from the stack base instead of the frame
+        that raised it, closing every to-be-closed slot in the thread and
+        writing the error object over the driver's own function slot. That is
+        memory corruption, not a wrong answer, and the ordinary
+        wake-then-error path reaches it.
+
+        The switch exists to make the defect unreachable rather than
+        documented. A deployment that keeps agent state at the application
+        level and spawns a fresh instance per unit of work never enters that
+        path, and pays little for it: `dv_new` plus `dv_load` of a small chunk
+        is comparable to `dv_new` plus `dv_restore` of a value graph. Sizing
+        for that: 42 KB per resident instance (`make footprint`).
+
+        Four smaller snapshot defects sit behind the same switch: a woken
+        instance's instruction budget is not re-armed, the swarm layer passes
+        no host-identity stamp so its own snapshots are not authenticated,
+        endpoints do not survive a snapshot, and the snapshot fuzzer's
+        field-validation coverage is currently hollow -- a digest added later
+        refuses every mutant before the field checks it was built to exercise,
+        so "0 crashes" there is true but proves less than it appears to.
+
+      - |
+        **The capability layer is not a security boundary in this release.**
+
+        It is a structuring device, and a good one: attenuation, subtree kill
+        and per-instance budgets all work and are tested. But a program that
+        holds one endpoint reference can forge another through the `debug`
+        library, so a deployment must treat every program it loads as trusted
+        -- written or templated by the operator, not generated by an untrusted
+        party and not accepting arbitrary code from a user.
+
+        Section 18.2 of `doc/Messaging.md` calls this profile A and states what
+        closing the gap requires.
+
+      - |
+        Two smaller sharp edges worth knowing.
+
+        Rebinding an endpoint token whose queue was destroyed returns the
+        destroyed handle and poisons the token permanently -- a program should
+        not `destroy` a bound endpoint queue and re-bind it. And section 10.7's
+        precondition that a snapshot capture involve a single thread is
+        documented but not enforced: nested coroutines are captured rather
+        than refused.
 
   - version: "5.5.1_build2"
     tag: v5.5.1_build2

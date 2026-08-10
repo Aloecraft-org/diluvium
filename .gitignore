@@ -29,3 +29,6 @@ release_dist
 # Python bytecode from script/
 __pycache__/
 *.pyc
+
+# Workflow agents get their own worktrees under here; they are scratch space.
+.claude/worktrees/

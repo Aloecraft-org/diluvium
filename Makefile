@@ -46,11 +46,18 @@ endif
 # Line editing is dline.c, which needs nothing but termios, so the test
 # build and the release build now use the same editor and neither links a
 # third-party library for it.
-TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_LINUX -Wl,-E -ldl
+#
+# PLATFORM_CFLAGS is factored out because it is not only the debug build that needs
+# it: the sanitizer targets link their own binaries, and hardcoding the Linux
+# variant in them broke the macOS job with 'ld: unknown options: -E'. Anything in
+# this file that invokes gcc directly must use this rather than repeat it.
+PLATFORM_CFLAGS = -DLUA_USE_LINUX -Wl,-E -ldl
 
 ifeq ($(UNAME_S),Darwin)
-    TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g -DLUA_USE_POSIX
+    PLATFORM_CFLAGS = -DLUA_USE_POSIX
 endif
+
+TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g $(PLATFORM_CFLAGS)
 
 TEST_BIN:=$(CURDIR)/dist/diluvium_debug
 TEST_RUNNER:=$(CURDIR)/test/run_tests.sh
@@ -252,12 +259,198 @@ build_static_libs: _wasi_static_lib _native_static_lib _portable_static_lib _was
 
 verify_wasm: _wasm_verify_step1 _wasm_verify_step2 _wasm_verify_step3
 
-test_build: _build_step0
+test_build: _build_step0 test_libs
 	gcc $(TEST_CFLAGS) -o $(TEST_BIN) $(CURDIR)/.data/onelua.c -lm
 
 failing_test_cases:
 	@echo 'Tests excluded from the default run (see test/run_tests.sh):'
 	@$(TEST_RUNNER) --list-skipped
+
+# Contract tests for the coroutine-hosted call driver. C rather than Lua
+# because the driver has no guest binding by design -- its callers are the
+# host ABI and, later, an opt-in task mode -- so there is nothing for the
+# .lua suite to call yet. Built with the same debug flags as the suite, since
+# 'api_check' is where a stack-arithmetic mistake surfaces as an abort
+# instead of silent corruption.
+# Ctrl-C must interrupt a runaway loop in both execution modes. Shell rather
+# than Lua because it needs a subprocess and a signal, and nothing else in the
+# suite presses Ctrl-C -- see the header of test/interrupt_check.sh for the
+# hazard this exists to catch.
+interrupt_check: test_build
+	@$(CURDIR)/test/interrupt_check.sh --bin $(TEST_BIN)
+
+# Contract tests for the instance ABI, written against dv.h alone -- which is
+# also a check that the header is sufficient on its own for a host.
+dv_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dv_check \
+	  $(CURDIR)/test/dv_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dv_check
+
+dtask_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dtask_check \
+	  $(CURDIR)/test/dtask_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dtask_check
+
+# No Lua at all: dhash.c is self-contained, and compiling it alone is part of
+# what is being checked -- the compiler links it too and must not pull the
+# runtime in.
+dhash_check:
+	@mkdir -p $(CURDIR)/dist
+	gcc -Wall -Wextra -O2 -std=c99 -I$(CURDIR)/src \
+	  -o $(CURDIR)/dist/dhash_check \
+	  $(CURDIR)/test/dhash_check.c $(CURDIR)/src/dhash.c
+	@$(CURDIR)/dist/dhash_check
+
+dsnap_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dsnap_check \
+	  $(CURDIR)/test/dsnap_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dsnap_check
+
+# The snapshot fuzzer's target: a snapshot in, a verdict out, as a subprocess --
+# because the thing being checked is that a malformed snapshot does not crash,
+# and a crash cannot be asserted from inside the process it happens in.
+# The swarm layer (11.5) is a separate library, so it is compiled separately --
+# which also enforces 4.1's boundary: dvs.c sees dv.h and dmsgpack.h and nothing
+# else, and a stray include of lua.h would fail here rather than be absorbed by
+# the amalgamation.
+dvs_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dvs_check \
+	  $(CURDIR)/test/dvs_check.c $(CURDIR)/.data/dvs.c \
+	  $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dvs_check
+
+# Every contract test under AddressSanitizer and UndefinedBehaviorSanitizer.
+#
+# These were outside the sanitizer sweep entirely, and that was a real hole rather
+# than an oversight worth shrugging at: the ASan job builds 'onelua.c' and runs the
+# *Lua* suite, so it covers the runtime a program reaches but not the C ABI a host
+# reaches -- and dvs.c is not in the amalgamation at all, so the newest code, with
+# the most raw malloc/free in the tree, had never met a sanitizer. Adding this found
+# undefined behaviour in the SHA-256 update on its first run.
+#
+# Not the ltests.h build: that installs its own allocator and would fight ASan for
+# the same job. TEST_CFLAGS is therefore not reused here.
+SAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g
+# detect_leaks is Linux-only: Apple's AddressSanitizer ships no LeakSanitizer, so
+# asking for it on Darwin is an error rather than a no-op. Leak coverage therefore
+# comes from the Linux job, and the Darwin run still checks addresses and undefined
+# behaviour -- stated here because "clean under the sanitizers" means slightly less
+# on one platform than the other and that should not be a surprise.
+SAN_LEAKS = detect_leaks=1
+ifeq ($(UNAME_S),Darwin)
+    SAN_LEAKS = detect_leaks=0
+endif
+SAN_ENV = ASAN_OPTIONS=$(SAN_LEAKS) \
+	  UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+
+sanitize_checks: _build_step0
+	@set -e; \
+	for t in dv_check dtask_check dshim_check dsnap_check; do \
+	  echo "=== $$t (asan+ubsan)"; \
+	  gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	    -I$(CURDIR)/.data -o $(CURDIR)/dist/$${t}_asan \
+	    $(CURDIR)/test/$$t.c $(CURDIR)/.data/onelua.c -lm; \
+	  $(SAN_ENV) $(CURDIR)/dist/$${t}_asan >/dev/null; \
+	done; \
+	echo "=== dvs_check (asan+ubsan)"; \
+	gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -o $(CURDIR)/dist/dvs_check_asan \
+	  $(CURDIR)/test/dvs_check.c $(CURDIR)/.data/dvs.c \
+	  $(CURDIR)/.data/onelua.c -lm; \
+	$(SAN_ENV) $(CURDIR)/dist/dvs_check_asan >/dev/null; \
+	echo "=== dhash_check (asan+ubsan)"; \
+	gcc $(SAN_CFLAGS) -I$(CURDIR)/.data -o $(CURDIR)/dist/dhash_check_asan \
+	  $(CURDIR)/test/dhash_check.c $(CURDIR)/.data/dhash.c; \
+	$(SAN_ENV) $(CURDIR)/dist/dhash_check_asan >/dev/null; \
+	echo "all contract tests clean under asan+ubsan"
+
+# The token cursor on hostile input, under the sanitizers.
+#
+# The cursor is a trust boundary: it is the parser the swarm layer uses to read
+# 'system/lifecycle' requests, and those are written by guest programs, which 9
+# treats as untrusted with respect to capability. The cross-check in dvs_check.c
+# feeds it bytes the *encoder* produced -- exactly the input that cannot be
+# malformed -- so nothing exercised it on anything hostile before this.
+#
+# Always with -fsanitize=address: without it the out-of-bounds assertions are
+# unenforced and the run means very little.
+# The upstream test C libraries, which 'attrib' needs.
+#
+# They were never built, and the test was skipped with a reason blaming a missing
+# C API harness -- which is linked and was never the problem. attrib covers
+# 'require', the package search paths and C module loading, and this fork ships a
+# modified loadlib.c, so that was real coverage lost behind a wrong sentence.
+#
+# Built best-effort: a platform where these will not build is a platform where
+# attrib skips, which the runner's guard decides by trying to load one rather than
+# by trusting this target to have succeeded.
+test_libs:
+	-@cd $(CURDIR)/test/libs && $(MAKE) LUA_DIR=$(CURDIR)/src >/dev/null 2>&1 \
+	  && cp -f lib2.so P1/ 2>/dev/null; true
+	@ls $(CURDIR)/test/libs/*.so >/dev/null 2>&1 \
+	  && echo "test C libraries built" \
+	  || echo "test C libraries did not build; attrib will skip"
+
+# libdiluvium-swarm, as an actual library.
+#
+# 4.1, 11.5 and 12.1 all call the swarm layer a separate library and 12.1 lists
+# 'diluvium-swarm-<version>-<triple>.{a,so,dylib,dll,wasm}' among the release
+# artifacts -- and nothing built one. dvs.c was only ever compiled as part of a test
+# binary, so the milestone's central structural claim had never been produced in the
+# form it claims. This is the archive; per-triple shared libraries belong to
+# build.yml and M8's packaging.
+#
+# The symbol check is the point as much as the archive is. Compiling without lua.h
+# shows the layer boundary holds for the *preprocessor*; checking that the object
+# references no 'lua' symbol shows it holds for the *linker*, which is the claim
+# actually being made -- that a host can link this against the instance ABI alone.
+# nm prefixes symbols with an underscore on Darwin, hence the optional one.
+build_swarm_lib: _build_step0
+	gcc -O2 -fPIC -c -I$(CURDIR)/.data -o $(CURDIR)/dist/dvs.o $(CURDIR)/.data/dvs.c
+	ar rcs $(CURDIR)/dist/libdiluvium-swarm.a $(CURDIR)/dist/dvs.o
+	@leaked=$$(nm -u $(CURDIR)/dist/dvs.o | awk '{print $$NF}' \
+	    | grep -E '^_?lua' || true); \
+	  if [ -n "$$leaked" ]; then \
+	    echo "the swarm layer references core Lua symbols, so 4.1's boundary is"; \
+	    echo "broken -- it must reach the runtime only through dv_* and the codec:"; \
+	    echo "$$leaked"; \
+	    exit 1; \
+	  fi
+	@echo "libdiluvium-swarm.a built; undefined symbols are dv_*, the msgpack"
+	@echo "cursor and libc only, so the layer boundary holds at link time"
+
+mp_cursor_fuzz: _build_step0
+	gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -o $(CURDIR)/dist/mp_cursor_fuzz \
+	  $(CURDIR)/test/mp_cursor_fuzz.c $(CURDIR)/.data/onelua.c -lm
+	@$(SAN_ENV) $(CURDIR)/dist/mp_cursor_fuzz
+
+snap_fuzz: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/snap_harness \
+	  $(CURDIR)/test/snap_harness.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/script/fuzz_snapshot.py --bin $(CURDIR)/dist/snap_harness
+
+dshim_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dshim_check \
+	  $(CURDIR)/test/dshim_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dshim_check
+
+# What a resident instance costs, printed rather than asserted. 18.2's profile A
+# drops hibernation, so density is bounded by the resident figure and that figure
+# had never been measured -- see the header of test/footprint.c for why this
+# asserts nothing. Built without ltests.h: that build installs its own allocator
+# and its bookkeeping would be counted as the instance's.
+footprint: _build_step0
+	gcc -Wall -Wextra -O2 -std=c99 $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -o $(CURDIR)/dist/footprint \
+	  $(CURDIR)/test/footprint.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/footprint
 
 # Run the suite. Keeps going after a failure and prints a summary, so one
 # broken test does not mask the state of the rest. The list of tests and the
@@ -274,7 +467,10 @@ test_ci: test_build
 test_one: test_build
 	@$(TEST_RUNNER) --bin $(TEST_BIN) $(T)
 
-.PHONY: test_build test_cases test_ci test_one failing_test_cases
+.PHONY: test_build test_cases test_ci test_one failing_test_cases \
+        dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
+        snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib \
+        footprint
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua

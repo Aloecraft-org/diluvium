@@ -1,0 +1,37 @@
+/*
+** dlibs.c
+** Registration for Diluvium's own guest libraries. See dlibs.h.
+*/
+
+#define dlibs_c
+
+#include "lprefix.h"
+
+#include "lua.h"
+
+#include "lauxlib.h"
+#include "dlibs.h"
+#include "dtask.h"
+#include "dmsgpack.h"
+#include "dqueue.h"
+#include "dendpoint.h"
+
+
+static const luaL_Reg diluvium_libs[] = {
+  {"msgpack", luaopen_dmsgpack},
+  {"queue", luaopen_dqueue},
+  {"endpoint", luaopen_dendpoint},
+  {NULL, NULL}
+};
+
+
+LUA_API void diluvium_openlibs (lua_State *L) {
+  /* Name the driver's continuation. Not a library, so it has no open function of
+     its own to do it, and it has to happen before any snapshot is loaded. */
+  diluvium_task_registerconts();
+  const luaL_Reg *lib;
+  for (lib = diluvium_libs; lib->name != NULL; lib++) {
+    luaL_requiref(L, lib->name, lib->func, 1);  /* set a global too */
+    lua_pop(L, 1);  /* 'luaL_requiref' leaves the module on the stack */
+  }
+}

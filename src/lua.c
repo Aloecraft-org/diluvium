@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <errno.h>
 #include <signal.h>
 
 #include "lua.h"
@@ -21,6 +22,8 @@
 #include "lualib.h"
 #include "analyze.h"
 #include "drepl.h"
+#include "dtask.h"
+#include "dlibs.h"
 #include "dline.h"
 #include "llimits.h"
 
@@ -117,6 +120,7 @@ static void print_usage_body (void) {
   "  -E        ignore environment variables\n"
   "  -W        turn warnings on\n"
   "  -h        this message\n"
+  "  --task    run coroutine-hosted, so the program can wait (not with -i)\n"
   "  --        stop handling options\n"
   "  -         stop handling options and execute stdin\n"
   "\n"
@@ -173,6 +177,65 @@ static int msghandler (lua_State *L) {
 
 
 /*
+** Diluvium: '--task' runs chunks through the coroutine-hosted driver in
+** dtask.c instead of 'lua_pcall', so a program can park. Off by default,
+** and deliberately so: making the top level yieldable is observable from
+** Lua, and the default path is the one the conformance suite holds to stock
+** behaviour. See dtask.h.
+*/
+static int task_mode = 0;
+
+
+/*
+** Diluvium: keep 'globalL' on whatever is actually running.
+**
+** 'laction' installs a debug hook on 'globalL', and a hook is per-state. In
+** task mode the chunk runs on a thread, so leaving 'globalL' on the main
+** state would install the hook where no code is executing and Ctrl-C would
+** stop interrupting anything at all -- silently, since the handler still
+** runs and still looks like it did something.
+*/
+static lua_State *mainL = NULL;
+
+static void task_running (lua_State *co, void *ud) {
+  (void)ud;
+  globalL = (co != NULL) ? co : mainL;
+}
+
+
+/*
+** Diluvium: the clock, which 8.3 puts on the host side rather than in the
+** runtime. This is the whole of what makes '--task' a reference host: a
+** program parks, the driver hands over a duration, and this decides.
+**
+** For a single-threaded CLI over local queues the honest answer to an
+** indefinite wait is that it can never be satisfied -- nothing else can write
+** while the program is parked -- so it reports a deadlock rather than hanging
+** forever. A finite wait really does let the time pass, because a program that
+** measures its own timeouts should see them.
+*/
+#if defined(LUA_USE_POSIX)
+#include <time.h>
+#endif
+
+static int task_waiting (lua_Integer ms, void *ud) {
+  (void)ud;
+  if (ms < 0)
+    return -1;  /* nothing here can write to a local queue while we are parked */
+#if defined(LUA_USE_POSIX)
+  {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)((ms % 1000) * 1000000L);
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
+      ;  /* a signal is not the end of the wait; SIGINT is handled by the hook */
+  }
+#endif
+  return 0;  /* the time passed and nothing arrived */
+}
+
+
+/*
 ** Interface to 'lua_pcall', which sets appropriate message function
 ** and C-signal handler. Used to run all chunks.
 */
@@ -181,10 +244,25 @@ static int docall (lua_State *L, int narg, int nres) {
   int base = lua_gettop(L) - narg;  /* function index */
   lua_pushcfunction(L, msghandler);  /* push message handler */
   lua_insert(L, base);  /* put it under function and args */
-  globalL = L;  /* to be available to 'laction' */
+  mainL = globalL = L;  /* to be available to 'laction' */
   setsignal(SIGINT, laction);  /* set C-signal handler */
-  status = lua_pcall(L, narg, nres, base);
+  if (!task_mode)
+    status = lua_pcall(L, narg, nres, base);
+  else {
+    /* The driver takes 'lua_pcall's stack contract, so only the call
+       changes. It reports a park separately from an error; nothing in the
+       runtime can park yet, so reaching that means the chunk yielded on
+       purpose and there is no host loop to resume it. When 'queue.wait'
+       lands, the wait-set drive loop belongs exactly here -- which is what
+       makes this mode the reference host rather than only a switch. */
+    switch (diluvium_task_call(L, narg, nres, base)) {
+      case DILUVIUM_TASK_OK:    status = LUA_OK; break;
+      case DILUVIUM_TASK_YIELD: /* FALLTHROUGH: report it as a failure */
+      default:                  status = LUA_ERRRUN; break;
+    }
+  }
   setsignal(SIGINT, SIG_DFL); /* reset C-signal handler */
+  globalL = mainL;
   lua_remove(L, base);  /* remove message handler from the stack */
   return status;
 }
@@ -346,6 +424,7 @@ static int handle_script (lua_State *L, char **argv) {
 #define has_e		8	/* -e */
 #define has_E		16	/* -E */
 #define has_h		32	/* -h (Diluvium) */
+#define has_task	64	/* --task (Diluvium) */
 
 
 /*
@@ -371,7 +450,14 @@ static int collectargs (char **argv, int *first) {
     if (argv[i][0] != '-')  /* not an option? */
         return args;  /* stop handling options */
     switch (argv[i][1]) {  /* else check option */
-      case '-':  /* '--' */
+      case '-':  /* '--' or a long option */
+        /* Diluvium: '--task' is the only long option, so this case does not
+           need a general parser yet. Anything else after '--' is still an
+           error, as upstream has it. */
+        if (strcmp(argv[i], "--task") == 0) {
+          args |= has_task;
+          break;
+        }
         if (argv[i][2] != '\0')  /* extra characters after '--'? */
           return has_error;  /* invalid option */
         /* if there is a script name, it comes after '--' */
@@ -689,6 +775,19 @@ static int pmain (lua_State *L) {
     print_usage_body();
     return 0;
   }
+  if ((args & has_task) && (args & has_i)) {
+    /* Diluvium: a parked prompt is undesigned -- what an interactive session
+       should show while a program waits is a real question and not one to
+       answer by accident. Refuse the combination rather than pick. */
+    l_message(progname, "'--task' and '-i' cannot be combined yet: "
+                        "an interactive session cannot park a program");
+    return 0;
+  }
+  if (args & has_task) {  /* Diluvium: run chunks coroutine-hosted */
+    task_mode = 1;
+    diluvium_task_sethook(task_running, NULL);
+    diluvium_task_setwait(task_waiting, NULL);
+  }
   if (args & has_v)  /* option '-v'? */
     print_version();
   if (args & has_E) {  /* option '-E'? */
@@ -699,6 +798,7 @@ static int pmain (lua_State *L) {
   else
     l_getenv = &getenv;
   luai_openlibs(L);  /* open standard libraries */
+  diluvium_openlibs(L);  /* Diluvium: msgpack, and what follows it */
   createargtable(L, argv, argc, script);  /* create table 'arg' */
   lua_gc(L, LUA_GCRESTART);  /* start GC... */
   lua_gc(L, LUA_GCGEN);  /* ...in generational mode */

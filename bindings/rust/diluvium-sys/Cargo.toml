@@ -1,0 +1,10 @@
+[package]
+name = "diluvium-sys"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Raw FFI declarations for the Diluvium instance ABI"
+links = "diluvium"
+build = "build.rs"
+
+[dependencies]
