@@ -1215,6 +1215,27 @@ static void a_budget_cannot_be_changed_mid_flight (void) {
 }
 
 
+/*
+** Passing NULL where a host should not.
+**
+** 'dv_load' read 'inst->flags' to pick the load mode two lines *above* its own
+** 'inst == NULL' check, so the guard could never fire: a host that passed NULL
+** crashed instead of being told. The rest of the ABI was scanned for the same shape
+** and this was the only one.
+*/
+static void null_arguments_are_refused_not_dereferenced (void) {
+  dv_instance *inst = dv_new(NULL);
+  ok(dv_load(NULL, (const uint8_t *)"return 1", 8, "=x") == DV_ERROR,
+     "dv_load with no instance is refused rather than crashing");
+  if (inst != NULL) {
+    ok(dv_load(inst, NULL, 0, "=x") == DV_ERROR, "and with no code");
+    dv_free(inst);
+  }
+  else
+    ok(0, "and with no code");
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -1226,6 +1247,7 @@ int main (void) {
   notification();
   parking();
   timeout_answer();
+  null_arguments_are_refused_not_dereferenced();
   closed_answer();
   a_spurious_resume_invents_nothing();
   blocking_push_from_guest();

@@ -1021,11 +1021,36 @@ static lua_Integer mp_to_integer (mp_cur *c, uint64_t n, int is_signed,
 static void mp_decode_value (mp_cur *c, int depth);
 
 
+/*
+** How large a table to pre-size for a claimed element count.
+**
+** Never the claim itself. Every element costs at least one byte of input, so a
+** container promising more elements than there are bytes left cannot be satisfied
+** by any input, and sizing for the claim just allocates on a stranger's word:
+** measured, the five bytes 'dd 08 00 00 00' -- an array header claiming 134 million
+** elements -- made the decoder allocate 131 MB before reading a single element, a
+** 26,000-fold amplification on a path that then failed with "truncated input". The
+** extreme claim of 2^31-1 fails safe with "not enough memory", so the usable range
+** is exactly the middle: large enough to hurt, small enough to succeed.
+**
+** This matters beyond a guest harming itself. Queue delivery decodes on the guest's
+** behalf, and 7.4's store-and-forward means those bytes can come from another
+** instance -- so one agent could make a peer balloon with a five-byte message, which
+** makes 6.2's bounded queues bound the wrong thing. The hint is only a hint, so
+** clamping it costs a correct decode nothing but one comparison.
+*/
+static int mp_size_hint (const mp_cur *c, size_t n) {
+  if (n > c->left)
+    n = c->left;
+  return (int)((n > (size_t)INT_MAX) ? 0 : n);
+}
+
+
 static void mp_decode_array (mp_cur *c, size_t n, int depth) {
   lua_State *L = c->L;
   size_t i;
   luaL_checkstack(L, 3, "msgpack: nesting too deep to decode");
-  lua_createtable(L, (int)((n > (size_t)INT_MAX) ? 0 : n), 0);
+  lua_createtable(L, mp_size_hint(c, n), 0);
   if (c->snap != NULL)
     mp_unsnap_register(c);  /* before the contents: a cycle needs this */
   for (i = 1; i <= n; i++) {
@@ -1039,7 +1064,9 @@ static void mp_decode_map (mp_cur *c, size_t n, int depth) {
   lua_State *L = c->L;
   size_t i;
   luaL_checkstack(L, 4, "msgpack: nesting too deep to decode");
-  lua_createtable(L, 0, (int)((n > (size_t)INT_MAX) ? 0 : n));
+  /* A pair is a key and a value, so two bytes at least: halve the room before
+     clamping rather than after, or a map claiming 'left' pairs still doubles. */
+  lua_createtable(L, 0, mp_size_hint(c, (n > c->left / 2) ? c->left / 2 : n));
   if (c->snap != NULL)
     mp_unsnap_register(c);  /* before the contents: a cycle needs this */
   for (i = 0; i < n; i++) {

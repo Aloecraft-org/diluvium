@@ -280,10 +280,14 @@ void dv_free (dv_instance *inst) {
 
 dv_status dv_load (dv_instance *inst, const uint8_t *code, size_t len,
                    const char *name) {
-  const char *mode = (inst->flags & DV_FLAG_TEXT_ONLY) ? "t" : "bt";
+  const char *mode;
   int st;
+  /* The guard has to come before the first read of 'inst', which it did not: the
+     'mode' initialiser dereferenced it two lines above this check, so a host that
+     passed NULL crashed rather than being told. */
   if (inst == NULL || code == NULL)
     return DV_ERROR;
+  mode = (inst->flags & DV_FLAG_TEXT_ONLY) ? "t" : "bt";
   if (inst->started) {
     set_error(inst, "dv_load: the program has already started");
     return DV_BUSY;

@@ -1,6 +1,7 @@
 /*
 ** mp_cursor_fuzz.c
-** The msgpack token cursor as a trust boundary.
+** The codec's two readers on hostile input: the token cursor, and the value
+** decoder's appetite for memory.
 **
 ** Why this exists. The cursor (diluvium_mp_open / _read / _skip / _field) is the
 ** parser the swarm layer uses to read 'system/lifecycle' requests, and those
@@ -34,6 +35,7 @@
 #include <limits.h>
 
 #include "lua.h"
+#include "lauxlib.h"
 #include "dmsgpack.h"
 
 
@@ -431,8 +433,90 @@ static void the_happy_path_still_works (void) {
 }
 
 
+/* ------------------------------------------ what a claimed length may cost */
+
+/*
+** A counting allocator, so the bound is asserted in bytes rather than guessed from
+** RSS. RSS depends on the system allocator's habits and would make this test a
+** coin-flip on some platform; the number of bytes Lua asks for does not.
+*/
+typedef struct { size_t live; size_t peak; } counter;
+
+static void *counting_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
+  counter *c = (counter *)ud;
+  if (nsize == 0) {
+    c->live -= osize;
+    free(ptr);
+    return NULL;
+  }
+  {
+    void *p = realloc(ptr, nsize);
+    if (p == NULL) return NULL;
+    c->live += nsize;
+    if (osize <= c->live) c->live -= osize;
+    if (c->live > c->peak) c->peak = c->live;
+    return p;
+  }
+}
+
+static int decode_bomb (lua_State *L) {
+  const char *b = (const char *)lua_touserdata(L, 1);
+  diluvium_msgpack_decode(L, b, (size_t)lua_tointeger(L, 2));
+  return 1;
+}
+
+static void a_claimed_length_costs_nothing_until_it_is_read (void) {
+  /*
+  ** 'dd 08 00 00 00' is an array header claiming 134,217,728 elements, in five
+  ** bytes. Sizing a table for the claim allocated 131 MB before reading a single
+  ** element -- a 26,000-fold amplification on a path that then failed with
+  ** "truncated input". It matters beyond a guest harming itself: queue delivery
+  ** decodes on the guest's behalf, and 7.4's store-and-forward means the bytes can
+  ** come from another instance, so a five-byte message could make a peer balloon
+  ** and 6.2's bounded queues would be bounding the wrong thing.
+  */
+  static const struct { const char *name; char b[5]; size_t n; } bombs[] = {
+    { "array32 claiming 134M elements",  { (char)0xdd, 0x08, 0x00, 0x00, 0x00 }, 5 },
+    { "array32 claiming 2^31-1",         { (char)0xdd, 0x7f, (char)0xff, (char)0xff, (char)0xff }, 5 },
+    { "map32 claiming 134M pairs",       { (char)0xdf, 0x08, 0x00, 0x00, 0x00 }, 5 },
+    { "array16 claiming 65535",          { (char)0xdc, (char)0xff, (char)0xff, 0, 0 }, 3 },
+  };
+  size_t i;
+  int all = 1;
+  for (i = 0; i < sizeof(bombs) / sizeof(bombs[0]); i++) {
+    counter cnt;
+    lua_State *L;
+    size_t baseline;
+    cnt.live = 0; cnt.peak = 0;
+    L = lua_newstate(counting_alloc, &cnt, 0);
+    if (L == NULL) { ok(0, "a counted state"); return; }
+    baseline = cnt.peak;
+    lua_pushcfunction(L, decode_bomb);
+    lua_pushlightuserdata(L, (void *)bombs[i].b);
+    lua_pushinteger(L, (lua_Integer)bombs[i].n);
+    lua_pcall(L, 2, 1, 0);        /* must fail; what matters is the cost */
+    /*
+    ** A megabyte of headroom over the bare state. The honest bound is "a few times
+    ** the input", but a fresh lua_State's own growth is the floor here, so this is
+    ** loose on purpose while still being 100x below the 131 MB it used to take.
+    */
+    printf("      %-34s peak %lu KB over baseline\n", bombs[i].name,
+           (unsigned long)((cnt.peak - baseline) / 1024));
+    if (cnt.peak > baseline + 1024 * 1024) {
+      printf("[FAIL] %s: allocated %lu KB above baseline from %lu input bytes\n",
+             bombs[i].name, (unsigned long)((cnt.peak - baseline) / 1024),
+             (unsigned long)bombs[i].n);
+      all = 0;
+    }
+    lua_close(L);
+  }
+  ok(all, "a claimed element count allocates nothing until elements are read");
+}
+
+
 int main (void) {
-  printf("=== the msgpack token cursor on hostile input ===\n");
+  printf("=== the msgpack codec on hostile input ===\n");
+  a_claimed_length_costs_nothing_until_it_is_read();
   the_happy_path_still_works();
   every_first_byte();
   hostile_lengths();
