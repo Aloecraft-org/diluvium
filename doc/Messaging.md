@@ -2246,6 +2246,34 @@ shim, and a type check for the validator. All were mutation-verified, and two of
 those mutations turned nothing red and exposed weak tests — including one of my own,
 written minutes earlier.
 
+*Then the same question was asked of everything else*, because three jobs failing for
+weeks is evidence about the project's habits and not only about three jobs. Four more
+things came out of it, and every one was a check that existed on paper and not in
+fact:
+
+- **No contract test had ever run under a sanitizer.** The ASan job builds
+  `onelua.c` and runs the *Lua* suite, so it covered the runtime a program reaches
+  and not the C ABI a host reaches — and `dvs.c` is not in the amalgamation at all,
+  so the newest code in the tree, with by far the most raw `malloc`/`free` in it, had
+  never met one. `make sanitize_checks` found undefined behaviour on its first run:
+  `lua_dump` signals end-of-dump by calling the writer with `(NULL, 0)` and that went
+  straight into `memcpy`, whose parameters are non-null whatever the length. The
+  digests were right, which is why nothing else noticed.
+- **The token cursor had never seen hostile input.** It is the parser the swarm layer
+  uses for `system/lifecycle`, guests write those, and 9 treats a guest as untrusted
+  with respect to capability — so it is a trust boundary. The only thing exercising it
+  fed it bytes the *encoder* produced, which is precisely the input that cannot be
+  malformed. `test/mp_cursor_fuzz.c` now runs 400,000 inputs under ASan and found an
+  integer overflow reachable only where `size_t` is 32 bits, which is wasm32.
+- **`dvs_spawn` was a public struct no public function took**, with a comment saying
+  it was handed to the host. The information behind that claim was genuinely missing:
+  the instance ABI has `dv_set_budget` and no getter, so a host could not learn the
+  budget an instance was configured with. Now `dvs_budget` and `dvs_caps`.
+- **Four of the six skip reasons in `test/run_tests.sh` were factually wrong**, and
+  three of the tests pass once the sentence stops being believed. 47 tests run now
+  instead of 44. `attrib` is the one worth having, because it covers `require` and C
+  module loading against a fork that ships a modified `loadlib.c`.
+
 ---
 
 ## 14. Test plan
@@ -2538,6 +2566,49 @@ artifact between sessions that do not share context.
   restate the rule with the sharper edge: mutation-verify a test *when you write it*,
   not when you next suspect it, because the author is the least likely person to
   notice that it passes for the wrong reason.
+- **A stated reason goes stale silently; an evaluated one cannot.** Four of the six
+  skip reasons in `test/run_tests.sh` were factually wrong. `api` and `attrib` both
+  blamed a missing C API harness that is in fact linked — `T` is available in the
+  debug build. `literals` blamed musl while passing on glibc, which is what CI runs,
+  so it was skipped everywhere for a problem occurring somewhere this project does not
+  test. `main` blamed static linking; it actually fails because `main.lua:82` reads
+  the version with `string.match(out, "Lua (%d+%.%d+%.%d+)")` and this fork's banner
+  says `diluvium (lua) X.Y.Z`, so `release` is nil. Three of the tests pass once the
+  sentence stops being believed, and `attrib` covers `require` and C module loading
+  against a modified `loadlib.c`. The table now takes a guard *function*, evaluated
+  every run: `attrib`'s tries to load `lib1.so` rather than looking for the file,
+  because a `.so` that exists and will not load is what a file test gets wrong. The
+  general rule: a precondition expressed as prose is a claim, and claims rot; expressed
+  as code it is a measurement.
+- **An overflow that is unreachable on your machine is not unreachable.** The token
+  cursor's `_skip` counted owed values and waited to run out of bytes, which is
+  correct on a 64-bit `size_t` and wrong on a 32-bit one — and wasm32 is ILP32, which
+  this project ships. Two `array32` headers drive the count to exactly 2^32, it wraps
+  to zero, and zero is how the loop reports success. It is now bounded by the bytes
+  remaining, which makes the overflow unreachable at every width. Worth stating twice
+  over: `dv_layout` exists in this project *specifically because* wasm32 is ILP32, and
+  the same fact still got missed one layer down. When a project has already written
+  down that a platform has different integer widths, every width-dependent piece of
+  arithmetic is suspect, not only the ones about struct layout.
+- **A public struct that no public function takes is a false claim about the API.**
+  `dvs_spawn` sat in `dvs.h` saying it was "handed to the host so it can size its own
+  context", and the host never saw it. The useful part was that it pointed at a real
+  gap: the instance ABI has `dv_set_budget` and no getter, so the budget was
+  genuinely unobtainable. Fixed as `dvs_budget` and `dvs_caps` rather than by changing
+  the host vtable a second time — the vtable correction was right for its reasons, and
+  changing it again to paper over a missing accessor would have been moving the
+  goalposts.
+- **Repeating a platform fact instead of reading it.** I hardcoded
+  `-DLUA_USE_LINUX -Wl,-E -ldl` into the new sanitizer targets and turned the macOS
+  job red with `ld: unknown options: -E`, in a Makefile that had selected those flags
+  per platform since long before I touched it. The same shape as the bug I was fixing
+  at the time. Now `PLATFORM_CFLAGS`, and the Darwin path is checkable without a Mac:
+  `make -n <target> UNAME_S=Darwin` shows which flags it would use.
+- **`git checkout <file>` on uncommitted work, again.** Second time in this project.
+  I ran it to undo a deliberate mutation and destroyed the surrounding real edits with
+  it. The rule that actually prevents this is not "be careful with checkout" but
+  "commit before mutating": a mutation test needs a clean baseline to return to, and
+  the cheap way to have one is a commit, not memory.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,
