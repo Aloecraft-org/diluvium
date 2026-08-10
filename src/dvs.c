@@ -44,6 +44,30 @@
 
 
 /*
+** What a spawn asked for, as 'build' needs it.
+**
+** Internal. It was in dvs.h with a comment saying it was "handed to the host so it
+** can size its own context", and that was simply false: the vtable's 'create'
+** receives (ud, id, inst) and no public function takes one of these. A public
+** struct that nothing public accepts is a reader's dead end, so it moved here.
+** What a host actually wanted from it -- the budget, the capability list -- is now
+** 'dvs_budget' and 'dvs_caps'.
+**
+** It no longer carries the capability list either. 'setcaps' has already put those
+** on the slot by the time 'build' runs, so a second copy in the request was a field
+** 'dvs_root' never filled in and nothing ever read: two ways to say one thing, one
+** of them wrong. Removed rather than populated.
+*/
+typedef struct dvs_spawn {
+  const char *code;             /* the program's source or bytecode */
+  size_t code_len;
+  uint64_t instructions;        /* budget, 0 for none */
+  uint64_t memory_kb;
+  int wake_on_message;
+} dvs_spawn;
+
+
+/*
 ** One message held for a non-resident instance. The queue is recorded by *name*
 ** rather than by handle, because handles belong to a 'dv_instance' and the whole
 ** point is that there is not one right now -- the instance the message is delivered
@@ -215,6 +239,30 @@ static int implies (const char *held, const char *want) {
   if (n > 0 && held[n - 1] == '*')
     return strncmp(held, want, n - 1) == 0;
   return strcmp(held, want) == 0;
+}
+
+
+dvs_status dvs_budget (dvs_swarm *sw, dvs_id id, uint64_t *instructions,
+                       uint64_t *memory_kb) {
+  dvs_slot *sl = find(sw, id);
+  if (sl == NULL)
+    return DVS_UNKNOWN;
+  if (instructions != NULL) *instructions = sl->instructions;
+  if (memory_kb != NULL) *memory_kb = sl->memory_kb;
+  /* Answered for a cached instance too: the budget outlives residency, and a host
+     deciding whether it can afford to wake something needs it precisely then. */
+  return DVS_OK;
+}
+
+
+size_t dvs_caps (dvs_swarm *sw, dvs_id id, const char **out, size_t max) {
+  dvs_slot *sl = find(sw, id);
+  size_t i;
+  if (sl == NULL)
+    return 0;
+  for (i = 0; i < sl->ncaps && i < max; i++)
+    out[i] = sl->caps[i];
+  return sl->ncaps;              /* the true count, so max == 0 sizes a buffer */
 }
 
 
@@ -813,8 +861,6 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
   memset(&req, 0, sizeof(req));
   req.code = code;
   req.code_len = strlen(code);
-  req.caps = capv;
-  req.ncaps = (size_t)ncaps;
   req.instructions = insns;
   req.memory_kb = mem;
   req.wake_on_message = field_bool(msg, len, "wake_on_message");

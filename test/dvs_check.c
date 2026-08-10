@@ -818,6 +818,80 @@ static void pushing_to_a_dead_instance_is_gone (void) {
 }
 
 
+/*
+** What a host can learn about an instance it was handed.
+**
+** These exist because 'dvs_spawn' was a public struct whose comment said it was
+** "handed to the host so it can size its own context" -- and no public function
+** took one, so the host never saw it. The information was genuinely missing rather
+** than merely mislabelled: the instance ABI has 'dv_set_budget' but no getter, so a
+** host had no way at all to learn the budget an instance was configured with.
+*/
+static void a_host_can_read_an_instance_s_budget_and_capabilities (void) {
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle", "queue:work/*", "queue:log" };
+  static const char *src = "local q = queue.declare('hold', {cap = 2}) "
+                           "queue.wait({q})";
+  uint64_t insns = 0, mem = 0;
+  const char *got[8];
+  size_t n;
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, src, strlen(src), caps, 3, 5000000, 4096, &root) != DVS_OK) {
+    printf("      (%s)\n", dvs_last_error(sw));
+    ok(0, "a budgeted root starts");
+    dvs_free(sw);
+    return;
+  }
+  ok(dvs_budget(sw, root, &insns, &mem) == DVS_OK, "the budget reads back");
+  okf(insns == 5000000, "with the instruction count it was given",
+      (long)insns, 5000000);
+  okf(mem == 4096, "and the memory limit", (long)mem, 4096);
+  /* Either pointer may be NULL, because a host usually wants one of the two. */
+  ok(dvs_budget(sw, root, NULL, NULL) == DVS_OK,
+     "and both outputs are optional");
+  ok(dvs_budget(sw, 9999, &insns, &mem) == DVS_UNKNOWN,
+     "an unknown handle is unknown, not zero");
+
+  /* The count comes back even when nothing is copied, so a caller can size. */
+  okf((long)dvs_caps(sw, root, NULL, 0), "asking with max 0 gives the count",
+      (long)dvs_caps(sw, root, NULL, 0), 3);
+  n = dvs_caps(sw, root, got, 8);
+  okf(n == 3, "and the names copy out", (long)n, 3);
+  ok(n == 3 && strcmp(got[0], "lifecycle") == 0 &&
+     strcmp(got[1], "queue:work/*") == 0 && strcmp(got[2], "queue:log") == 0,
+     "in the order they were granted, so an audit log is reproducible");
+  /* A short buffer truncates rather than overflowing, and still reports the truth. */
+  got[1] = NULL;
+  okf(dvs_caps(sw, root, got, 1) == 3,
+      "a buffer too small still reports the real count",
+      (long)dvs_caps(sw, root, got, 1), 3);
+  ok(got[1] == NULL, "and writes no more than it was allowed");
+
+  /*
+  ** The budget survives hibernation, which is the case that motivated making this a
+  ** query rather than an argument to 'create': a host deciding whether it can
+  ** afford to wake a cached instance needs the number precisely when there is no
+  ** instance to ask.
+  */
+  /* One step first: 'dv_snapshot' requires a *parked* instance, and a root that
+     has not been driven yet has not reached its 'queue.wait'. Refusing to snapshot
+     it is correct, so the step is the test's obligation and not a workaround. */
+  ok(dvs_hibernate(sw, root) != DVS_OK,
+     "an instance that has not run yet cannot be hibernated, since it is not "
+     "parked");
+  dvs_step(sw);
+  ok(dvs_hibernate(sw, root) == DVS_OK, "once parked, the instance hibernates");
+  ok(!dvs_resident(sw, root), "and is not resident");
+  insns = 0;
+  ok(dvs_budget(sw, root, &insns, NULL) == DVS_OK && insns == 5000000,
+     "its budget is still readable while it is only bytes");
+  okf((long)dvs_caps(sw, root, got, 8), "as are its capabilities",
+      (long)dvs_caps(sw, root, got, 8), 3);
+  dvs_free(sw);
+}
+
+
 int main (void) {
   printf("=== the msgpack token cursor ===\n");
   the_cursor_agrees_with_the_encoder();
@@ -830,6 +904,8 @@ int main (void) {
   a_program_without_the_capability_is_not_drained();
   killing_a_parent_kills_the_subtree();
   a_child_cannot_kill_its_supervisor();
+
+  a_host_can_read_an_instance_s_budget_and_capabilities();
 
   printf("\n=== the snapshot cache and wake_on_message (8.4, 9.5) ===\n");
   pushing_to_a_dead_instance_is_gone();

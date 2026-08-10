@@ -68,24 +68,6 @@ const char *dvs_status_name (dvs_status s);
 
 
 /*
-** What a spawn asked for, handed to the host so it can size its own context.
-**
-** The capability list is the *attenuated* one -- what the child will actually
-** hold, after 9.3's check against the parent -- so a host that logs it is logging
-** the truth rather than the request.
-*/
-typedef struct dvs_spawn {
-  const char *code;             /* the program's source or bytecode */
-  size_t code_len;
-  const char *const *caps;      /* the child's capabilities */
-  size_t ncaps;
-  uint64_t instructions;        /* budget, 0 for none */
-  uint64_t memory_kb;
-  int wake_on_message;
-} dvs_spawn;
-
-
-/*
 ** The host vtable (11.5). Everything above it is portable C; everything below is
 ** the host's.
 **
@@ -228,6 +210,41 @@ size_t dvs_cached_size (dvs_swarm *sw, dvs_id id);
 */
 dvs_status dvs_push (dvs_swarm *sw, dvs_id id, const char *queue,
                      const void *msg, size_t len);
+
+
+/* ------------------------------------------------------ asking about an id -- */
+
+/*
+** The budget an instance was given, as opposed to what it has used.
+**
+** This exists because the instance ABI has no getter: 'dv_set_budget' sets one,
+** 'dv_usage' reports consumption, and 'dv_exceeded' reports the verdict, but
+** nothing reads back the limit. A host sizing its own context around an instance
+** -- reserving memory for it, deciding whether waking a cached one is affordable --
+** needs the number it was configured with, and the swarm is the only thing holding
+** it.
+**
+** A query rather than an argument to 'create'. The host vtable was already
+** corrected once (11.5) and its signature is right for the reasons given there; the
+** information was simply missing, and a host wants it at moments other than
+** creation anyway. Either output pointer may be NULL.
+*/
+dvs_status dvs_budget (dvs_swarm *sw, dvs_id id, uint64_t *instructions,
+                       uint64_t *memory_kb);
+
+/*
+** Copy an instance's capability names into 'out', returning how many there are.
+**
+** Writes at most 'max' of them and returns the true count, so a caller can size a
+** buffer by asking with max == 0. The pointers are the swarm's and stay valid until
+** that instance dies.
+**
+** For a host that logs or audits. 'dvs_holds' answers a yes-or-no question, which
+** is the right shape for enforcement and the wrong one for "write down what this
+** agent was allowed to do" -- and 9.3's attenuation is only auditable if the set
+** can be read out.
+*/
+size_t dvs_caps (dvs_swarm *sw, dvs_id id, const char **out, size_t max);
 
 
 /*
