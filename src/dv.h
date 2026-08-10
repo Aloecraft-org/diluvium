@@ -238,6 +238,75 @@ dv_status dv_resume (dv_instance *inst, dv_queue_id fired);
 dv_status dv_waitset_get (dv_instance *inst, dv_waitset *out);
 
 
+/* ------------------------------------------------------------- endpoints -- */
+
+/*
+** An endpoint is a queue handle whose far end somebody else owns.
+**
+** The guest never builds a reference: it receives one in a message as msgpack
+** ext 0x02 and hands it to 'endpoint.bind'. What the bytes mean is entirely
+** yours -- an index into your instance table, a socket address, a name to look
+** up later. The runtime carries them and does not read them.
+**
+** The reason this is so thin is 7.4: because a push only ever reports whether a
+** message was accepted into the next hop, every richer convention -- broadcast,
+** store-and-forward, retry, discovery -- is expressible as an ordinary Diluvium
+** program. Adding any of them here would freeze one topology into the binary.
+*/
+
+/*
+** Answer a guest that is binding a reference. Set '*token' to whatever you want
+** to identify the endpoint by and return 1, or return 0 to refuse.
+**
+** A refused bind raises in the guest, because it asked for one specific
+** destination and did not get it. That is different from a push to a
+** bound-but-dead endpoint, which is the ordinary DV_QUEUE_GONE.
+*/
+void dv_set_endpoint_handler (dv_instance *inst,
+                              int (*bind)(void *ud, const uint8_t *ref,
+                                          size_t len, uint32_t *token),
+                              void *ud);
+
+/*
+** The queue handle a token was bound to, or 0 if nothing bound it.
+**
+** This is how you find the buffer to drain: an endpoint is a real bounded local
+** queue, so 'dv_queue_pop' on this handle is how messages leave the instance.
+** The buffer being bounded is the point -- 7.5 requires accepting a message to
+** be O(1) and never to wait, so a host-side buffer that grew without limit or
+** waited on a network would break the guarantee rather than extend it.
+*/
+/*
+** Pre-authorise a reference, mapping bytes to a token, with no callback.
+**
+** Prefer this. A host almost always knows what its own references mean, so
+** saying it up front is simpler than answering a question later -- and for a host
+** reaching this ABI through WebAssembly it is the only option, because a C
+** function pointer there is an index into the module's function table and
+** installing one from outside means exporting a mutable table and reserving a
+** slot. Found while writing the wasmtime binding, which could not use the
+** callback at all.
+**
+** Registered references are consulted before any handler set by
+** 'dv_set_endpoint_handler', so the two compose.
+*/
+void dv_endpoint_allow (dv_instance *inst, const uint8_t *ref, size_t len,
+                        uint32_t token);
+
+dv_queue_id dv_endpoint_queue (dv_instance *inst, uint32_t token);
+
+/*
+** Say that an endpoint's far end has closed. Pushes to it answer DV_QUEUE_GONE
+** from then on, immediately.
+**
+** Once gone it stays gone. An endpoint names one particular far end; something
+** new at the same address is a new endpoint, and letting a handle revive would
+** make "gone" mean "not right now" -- a weaker promise that a program could not
+** act on.
+*/
+dv_status dv_endpoint_close (dv_instance *inst, dv_queue_id id);
+
+
 /* ---------------------------------------------------------------- layout -- */
 
 /*

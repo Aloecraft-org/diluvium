@@ -41,6 +41,8 @@ static const char DQ_STATE = 0;
 #define DQ_HEAD		"head"     /* 1-based slot of the oldest message */
 #define DQ_COUNT	"count"
 #define DQ_ITEMS	"items"    /* [1..capacity], msgpack strings */
+#define DQ_ENDPOINT	"endpoint" /* far end owned by somebody else */
+#define DQ_GONE		"gone"     /* ...and it has closed */
 
 #define DQ_DEFAULT_CAP	64
 
@@ -243,6 +245,10 @@ static int dq_declare (lua_State *L) {
   lua_setfield(L, -2, DQ_EXPORTED);
   lua_pushboolean(L, 1);
   lua_setfield(L, -2, DQ_ENABLED);
+  lua_pushboolean(L, 0);
+  lua_setfield(L, -2, DQ_ENDPOINT);
+  lua_pushboolean(L, 0);
+  lua_setfield(L, -2, DQ_GONE);
   dq_set_int(L, lua_gettop(L), DQ_HEAD, 1);
   dq_set_int(L, lua_gettop(L), DQ_COUNT, 0);
   lua_createtable(L, (cap > 4096) ? 0 : (int)cap, 0);
@@ -451,6 +457,17 @@ static int dq_push (lua_State *L) {
 
   dq_get(L, id);
   q = lua_gettop(L);
+
+  /* An endpoint whose far end has closed answers "gone", immediately and
+     without waiting on anything (7.3). Checked before capacity and before
+     encoding: there is no point encoding a message for a destination that has
+     already gone, and a broadcaster fanning out must not be slowed by one dead
+     peer. */
+  if (dq_field_bool(L, q, DQ_GONE)) {
+    lua_pushboolean(L, 0);
+    lua_pushliteral(L, "gone");
+    return 2;
+  }
 
   /* A disabled queue rejects, and that is a normal outcome and not an error
      (6.4): a program going down should reject cleanly rather than accept
@@ -767,6 +784,7 @@ static int dq_info (lua_State *L) {
   lua_getfield(L, q, DQ_DIRECTION);  lua_setfield(L, -2, "direction");
   lua_pushinteger(L, dq_field_int(L, q, DQ_COUNT));
   lua_setfield(L, -2, "len");
+  lua_getfield(L, q, DQ_ENDPOINT);   lua_setfield(L, -2, "endpoint");
   return 1;
 }
 
@@ -833,6 +851,77 @@ LUA_API lua_Integer diluvium_queue_find (lua_State *L, const char *name) {
 }
 
 
+LUA_API lua_Integer diluvium_queue_declare (lua_State *L, const char *name,
+                                            lua_Integer capacity, int on_full,
+                                            int exported, int endpoint) {
+  lua_Integer id;
+  int q;
+  if (capacity <= 0)
+    capacity = DQ_DEFAULT_CAP;
+  dq_state(L);
+  lua_getfield(L, -1, "names");
+  if (lua_getfield(L, -1, name) != LUA_TNIL) {
+    lua_pop(L, 3);
+    return 0;  /* the name is taken */
+  }
+  lua_pop(L, 1);
+  id = (lua_Integer)lua_rawlen(L, -2) + 1;
+  lua_createtable(L, 0, 11);
+  q = lua_gettop(L);
+  lua_pushstring(L, name);          lua_setfield(L, q, DQ_NAME);
+  dq_set_int(L, q, DQ_CAP, capacity);
+  lua_pushstring(L, dq_full_names[on_full]);  lua_setfield(L, q, DQ_FULL);
+  dq_set_int(L, q, DQ_POLICY, on_full);
+  lua_pushliteral(L, "both");       lua_setfield(L, q, DQ_DIRECTION);
+  lua_pushboolean(L, exported);     lua_setfield(L, q, DQ_EXPORTED);
+  lua_pushboolean(L, 1);            lua_setfield(L, q, DQ_ENABLED);
+  lua_pushboolean(L, endpoint);     lua_setfield(L, q, DQ_ENDPOINT);
+  lua_pushboolean(L, 0);            lua_setfield(L, q, DQ_GONE);
+  dq_set_int(L, q, DQ_HEAD, 1);
+  dq_set_int(L, q, DQ_COUNT, 0);
+  lua_createtable(L, (capacity > 4096) ? 0 : (int)capacity, 0);
+  lua_setfield(L, q, DQ_ITEMS);
+  lua_rawseti(L, -3, id);
+  lua_pushinteger(L, id);
+  lua_setfield(L, -2, name);
+  lua_pop(L, 2);
+  return id;
+}
+
+
+LUA_API int diluvium_queue_is_endpoint (lua_State *L, lua_Integer id) {
+  int r;
+  if (dq_classify(L, id) != 1)
+    return 0;
+  dq_get(L, id);
+  r = dq_field_bool(L, lua_gettop(L), DQ_ENDPOINT);
+  lua_pop(L, 1);
+  return r;
+}
+
+
+LUA_API int diluvium_queue_is_gone (lua_State *L, lua_Integer id) {
+  int r;
+  if (dq_classify(L, id) != 1)
+    return 1;  /* a handle that is not there is as gone as it gets */
+  dq_get(L, id);
+  r = dq_field_bool(L, lua_gettop(L), DQ_GONE);
+  lua_pop(L, 1);
+  return r;
+}
+
+
+LUA_API int diluvium_queue_set_gone (lua_State *L, lua_Integer id, int gone) {
+  if (dq_classify(L, id) != 1)
+    return 0;
+  dq_get(L, id);
+  lua_pushboolean(L, gone);
+  lua_setfield(L, -2, DQ_GONE);
+  lua_pop(L, 1);
+  return 1;
+}
+
+
 LUA_API int diluvium_queue_push_bytes (lua_State *L, lua_Integer id,
                                        const char *s, size_t len) {
   lua_Integer cap, count, head, policy;
@@ -841,6 +930,10 @@ LUA_API int diluvium_queue_push_bytes (lua_State *L, lua_Integer id,
     return DILUVIUM_Q_UNKNOWN;
   dq_get(L, id);
   q = lua_gettop(L);
+  if (dq_field_bool(L, q, DQ_GONE)) {
+    lua_pop(L, 1);
+    return DILUVIUM_Q_GONE;
+  }
   if (!dq_field_bool(L, q, DQ_ENABLED)) {
     lua_pop(L, 1);
     return DILUVIUM_Q_DISABLED;

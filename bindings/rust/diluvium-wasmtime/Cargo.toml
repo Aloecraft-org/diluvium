@@ -1,0 +1,16 @@
+[package]
+name = "diluvium-wasmtime"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Host a Diluvium program as a sandboxed wasm module under wasmtime"
+
+[dependencies]
+wasmtime = { version = "27", default-features = false, features = ["cranelift", "runtime", "std"] }
+wasmtime-wasi = "27"
+rmp-serde = "1"
+serde = { version = "1", features = ["derive"] }
+anyhow = "1"
+
+[dev-dependencies]
+serde = { version = "1", features = ["derive"] }

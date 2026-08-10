@@ -116,9 +116,30 @@ LUA_API void diluvium_queue_fire (lua_State *co, lua_Integer id, int why);
 #define DILUVIUM_Q_EMPTY	3
 #define DILUVIUM_Q_DROPPED	4
 #define DILUVIUM_Q_UNKNOWN	5
+#define DILUVIUM_Q_GONE		6
 
 /* Name to handle, or 0 when there is no such queue. */
 LUA_API lua_Integer diluvium_queue_find (lua_State *L, const char *name);
+
+/*
+** Declare a queue from C, for the endpoint library.
+**
+** 6.1 says queues are declared by the guest and never by the host, and that
+** still holds: this is reached only through 'endpoint.bind', which the *guest*
+** calls. What the host supplies is the answer to "where does this reference
+** point", never the decision to create a queue.
+**
+** 'on_full' is a DQ policy index, 'endpoint' marks the queue as having a far end
+** somebody else owns. Returns the handle, or 0 if the name is taken.
+*/
+LUA_API lua_Integer diluvium_queue_declare (lua_State *L, const char *name,
+                                            lua_Integer capacity, int on_full,
+                                            int exported, int endpoint);
+
+/* Is this handle an endpoint, and is its far end still there? */
+LUA_API int diluvium_queue_is_endpoint (lua_State *L, lua_Integer id);
+LUA_API int diluvium_queue_is_gone (lua_State *L, lua_Integer id);
+LUA_API int diluvium_queue_set_gone (lua_State *L, lua_Integer id, int gone);
 
 /* One of the DILUVIUM_Q_* codes above. */
 LUA_API int diluvium_queue_push_bytes (lua_State *L, lua_Integer id,

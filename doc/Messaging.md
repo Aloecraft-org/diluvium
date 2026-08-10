@@ -115,13 +115,25 @@ Measure and report stripped object size for each component on the musl and wasm
 targets, via `script/build_stats.sh`, which already fails over a threshold. Wire a
 gate per milestone so a budget overrun is refused rather than merely logged.
 
-Working targets, to be revised with real numbers:
+Working targets. Revised at M5 with real numbers, which is what this section
+said would happen:
 
-- msgpack codec: under 25 KB
-- queue subsystem: under 15 KB
-- instance C ABI shim: under 10 KB
-- hibernate: under 30 KB
-- swarm layer: separate library, not counted against the above
+| Component | Target | Measured (linux-x86_64, `-O3`, stripped text) |
+|---|---|---|
+| msgpack codec | under 25 KB | 13.5 KB |
+| queue subsystem | under **20 KB** | 17.6 KB — `dqueue.c` 15.0 + `dendpoint.c` 2.6 |
+| instance C ABI | under 10 KB | 6.1 KB |
+| hibernate | under 30 KB | not built |
+| swarm layer | separate library, not counted | not built |
+
+The queue target moved from 15 KB, and the reason is worth recording rather than
+quietly adjusting: it was set against 6, which describes queues alone. What
+arrived with them was the byte-level host path — `push_bytes`, `peek_bytes`,
+`stat`, the notification hook — which 6 does not mention because it is 11's
+concern, and endpoints, which 7 treats separately. Splitting `dendpoint.c` out of
+`dqueue.c` was worth doing on its own merits and does not change the total, so the
+honest move was to revise the number rather than shuffle bytes between files to
+meet it.
 
 The total is roughly 8% against the advertised ~1 MiB runtime. That is the reason
 the codec is compiled in rather than vendored per host: one copy serves the Lua
@@ -1446,11 +1458,49 @@ the budget will bind there rather than later. Splitting the host-facing half of
 costs nothing to defer until the number says so. msgpack is 13.5 KB against 25;
 the driver 1.7 KB.
 
-**M5: endpoints and delivery model**
-`endpoint.bind`, `endpoint.status`, ext 0x02 with a live resolver, `"gone"`
-semantics.
-Accept when: a push to a dead endpoint returns `"gone"` immediately, and a relay
-agent forwarding between two instances works with no runtime support for routing.
+**M5: endpoints and delivery model** — done.
+`src/dendpoint.c`, its own file both because it is a different concern from a
+buffer and because `dqueue.c` had reached its budget.
+
+An endpoint is an ordinary bounded queue with one extra property: its far end can
+close, and once it has, a push answers `"gone"` immediately. **Liveness is a flag
+the host maintains, not a callback the runtime makes** — the host is the only
+thing that knows when a far end died, and a call in the push path would put
+whatever it does inside the cheapest operation in the system. That is what keeps
+7.5's requirement literal: accepting is O(1) and never depends on the destination
+being reachable.
+
+Ext 0x02 gets the resolver seam 4.2 promised, and the seam is real rather than
+notional: with the endpoint library loaded a reference in a message arrives as an
+opaque reference object; without it the same bytes decode to an ext value, so an
+embedder linking only the codec sees no error. Both halves are tested, in
+different places — the resolved path in `test_msgpack.lua`, the opaque fallback in
+`bindings/js`, whose codec has no resolver at all.
+
+A reference cannot be forged. There is no constructor anywhere, its metatable is
+hidden, and a lookalike is refused by name — so 7.3's "never constructed by the
+guest" is structural rather than a convention.
+
+Accepted on: a push to a closed endpoint answering `"gone"` immediately, from both
+the guest and the host side, without raising; `endpoint.status` reporting live
+then gone; a refused bind raising, which is deliberately *different* from a push
+to a dead endpoint — the program asked for one specific destination and did not
+get it; and **a relay forwarding between three instances with no runtime support
+for routing at all.** In that test nothing in the runtime knows the other
+instances exist: the sender pushes to an endpoint, the host moves bytes, the relay
+is an ordinary program holding two handles, and a hop count proves each message
+really went through it. That is 7.4 demonstrated instead of asserted.
+
+`dv_endpoint_allow` is new, and was found by writing the wasmtime binding: the
+bind handler was a C function pointer, and in wasm a function pointer is an index
+into the module's function table, so there is no way to hand one in from outside.
+A host can now pre-authorise a reference instead, mapping bytes to a token up
+front. It is the better shape for every host — a host almost always knows what its
+own references mean — and the callback remains for one that wants to resolve
+lazily. Registered references are consulted first, so the two compose.
+
+Not done: `"gone"` for a non-resident instance with `wake_on_message`, which is
+9.5 and belongs to the swarm layer.
 
 **M6: hibernate**
 Accessor shim, precondition checks, value graph with backreferences, closures and

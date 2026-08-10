@@ -156,6 +156,29 @@ jobs:
         working-directory: bindings/rust
         run: cargo run --quiet --example echo
 
+  wasmtime-binding:
+    name: wasmtime binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - name: Build
+        working-directory: bindings/rust
+        run: cargo build -p diluvium-wasmtime --examples
+
+      # Needs the wasi-sdk in a container, so this is the only place the crate is
+      # exercised against a real module. See bindings/README.md.
+      - name: Build the wasm runtime
+        run: make build_wasm
+
+      - name: The sandboxed example runs
+        working-directory: bindings/rust
+        run: cargo run -p diluvium-wasmtime --example sandboxed -- ../../dist/diluvium_wasi.wasm
+
   python-binding:
     name: Python binding
     needs: resolve

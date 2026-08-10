@@ -23,6 +23,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "dlibs.h"
+#include "dendpoint.h"
 #include "dqueue.h"
 #include "dtask.h"
 #include "dv.h"
@@ -41,6 +42,9 @@ struct dv_instance {
   char *error;
   void (*notify) (void *ud, dv_queue_id id);
   void *notify_ud;
+  int (*endpoint_bind) (void *ud, const uint8_t *ref, size_t len,
+                        uint32_t *token);
+  void *endpoint_ud;
   uint32_t flags;
 };
 
@@ -180,6 +184,7 @@ static dv_status from_q (int qstatus) {
     case DILUVIUM_Q_DISABLED: return DV_QUEUE_DISABLED;
     case DILUVIUM_Q_EMPTY: return DV_QUEUE_EMPTY;
     case DILUVIUM_Q_DROPPED: return DV_QUEUE_DROPPED;
+    case DILUVIUM_Q_GONE: return DV_QUEUE_GONE;
     default: return DV_QUEUE_UNKNOWN;
   }
 }
@@ -283,6 +288,57 @@ void dv_set_notify (dv_instance *inst,
   inst->notify_ud = ud;
   diluvium_queue_setnotify(inst->L, (cb != NULL) ? dv_notify_bridge : NULL,
                            inst);
+}
+
+
+/* ------------------------------------------------------------- endpoints -- */
+
+/* The host's callback, plus the instance, so the bridge can find both. */
+static int dv_bind_bridge (const unsigned char *ref, size_t len,
+                           unsigned int *token, void *ud) {
+  dv_instance *inst = (dv_instance *)ud;
+  if (inst == NULL || inst->endpoint_bind == NULL)
+    return 0;
+  return inst->endpoint_bind(inst->endpoint_ud, (const uint8_t *)ref, len,
+                             token);
+}
+
+
+void dv_set_endpoint_handler (dv_instance *inst,
+                              int (*bind)(void *ud, const uint8_t *ref,
+                                          size_t len, uint32_t *token),
+                              void *ud) {
+  if (inst == NULL)
+    return;
+  inst->endpoint_bind = bind;
+  inst->endpoint_ud = ud;
+  diluvium_endpoint_sethandler(inst->L, (bind != NULL) ? dv_bind_bridge : NULL,
+                               inst);
+}
+
+
+void dv_endpoint_allow (dv_instance *inst, const uint8_t *ref, size_t len,
+                        uint32_t token) {
+  if (inst == NULL || ref == NULL || token == 0)
+    return;
+  diluvium_endpoint_allow(inst->L, (const char *)ref, len,
+                          (unsigned int)token);
+}
+
+
+dv_queue_id dv_endpoint_queue (dv_instance *inst, uint32_t token) {
+  if (inst == NULL)
+    return 0;
+  return (dv_queue_id)diluvium_endpoint_queue(inst->L, (unsigned int)token);
+}
+
+
+dv_status dv_endpoint_close (dv_instance *inst, dv_queue_id id) {
+  if (inst == NULL)
+    return DV_ERROR;
+  if (!diluvium_endpoint_setlive(inst->L, (lua_Integer)id, 0))
+    return DV_QUEUE_UNKNOWN;
+  return DV_OK;
 }
 
 

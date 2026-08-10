@@ -65,6 +65,7 @@ test_analysis|run||
 test_compound|run||
 test_defer|run||
 test_determinism|run||
+test_endpoint|run||
 test_fstrings|run||
 test_interop|run||
 test_msgpack|run||

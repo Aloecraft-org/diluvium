@@ -411,6 +411,261 @@ static void layout (void) {
 }
 
 
+/* ----------------------------------------------------------- endpoints -- */
+
+/* The host's idea of what a reference means. Deliberately trivial: the runtime
+   carries the bytes and never reads them, so a host is free to make them an
+   index, an address, or a name. Here they are just a token in decimal. */
+static int bind_ref (void *ud, const uint8_t *ref, size_t len,
+                     uint32_t *token) {
+  char buf[16];
+  size_t i;
+  (void)ud;
+  if (len == 0 || len >= sizeof(buf)) return 0;
+  for (i = 0; i < len; i++) buf[i] = (char)ref[i];
+  buf[len] = '\0';
+  if (buf[0] == 'x') return 0;   /* a reference the host refuses */
+  *token = (uint32_t)atoi(buf);
+  return (*token != 0);
+}
+
+
+/* msgpack fixext1 with code 0x02 and one payload byte: an endpoint reference as
+   it arrives in a message. */
+static void ref_message (uint8_t *out, char c) {
+  out[0] = 0xd4;
+  out[1] = 0x02;
+  out[2] = (uint8_t)c;
+}
+
+
+static void endpoints (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local _, ref = queue.wait({inb}) "
+    "local ep = endpoint.bind(ref, 'peer') "
+    "local out = queue.declare('log', {exported = true}) "
+    "queue.push(out, endpoint.status(ep)) "
+    "queue.push(out, select(2, queue.push(ep, 'one'))) "
+    "local _, dead = queue.wait({inb}) "
+    "queue.push(out, endpoint.status(ep)) "
+    "queue.push(out, select(2, queue.push(ep, 'two'))) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox, log, epq;
+  uint8_t ref[3], buf[64];
+  size_t n;
+  if (inst == NULL) { ok(0, "load"); return; }
+  dv_set_endpoint_handler(inst, bind_ref, NULL);
+  inbox = dv_queue_lookup(inst, "inbox");
+
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program waits for a reference");
+  ref_message(ref, '7');
+  dv_queue_push(inst, inbox, ref, sizeof(ref));
+  eq_st(dv_resume(inst, inbox), DV_IDLE, "it binds and carries on");
+
+  epq = dv_endpoint_queue(inst, 7);
+  ok(epq != 0, "the host can find the queue its token was bound to");
+
+  log = dv_queue_lookup(inst, "log");
+  dv_queue_pop(inst, log, buf, sizeof(buf), &n);
+  ok(n == 5 && memcmp(buf + 1, "live", 4) == 0, "a fresh endpoint is live");
+  dv_queue_pop(inst, log, buf, sizeof(buf), &n);
+  ok(n == 3 && memcmp(buf + 1, "ok", 2) == 0,
+     "and a push to it is accepted into the next hop");
+
+  /* The message really is sitting in a bounded local buffer for the host. */
+  eq_st(dv_queue_pop(inst, epq, buf, sizeof(buf), &n), DV_OK,
+        "the host drains the endpoint like any other queue");
+  ok(n == 4 && memcmp(buf + 1, "one", 3) == 0, "getting what was pushed");
+
+  /* Now the far end dies. */
+  eq_st(dv_endpoint_close(inst, epq), DV_OK, "the host closes the far end");
+  ref_message(ref, '7');
+  dv_queue_push(inst, inbox, ref, sizeof(ref));
+  eq_st(dv_resume(inst, inbox), DV_DONE, "the program runs to the end");
+  dv_queue_pop(inst, log, buf, sizeof(buf), &n);
+  ok(n == 5 && memcmp(buf + 1, "gone", 4) == 0, "status is now gone");
+  dv_queue_pop(inst, log, buf, sizeof(buf), &n);
+  ok(n == 5 && memcmp(buf + 1, "gone", 4) == 0,
+     "and a push answers gone, immediately and without raising");
+
+  /* A host push to a closed endpoint gets the same answer. */
+  eq_st(dv_queue_push(inst, epq, MP_ONE, 1), DV_QUEUE_GONE,
+        "so does a push from the host side");
+  dv_free(inst);
+}
+
+
+static void endpoint_refusals (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local _, ref = queue.wait({inb}) "
+    "local out = queue.declare('log', {exported = true}) "
+    "local okk, err = pcall(endpoint.bind, ref, 'nope') "
+    "queue.push(out, okk) "
+    "queue.push(out, tostring(err):match('refused') ~= nil) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox, log;
+  uint8_t ref[3], buf[64];
+  size_t n;
+  if (inst == NULL) { ok(0, "load"); return; }
+  dv_set_endpoint_handler(inst, bind_ref, NULL);
+  inbox = dv_queue_lookup(inst, "inbox");
+  dv_run(inst, &ws);
+  ref_message(ref, 'x');   /* the host refuses this one */
+  dv_queue_push(inst, inbox, ref, sizeof(ref));
+  eq_st(dv_resume(inst, inbox), DV_DONE, "the program handles a refusal");
+  log = dv_queue_lookup(inst, "log");
+  dv_queue_pop(inst, log, buf, sizeof(buf), &n);
+  eq_i(buf[0], 0xc2, "a refused bind raises rather than returning a dead handle");
+  dv_queue_pop(inst, log, buf, sizeof(buf), &n);
+  eq_i(buf[0], 0xc3, "and says the host refused it");
+  dv_free(inst);
+}
+
+
+/*
+** The milestone's real acceptance criterion: a relay agent forwarding between
+** two instances, with no runtime support for routing.
+**
+** Nothing in the runtime knows that B exists, that A's endpoint leads to it, or
+** that R is relaying. A pushes to an endpoint; the host moves bytes; R is an
+** ordinary program holding two handles. Every piece of the routing decision is
+** either in a program or in the host, which is the whole argument of 7.4 -- and
+** the reason none of it is in C.
+*/
+/*
+** The callback-free path, which is the one a wasm host has to use: a C function
+** pointer there is a function-table index, not something a host can hand over.
+** Found while writing the wasmtime binding.
+*/
+static void endpoint_preauthorised (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local _, ref = queue.wait({inb}) "
+    "local ep = endpoint.bind(ref, 'peer') "
+    "local out = queue.declare('log', {exported = true}) "
+    "queue.push(out, endpoint.status(ep)) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox, log;
+  uint8_t ref[3], buf[64];
+  size_t n;
+  if (inst == NULL) { ok(0, "load"); return; }
+  /* No handler installed at all -- only a pre-authorised reference. */
+  dv_endpoint_allow(inst, (const uint8_t *)"9", 1, 42);
+  inbox = dv_queue_lookup(inst, "inbox");
+  dv_run(inst, &ws);
+  ref_message(ref, '9');
+  dv_queue_push(inst, inbox, ref, sizeof(ref));
+  eq_st(dv_resume(inst, inbox), DV_DONE,
+        "a pre-authorised reference binds with no callback");
+  ok(dv_endpoint_queue(inst, 42) != 0, "under the token the host chose");
+  log = dv_queue_lookup(inst, "log");
+  dv_queue_pop(inst, log, buf, sizeof(buf), &n);
+  ok(n == 5 && memcmp(buf + 1, "live", 4) == 0, "and it is live");
+  dv_free(inst);
+}
+
+
+static void relay_between_instances (void) {
+  static const char *SENDER =
+    "local ref_msg = select(2, queue.wait({queue.lookup('inbox')})) "
+    "local up = endpoint.bind(ref_msg, 'upstream') "
+    "for i = 1, 3 do queue.push(up, {n = i}) end "
+    "return 0";
+  /* The relay does not know where its output goes either: it holds an endpoint
+     it was handed and forwards, which is 7.4's store-and-forward in five lines
+     of Lua and no C. */
+  static const char *RELAY =
+    "local inb = queue.lookup('inbox') "
+    "local ref_msg = select(2, queue.wait({inb})) "
+    "local out = endpoint.bind(ref_msg, 'downstream') "
+    "local seen = 0 "
+    "while seen < 3 do "
+    "  local _, m = queue.wait({inb}) "
+    "  seen = seen + 1 "
+    "  queue.push(out, {n = m.n, hops = (m.hops or 0) + 1}) "
+    "end return 0";
+  static const char *RECEIVER =
+    "local inb = queue.lookup('inbox') "
+    "local out = queue.declare('final', {capacity = 8, exported = true}) "
+    "for _ = 1, 3 do "
+    "  local _, m = queue.wait({inb}) "
+    "  queue.push(out, m.n * 10 + m.hops) "
+    "end return 0";
+
+  dv_instance *a = load(SENDER, 0);
+  dv_instance *r = load(RELAY, 0);
+  dv_instance *b = load(RECEIVER, 0);
+  dv_waitset ws;
+  uint8_t ref[3], buf[64];
+  size_t n;
+  int moved = 0, guard = 0;
+  dv_queue_id a_ep, r_ep, a_in, r_in, b_in, final;
+  if (a == NULL || r == NULL || b == NULL) { ok(0, "the three programs load"); return; }
+  dv_set_endpoint_handler(a, bind_ref, NULL);
+  dv_set_endpoint_handler(r, bind_ref, NULL);
+
+  a_in = dv_queue_lookup(a, "inbox");
+  r_in = dv_queue_lookup(r, "inbox");
+  b_in = dv_queue_lookup(b, "inbox");
+
+  /* Start all three; each parks waiting for its reference or its work. */
+  eq_st(dv_run(a, &ws), DV_IDLE, "the sender waits for an endpoint");
+  eq_st(dv_run(r, &ws), DV_IDLE, "so does the relay");
+  eq_st(dv_run(b, &ws), DV_IDLE, "and the receiver waits for work");
+
+  /* Hand each its reference. The host chose the tokens; the guests never see
+     what they mean. */
+  ref_message(ref, '1');
+  dv_queue_push(a, a_in, ref, sizeof(ref));
+  dv_resume(a, a_in);
+  ref_message(ref, '2');
+  dv_queue_push(r, r_in, ref, sizeof(ref));
+  dv_resume(r, r_in);
+
+  a_ep = dv_endpoint_queue(a, 1);
+  r_ep = dv_endpoint_queue(r, 2);
+  ok(a_ep != 0 && r_ep != 0, "both bound their endpoints");
+
+  /* The host's whole job: move bytes from an endpoint buffer to an inbox. It
+     knows nothing about what the messages mean. */
+  while (moved < 3 && guard++ < 40) {
+    if (dv_queue_pop(a, a_ep, buf, sizeof(buf), &n) == DV_OK) {
+      dv_queue_push(r, r_in, buf, n);
+      dv_resume(r, r_in);
+    }
+    if (dv_queue_pop(r, r_ep, buf, sizeof(buf), &n) == DV_OK) {
+      dv_queue_push(b, b_in, buf, n);
+      dv_resume(b, b_in);
+      moved++;
+    }
+  }
+  eq_i(moved, 3, "three messages crossed two instance boundaries");
+
+  final = dv_queue_lookup(b, "final");
+  ok(final != 0, "the receiver's output queue exists");
+  {
+    int i, values[3] = {0, 0, 0};
+    for (i = 0; i < 3; i++) {
+      if (dv_queue_pop(b, final, buf, sizeof(buf), &n) == DV_OK)
+        values[i] = buf[0];
+    }
+    /* n*10 + hops, so 11, 21, 31: the hop count proves each message really
+       went through the relay rather than straight across. */
+    eq_i(values[0], 11, "the first arrived, having been relayed once");
+    eq_i(values[1], 21, "the second");
+    eq_i(values[2], 31, "the third");
+  }
+  dv_free(a);
+  dv_free(r);
+  dv_free(b);
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -426,6 +681,10 @@ int main (void) {
   blocking_push_from_guest();
   text_only();
   top_level_yield();
+  endpoints();
+  endpoint_refusals();
+  endpoint_preauthorised();
+  relay_between_instances();
   printf("\n%d checks, %d failed\n", checks, failures);
   return failures != 0;
 }

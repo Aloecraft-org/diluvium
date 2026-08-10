@@ -129,6 +129,7 @@
 #include "dtask.c"
 #include "dmsgpack.c"
 #include "dqueue.c"
+#include "dendpoint.c"
 #include "dlibs.c"
 #include "dv.c"
 #endif

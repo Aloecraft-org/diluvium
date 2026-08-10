@@ -223,11 +223,21 @@ do
        "an unassigned Diluvium code is refused by name")
     ok(err_of("\xd4\x09x"):find("0x09", 1, true) ~= nil,
        "and the message renders the code as hex")
-    -- 4.2: with no resolver installed, an endpoint reference decodes opaquely
-    -- rather than failing, so a single-instance embedder never needs one.
+    -- 4.2 has two halves, and only one of them is reachable from here.
+    --
+    -- With a resolver installed, ext 0x02 becomes an endpoint reference. This
+    -- build has one, because 'luaopen_dendpoint' installs it -- so that is what
+    -- this asserts, and the assertion changing is the resolver seam working
+    -- rather than a regression.
+    --
+    -- The other half -- that with NO resolver the same bytes decode to an opaque
+    -- ext value, so an embedder linking only the codec never needs one -- cannot
+    -- be reached from a state that has the endpoint library. It is covered by
+    -- bindings/js, whose codec has no resolver at all and asserts exactly that.
     local ep = msgpack.decode("\xd4\x02x")
-    eq(ep[3], 0x02, "ext 0x02 decodes opaquely with no resolver")
-    eq(ep[1], "x", "carrying its raw bytes")
+    eq(type(ep), "table", "ext 0x02 resolves to an endpoint reference")
+    eq(getmetatable(ep), false, "which a program cannot inspect")
+    eq(ep[3], nil, "and which is not an ext wrapper any more")
     -- every ext width
     eq(msgpack.decode("\xd4\x20a")[1], "a", "fixext1")
     eq(msgpack.decode("\xd5\x20ab")[1], "ab", "fixext2")

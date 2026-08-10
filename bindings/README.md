@@ -19,6 +19,7 @@ transcription. What took thought was the *wrapper* decisions, and they generalis
 | `rust/` | Complete. `diluvium-sys` (raw FFI, builds the amalgamation) and `diluvium` (safe wrapper, `rmp-serde`). 16 tests, a doctest, an example host. |
 | `python/` | Complete. cffi in API mode, so a version mismatch fails at build time rather than at the first call. 17 tests. |
 | `js/` | Codec complete and cross-checked against the C implementation (15 tests). **The wasm wrapper is unverified**: building `diluvium.wasm` needs the wasi-sdk, which was not available where it was written. See below. |
+| `rust/diluvium-wasmtime/` | Written, compiles, **unverified** for the same reason: it needs a real `.wasm`. Gives containment and fuel metering; see below. |
 
 ## The JS wrapper's gap, stated plainly
 
@@ -40,8 +41,8 @@ call site.
 
 ## WASI under wasmtime
 
-Rust, but **not the `diluvium` crate** — a third binding, and the reason is the
-same as the JS one. Linking the static library gives you addresses; hosting the
+`rust/diluvium-wasmtime`. Rust, but **not the `diluvium` crate** — a third
+binding, and the reason is the same as the JS one. Linking the static library gives you addresses; hosting the
 `.wasm` in wasmtime gives you u32 offsets into a linear memory you have to
 allocate inside. The pointer discipline is completely different, so one crate
 serving both would collapse to whichever surface is weaker.
@@ -51,7 +52,20 @@ unchanged. What differs is underneath: `Memory::read`/`write` instead of
 dereferencing, the module's exported `malloc` to pass anything in, and a
 `Func`-backed table slot if notification is wanted.
 
-Why choose it over linking natively: **sandboxing and fuel**. A statically linked
-Diluvium bug is a bug in your process; a wasm one is contained. And wasmtime's
-fuel metering does what §9.4's instruction budget does, from outside the guest —
-which is the more trustworthy side to meter from.
+Why choose it over linking natively: **containment and fuel**. A statically linked
+Diluvium bug is a bug in your process; a wasm one is confined to the module's
+linear memory. And wasmtime's fuel metering does what §9.4's instruction budget
+does but from *outside* the guest — §9.4 uses `lua_sethook`, which runs inside the
+thing it limits, so a program cannot outlast fuel or spin somewhere a hook never
+fires. `Instance::set_fuel` is that, and the example demonstrates it stopping
+`while true do end`.
+
+The cost is speed, and a copy per message that the native binding does not make.
+
+Writing it turned up a real gap in the ABI, which is now `dv_endpoint_allow`: the
+endpoint bind handler was a C function pointer, and in wasm a function pointer is
+an index into the module's function table — there is no way to hand one in from
+outside. So a host can now pre-authorise a reference instead, mapping bytes to a
+token up front. That is the better shape for every host, not only wasm ones: a
+host almost always knows what its own references mean, and saying it up front
+needs no call out at all.
