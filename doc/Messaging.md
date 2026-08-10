@@ -2782,7 +2782,9 @@ The four items that had to be fixed for it — the faulted-versus-exited confusi
 unless a host asks for it by name (`dvs_allow_hibernation`), a reference now survives
 being forwarded in a message, and reserved ext codes are refused on encode, which
 closes one of the two forgery routes. What a deployment on this profile is accepting
-is written out in `RELEASE_NOTES.md` rather than inferred from this table.
+is written out for a reader who has not read this document, under **Known issues** in
+`CHANGELOG.md` — which is generated from `CHANGELOG.yaml`, so that is the file to
+edit.
 
 The cost of staying resident was unmeasured when these profiles were written and is
 now measured: **42 KB per instance parked on a queue** (`make footprint`), so a
