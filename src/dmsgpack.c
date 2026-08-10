@@ -716,6 +716,54 @@ static void mp_snap_queueupvals (lua_State *L, mp_snap *s, int abs) {
 }
 
 
+/*
+** Offer a value to the resolver's encode hook (4.2), and write what it hands
+** back. Returns 1 when the hook claimed the value.
+**
+** The hook returns bytes rather than appending them: it pushes an ext code and a
+** payload string, and the codec writes the object. That direction was chosen
+** deliberately. The encode buffer is a stack userdata whose '__gc' owns it, and
+** handing a hook a door into the encode in progress -- which is what the
+** snapshot layer's 'appendext' is -- means that door has to be published in a
+** registry slot, and an error raised mid-encode unwinds past whatever would
+** clear it. Returning the bytes has no such slot to leave dangling, and it makes
+** the hook's job the part it actually knows: what this value is, not how msgpack
+** frames it.
+**
+** Not consulted in snapshot mode. A snapshot has its own hooks, with interning
+** and positions that an ext written behind their back would not participate in;
+** ext 0x02 in a snapshot is a separate question and 10.7 does not answer it yet.
+*/
+static int mp_resolver_encode (lua_State *L, mp_ctx *ctx, int abs) {
+  const diluvium_msgpack_resolver *r;
+  int code;
+  size_t len;
+  const char *data;
+  if (ctx->snap != NULL)
+    return 0;
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_RESOLVER);
+  r = (const diluvium_msgpack_resolver *)lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  if (r == NULL || r->encode == NULL)
+    return 0;
+  luaL_checkstack(L, 3, "msgpack: cannot offer a value to the resolver");
+  if (!r->encode(L, abs, r->ud))
+    return 0;
+  /* The hook said yes, so from here a malformed answer is the host's bug and an
+     error naming it is better than bytes nobody can decode. */
+  if (!lua_isinteger(L, -2) || lua_type(L, -1) != LUA_TSTRING) {
+    lua_pop(L, 2);
+    luaL_error(L, "msgpack: the resolver claimed a value but did not return an "
+                  "ext code and a payload string");
+  }
+  code = (int)lua_tointeger(L, -2);
+  data = lua_tolstring(L, -1, &len);
+  mp_enc_ext(ctx->buf, code, data, len);
+  lua_pop(L, 2);
+  return 1;
+}
+
+
 static void mp_encode_array_body (lua_State *L, mp_ctx *ctx, int idx,
                                   size_t n) {
   size_t i;
@@ -835,15 +883,50 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
       if (kind == MP_SHAPE_EXT) {
         size_t len;
         const char *data;
-        int code;
+        lua_Integer code;
         lua_rawgeti(L, abs, 3);
-        code = (int)lua_tointeger(L, -1);
+        code = lua_tointeger(L, -1);
         lua_pop(L, 1);
+        /*
+        ** Checked here and not only in 'msgpack.ext', because the wrapper is an
+        ** ordinary table and a guest can assign to it: 'w = msgpack.ext(0x10, s)'
+        ** then 'w[3] = 0x02' produced a reserved code from a constructor that had
+        ** just refused one. That mattered little while nothing read those codes;
+        ** with an endpoint reference now encoding as ext 0x02, it would have been
+        ** a way to write bytes that a host's own trusted delivery path resolves
+        ** into a reference to any peer it has authorised.
+        **
+        ** The check belongs at the point the bytes are written rather than at the
+        ** point the object is made. That is where the guarantee has to hold, and
+        ** a constructor cannot hold it for a value that stays mutable.
+        */
+        if (code < 0x10 || code > 0x7f)
+          mp_err_at(L, ctx, "an ext wrapper whose code is outside the "
+                            "application range 0x10 to 0x7F");
         lua_rawgeti(L, abs, 1);
+        if (lua_type(L, -1) != LUA_TSTRING)
+          mp_err_at(L, ctx, "an ext wrapper whose payload is not a string");
         data = lua_tolstring(L, -1, &len);
-        mp_enc_ext(ctx->buf, code, data, len);
+        mp_enc_ext(ctx->buf, (int)code, data, len);
         lua_pop(L, 1);
         return;
+      }
+      /*
+      ** A table with a metatable may be something the host understands better
+      ** than the codec does -- an endpoint reference is exactly that: 7.3 gives
+      ** it a private metatable so a guest can neither build one nor look inside,
+      ** and the consequence was that it encoded as a plain one-element array. A
+      ** router could not hand a handler its destination, which is the shape 9.1
+      ** is written around.
+      **
+      ** Only tables carrying a metatable are offered, so an ordinary table pays
+      ** one 'lua_getmetatable' and nothing else. Shape wrappers are settled above
+      ** first: they carry a metatable too, and they are the codec's own.
+      */
+      if (kind == 0 && lua_getmetatable(L, abs)) {
+        lua_pop(L, 1);
+        if (mp_resolver_encode(L, ctx, abs))
+          return;
       }
       if (kind == MP_SHAPE_ARRAY || kind == MP_SHAPE_MAP) {
         lua_rawgeti(L, abs, 1);  /* the wrapped table */
@@ -861,14 +944,8 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
   }
   /* Anything else -- function, thread, userdata, light userdata -- is the
      resolver's last chance, then an error naming the type and the path. */
-  {
-    const diluvium_msgpack_resolver *r;
-    lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_RESOLVER);
-    r = (const diluvium_msgpack_resolver *)lua_touserdata(L, -1);
-    lua_pop(L, 1);
-    if (r != NULL && r->encode != NULL && r->encode(L, abs, r->ud))
-      return;
-  }
+  if (mp_resolver_encode(L, ctx, abs))
+    return;
   if (ctx->snap != NULL) {
     /* A named object -- a C function, most often -- takes no position, because
        it is not part of the object graph. Asked before the light-userdata

@@ -64,9 +64,21 @@ LUA_API void diluvium_msgpack_decode_n (lua_State *L, const char *s, size_t len,
 **
 ** Encoding is the resolver's business too: an endpoint reference is an opaque
 ** value the guest never constructs, so the codec cannot know its shape.
-** 'encode' is offered each value the codec does not otherwise recognise, and
-** should return 1 having appended a complete ext object, or 0 to let the
-** codec raise its ordinary "cannot encode" error.
+** 'encode' is offered every table carrying a metatable, and every value the
+** codec cannot encode at all. It should either return 0 -- "not mine", and the
+** codec carries on as if it were not installed -- or push an integer ext code
+** and a payload string and return 1, and the codec writes that ext object.
+**
+** Returning the bytes rather than appending them keeps the encode buffer inside
+** the codec, which is why this differs from the snapshot layer's hooks: those
+** append through 'diluvium_msgpack_appendext'. A resolver is consulted only
+** outside snapshot mode, where interning and positions do not apply.
+**
+** A table with a metatable is offered *before* it is encoded as a map or an
+** array, which is what makes an endpoint reference survive a message: without
+** the hook, 7.3's reference object -- a table the guest cannot inspect -- goes
+** onto the wire as a plain one-element array, and a router cannot hand a handler
+** its destination.
 */
 typedef struct diluvium_msgpack_resolver {
   int (*decode) (lua_State *L, const unsigned char *data, size_t len, void *ud);

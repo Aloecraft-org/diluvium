@@ -179,8 +179,34 @@ static int de_resolve (lua_State *L, const unsigned char *data, size_t len,
 }
 
 
+/*
+** The other direction, and the one that makes 9.1's shapes work at all.
+**
+** A reference is a table with a private metatable, so without this it encoded as
+** a plain one-element array: a supervisor could receive an endpoint and use it,
+** but could not pass it on, and a router handing a handler its destination is
+** the ordinary case rather than an exotic one. The bytes go back out exactly as
+** they came in -- this layer never reads them either.
+**
+** Symmetric with 'de_resolve' on purpose: the same ext code, the same payload,
+** so a reference that survives a hop is the same reference and not a copy that
+** happens to bind to the same place.
+*/
+static int de_encode (lua_State *L, int idx, void *ud) {
+  size_t len;
+  const char *ref;
+  (void)ud;
+  ref = de_ref_bytes(L, idx, &len);
+  if (ref == NULL)
+    return 0;                    /* some other table with a metatable */
+  lua_pushinteger(L, 0x02);
+  lua_pushlstring(L, ref, len);
+  return 1;
+}
+
+
 static const diluvium_msgpack_resolver de_resolver = {
-  de_resolve, NULL, NULL
+  de_resolve, de_encode, NULL
 };
 
 

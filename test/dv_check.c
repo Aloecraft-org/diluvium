@@ -748,6 +748,205 @@ static void a_guest_cannot_mint_a_reference (void) {
 }
 
 
+/*
+** A reference forwarded inside a message, which is 9.1's router.
+**
+** 7.3's shape is "a program receives an endpoint reference in a message", and the
+** encode side of that had never been exercised: a reference is a table with a
+** private metatable, so it went onto the wire as a plain one-element array. The
+** bytes still arrived, they just arrived as data -- so 'endpoint.bind' on the far
+** side refused them, and a router could use an endpoint but never hand one on.
+** That is not an exotic case; it is what a coordinator handing work to a swarm of
+** handlers does.
+**
+** Two hops, both through the host, because that is the only path there is: the
+** router's bytes leave through an exported queue and the host pushes them into
+** the handler. Nothing in the runtime knows a router exists.
+*/
+static void a_reference_survives_being_forwarded (void) {
+  /* Receives a destination and passes it on, with a job attached. */
+  static const char *ROUTER =
+    "local inb = queue.lookup('inbox') "
+    "local out = queue.declare('assign', {capacity = 4, exported = true}) "
+    "local _, ref = queue.wait({inb}) "
+    "queue.push(out, {to = ref, job = 'fetch'}) "
+    "return 0";
+  /* Never told where its work goes: it binds what it was handed. */
+  static const char *HANDLER =
+    "local inb = queue.lookup('inbox') "
+    "local _, m = queue.wait({inb}) "
+    "local dest = endpoint.bind(m.to, 'dest') "
+    "queue.push(dest, m.job .. '-done') "
+    "return 0";
+  dv_instance *r = load(ROUTER, 0);
+  dv_instance *h = load(HANDLER, 0);
+  dv_waitset ws;
+  uint8_t ref[3], buf[256];
+  size_t n = 0;
+  dv_queue_id assign, h_in, h_ep;
+  int has_ext = 0;
+  if (r == NULL || h == NULL) { ok(0, "the router and the handler load"); return; }
+  dv_set_endpoint_handler(h, bind_ref, NULL);
+
+  memset(&ws, 0, sizeof(ws));
+  dv_run(r, &ws);
+  dv_run(h, &ws);
+  ref_message(ref, '5');
+  dv_queue_push(r, dv_queue_lookup(r, "inbox"), ref, sizeof(ref));
+  dv_resume(r, dv_queue_lookup(r, "inbox"));
+
+  assign = dv_queue_lookup(r, "assign");
+  if (dv_queue_pop(r, assign, buf, sizeof(buf), &n) != DV_OK) {
+    ok(0, "the router emits an assignment");
+    ok(0, "the assignment carries an ext 0x02 rather than an array");
+    ok(0, "the handler binds the destination it was handed");
+    dv_free(r); dv_free(h);
+    return;
+  }
+  ok(1, "the router emits an assignment");
+  /* Asserted on the wire, not only through the far side, because this is the
+     byte that was wrong: fixext1 is 0xd4 then the code. */
+  {
+    size_t i;
+    for (i = 0; i + 1 < n; i++) {
+      if (buf[i] == 0xd4 && buf[i + 1] == 0x02) { has_ext = 1; break; }
+    }
+  }
+  ok(has_ext, "the assignment carries an ext 0x02 rather than an array");
+
+  /* The host's whole job again: move the bytes. It does not look inside. */
+  h_in = dv_queue_lookup(h, "inbox");
+  dv_queue_push(h, h_in, buf, n);
+  dv_resume(h, h_in);
+
+  h_ep = dv_endpoint_queue(h, 5);
+  ok(h_ep != 0, "the handler binds the destination it was handed");
+  if (h_ep != 0 &&
+      dv_queue_pop(h, h_ep, buf, sizeof(buf), &n) == DV_OK && n > 1) {
+    char text[64];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strcmp(msg, "fetch-done") == 0,
+       "and its work reaches the far end the router chose");
+    if (strcmp(msg, "fetch-done") != 0)
+      printf("      (%s)\n", msg);
+  }
+  else {
+    ok(0, "and its work reaches the far end the router chose");
+  }
+  dv_free(r);
+  dv_free(h);
+}
+
+
+/*
+** The forwarding above must not become a way to mint a reference.
+**
+** 'a_guest_cannot_mint_a_reference' checks the decode side; this checks that the
+** encode side did not open a second door. Three ways a guest might write the bytes
+** itself, and all three must fail before they become bytes:
+**
+**   'msgpack.ext(0x02, ...)' -- refused, because 5.5 reserves every code below
+**   0x10 and leaves 0x10..0x7F for application use.
+**
+**   'msgpack.ext(0x10, ...)' and then assigning 0x02 over its code -- which
+**   worked, and is the defect 18.1 records as "a guest can mint reserved ext
+**   codes". The wrapper is an ordinary table; a constructor cannot vouch for a
+**   value that stays mutable, so the encoder checks the code as it writes it.
+**
+**   an ordinary table with a lookalike metatable -- offered to the resolver now,
+**   which is the new path, and refused because the resolver compares against a
+**   metatable held in the registry that no guest can name.
+*/
+static void a_forged_ext_is_not_a_reference (void) {
+  dv_instance *inst = load(
+    "local out = queue.declare('log', {exported = true}) "
+    "local ok1 = pcall(msgpack.ext, 0x02, '9') "
+    /* The wrapper is an ordinary table, so the constructor's refusal was only as
+       good as the value staying as it was made. It was not. */
+    "local w = msgpack.ext(0x10, '9') w[3] = 0x02 "
+    "local ok3, err3 = pcall(msgpack.encode, w) "
+    /* A look-alike: the reference's shape, with a metatable of the guest's own.
+       It must encode as an ordinary array -- no 0xd4 0x02 anywhere in it. */
+    "local fake = setmetatable({'9'}, {__name = 'diluvium.endpoint.ref'}) "
+    "local bytes = msgpack.encode(fake) "
+    "local ok2 = pcall(endpoint.bind, msgpack.decode(bytes), 'p') "
+    "local m3 = tostring(err3):match('application range') or 'unnamed' "
+    "queue.push(out, tostring(ok1) .. '|' .. tostring(ok2) .. '|' .. "
+    "  tostring(bytes:find('\\xd4\\x02', 1, true) ~= nil) .. '|' .. "
+    "  tostring(ok3) .. '|' .. m3) "
+    "return 0", 0);
+  dv_waitset ws;
+  uint8_t buf[256];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  dv_endpoint_allow(inst, (const uint8_t *)"9", 1, 91);
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  if (dv_queue_pop(inst, dv_queue_lookup(inst, "log"), buf, sizeof(buf), &n)
+      == DV_OK && n > 1) {
+    char text[64];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strcmp(msg, "false|false|false|false|application range") == 0,
+       "a guest can neither write an ext 0x02 nor fake a reference into one");
+    if (strcmp(msg, "false|false|false|false|application range") != 0)
+      printf("      (%s)\n", msg);
+  }
+  else {
+    ok(0, "a guest can neither write an ext 0x02 nor fake a reference into one");
+  }
+  ok(dv_endpoint_queue(inst, 91) == 0,
+     "and the authorised peer has no queue");
+  dv_free(inst);
+}
+
+
+/*
+** The laundering route, which the encode-side code check closes.
+**
+** 18.1 records two ways a reference could still be forged. This is the first: a
+** guest decodes '\xd4\x02' plus a name, which is inert in its own state, and then
+** *pushes it onto a queue*. The delivery path is trusted and decodes it again, so
+** the far side -- or the same program on the next hop -- would receive a genuine
+** reference to a peer nobody handed it.
+**
+** It is closed at the narrowest point, which is the encoder: an opaque ext value
+** carrying a reserved code cannot be written back onto the wire at all. So the
+** bytes never leave the state that made them up.
+**
+** The second route -- reaching the reference metatable through the 'debug' library
+** -- is not closed, and 18.2 makes restricting that library a profile B
+** requirement rather than something this asserts.
+*/
+static void the_laundering_route_is_closed (void) {
+  dv_instance *inst = load(
+    "local out = queue.declare('log', {capacity = 4, exported = true}) "
+    "local inert = msgpack.decode('\\xd4\\x029') "
+    "local ok, err = pcall(queue.push, out, inert) "
+    "queue.push(out, tostring(ok) .. '|' .. "
+    "  (tostring(err):match('application range') or 'unnamed')) "
+    "return 0", 0);
+  dv_waitset ws;
+  uint8_t buf[256];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  if (dv_queue_pop(inst, dv_queue_lookup(inst, "log"), buf, sizeof(buf), &n)
+      == DV_OK && n > 1) {
+    char text[64];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strcmp(msg, "false|application range") == 0,
+       "a decoded reference cannot be pushed back onto a queue");
+    if (strcmp(msg, "false|application range") != 0)
+      printf("      (%s)\n", msg);
+  }
+  else {
+    ok(0, "a decoded reference cannot be pushed back onto a queue");
+  }
+  dv_free(inst);
+}
+
+
 static void relay_between_instances (void) {
   static const char *SENDER =
     "local ref_msg = select(2, queue.wait({queue.lookup('inbox')})) "
@@ -1294,6 +1493,9 @@ int main (void) {
   endpoint_preauthorised();
   endpoint_with_no_host_binding();
   a_guest_cannot_mint_a_reference();
+  a_reference_survives_being_forwarded();
+  a_forged_ext_is_not_a_reference();
+  the_laundering_route_is_closed();
   relay_between_instances();
 
   printf("\n=== budgets (9.4) ===\n");

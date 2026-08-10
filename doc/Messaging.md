@@ -2669,6 +2669,29 @@ artifact between sessions that do not share context.
   cannot be asserted. A test whose name, comment and assertion disagree is worth
   chasing precisely because one of the three may be describing something real that
   nothing checks.
+- **The resolver's `encode` hook was specified to append, and never implemented.**
+  §4.2 said a hook "should return 1 having appended a complete ext object", which
+  meant handing a host C function a door into the encode in progress — the encode
+  buffer is a stack userdata whose `__gc` owns it, and the only way to publish that
+  door is a registry slot that an error raised mid-encode unwinds straight past. The
+  hook now returns an ext code and a payload string and the codec writes the object,
+  which has no slot to leave dangling and asks the hook only the part it knows: what
+  this value is, not how msgpack frames it. Worth recording because the hook was
+  documented in the same revision it was left NULL in, so the contract was never
+  tested against a real implementation until an endpoint reference needed one.
+- **A hook offered "each value the codec does not otherwise recognise" could never
+  see a reference.** A reference *is* recognised: it is a table, and tables encode.
+  So the seam that existed for exactly this case was unreachable from it. Tables
+  carrying a metatable are now offered first. The general shape is worth noting: a
+  fallback hook placed after the recognised types cannot serve a type that is
+  recognised but means something else, and "is it a table" is not the same question
+  as "what is it".
+- **A constructor cannot vouch for a mutable value.** `msgpack.ext` refused reserved
+  codes; the wrapper it returned was an ordinary table, so a guest reassigned the
+  code field and got what the constructor had refused. The check moved to the point
+  the bytes are written. The reason it mattered only later is worth keeping: nothing
+  read reserved codes off the wire, so it looked like tidiness — and it became the
+  fix that closed a forgery route the moment ext `0x02` started meaning something.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,
@@ -2724,10 +2747,10 @@ Grouped, deduplicated, and ordered by what a caller would hit first.
 
 | Defect | Consequence |
 |---|---|
-| References can still be forged, two ways | The trust gate added earlier is incomplete. A guest can **launder** a decoded ext `0x02` through a queue, because the delivery path is trusted and re-decodes it; and the "hidden" metatable is **reachable through the `debug` library**, which defeats `__metatable` generally and not only here. §7.3's unforgeability claim remains false. |
-| A guest cannot pass a reference in a message | It encodes as a plain one-element array, so §7.4's store-and-forward does not round-trip the thing it forwards. |
+| References can still be forged, two ways | The trust gate added earlier was incomplete. **The laundering route is now closed** and the other is not. Laundering was: decode `\xd4\x02` plus a name into an inert opaque ext, push it onto a queue, and let the trusted delivery path decode it again into a genuine reference. Closed at the encoder — a reserved ext code cannot be written to the wire at all — so the bytes never leave the state that made them up (`the_laundering_route_is_closed`). **Still open:** the "hidden" metatable is reachable through `debug.getmetatable`, and the registry through `debug.getregistry`, so a guest holding one real reference can mint a reference to any peer name it can guess. That defeats `__metatable` generally and not only here, no registry-side scheme fixes it while the `debug` library is open, and restricting that library is a profile B requirement rather than a patch. §7.3's unforgeability claim remains false. |
+| ~~A guest cannot pass a reference in a message~~ **Fixed.** | It encoded as a plain one-element array, so §7.4's store-and-forward did not round-trip the thing it forwards, and a router could use an endpoint but never hand one on. The resolver seam (§4.2) already had an `encode` hook for exactly this and nothing implemented it. Now: a table carrying a metatable is offered to the resolver before it is encoded as a map or an array, and `dendpoint.c` returns the same ext `0x02` and the same payload it would resolve. Asserted on the wire and end to end through two instances (`a_reference_survives_being_forwarded`). The hook's contract changed while doing it — it returns a code and a payload rather than appending to the encode in progress, so no registry slot holds a pointer into a buffer that an error mid-encode unwinds past. |
 | Rebinding a destroyed token returns the destroyed handle | And poisons the token permanently. |
-| A guest can mint reserved ext codes | The encoder trusts the wrapper's `code` field. |
+| ~~A guest can mint reserved ext codes~~ **Fixed.** | The encoder trusted the wrapper's `code` field. `msgpack.ext` refuses a reserved code, but the wrapper it returns is an ordinary table: `w = msgpack.ext(0x10, s)` and then `w[3] = 0x02` produced exactly what the constructor had just refused. Verified by hand before fixing — the bytes came out `d4 02`. The check now runs where the bytes are written, because a constructor cannot vouch for a value that stays mutable. This is also what closes the laundering route above, which is why a finding filed as tidiness turned out to be the security one. |
 | The malformed-input assertions in `test_msgpack.lua` cannot fail | `pcall` never returns nil, so the comparison is against a value that cannot occur. |
 
 **Claims about the tree that were wrong**, including two written while fixing other
@@ -2750,17 +2773,32 @@ capability layer is then a structuring device rather than a security boundary, a
 the forgery findings do not apply — forging a reference takes deliberately
 constructed ext bytes or a `debug` call, and does not happen by accident. Budgets are
 set by the host with `dv_set_budget` rather than through a spawn request, which
-sidesteps two of the six blocking findings without any change to the runtime. What
-still has to be fixed: the faulted-versus-exited confusion, `do_kill`'s truncation,
-the NUL truncation if bytecode is ever spawned, and `kill_subtree`'s recursion if
-delegation is deeper than a few levels. **This is a small list and it is the nearest
-usable release.**
+sidesteps two of the six blocking findings without any change to the runtime.
+
+The four items that had to be fixed for it — the faulted-versus-exited confusion,
+`do_kill`'s truncation, the NUL truncation if bytecode is ever spawned, and
+`kill_subtree`'s recursion — **are fixed**, and so are four things beyond that list:
+§9.1's documented nested `budget` now reaches the child, hibernation is refused
+unless a host asks for it by name (`dvs_allow_hibernation`), a reference now survives
+being forwarded in a message, and reserved ext codes are refused on encode, which
+closes one of the two forgery routes. What a deployment on this profile is accepting
+is written out in `RELEASE_NOTES.md` rather than inferred from this table.
+
+The cost of staying resident was unmeasured when these profiles were written and is
+now measured: **42 KB per instance parked on a queue** (`make footprint`), so a
+thousand agents is 41 MB and ten thousand is 410 MB. That is the number this profile
+lives or dies by, since dropping hibernation means nothing is swapped out.
 
 **Profile B — untrusted or generated programs.** Adds the whole capability layer as a
-boundary: both forgery routes closed, the `debug` library removed or restricted for
-guest instances, reserved ext codes refused on encode, budgets enforced through the
-documented path. Nothing here is speculative work, but the forgery fix is a design
-decision — a reference's authority cannot be its bytes — and not a patch.
+boundary. Reserved ext codes are now refused on encode and the laundering route is
+closed, so what remains is: **the `debug` library removed or restricted for guest
+instances**, and budgets enforced through the documented path (done — §9.1's nested
+`budget` reaches the child). The `debug` item is the one that carries a design
+decision rather than a patch: `getmetatable` and `getregistry` between them defeat
+every scheme that keeps a reference's identity in the runtime, so either that library
+narrows for guests or a reference's authority stops being something a table can
+carry. It is also the first thing to do, because it is the only remaining forgery
+route and everything else in this profile is already true.
 
 **Profile C — hibernation at scale.** Adds `u2.funcidx`, real field-validation
 coverage, the host-identity stamp, budget re-arming on wake, and endpoint survival
