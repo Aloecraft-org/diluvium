@@ -286,6 +286,22 @@ dtask_check: _build_step0
 	  $(CURDIR)/test/dtask_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dtask_check
 
+# No Lua at all: dhash.c is self-contained, and compiling it alone is part of
+# what is being checked -- the compiler links it too and must not pull the
+# runtime in.
+dhash_check:
+	@mkdir -p $(CURDIR)/dist
+	gcc -Wall -Wextra -O2 -std=c99 -I$(CURDIR)/src \
+	  -o $(CURDIR)/dist/dhash_check \
+	  $(CURDIR)/test/dhash_check.c $(CURDIR)/src/dhash.c
+	@$(CURDIR)/dist/dhash_check
+
+dsnap_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dsnap_check \
+	  $(CURDIR)/test/dsnap_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dsnap_check
+
 dshim_check: _build_step0
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
 	  -o $(CURDIR)/dist/dshim_check \

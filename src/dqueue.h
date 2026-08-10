@@ -186,4 +186,23 @@ typedef void (*diluvium_queue_notify) (lua_State *L, lua_Integer id, void *ud);
 LUA_API void diluvium_queue_setnotify (lua_State *L, diluvium_queue_notify fn,
                                        void *ud);
 
+
+/*
+** Walk the live queues, lowest handle first.
+**
+** 10.6 puts the queue name list in the snapshot header and 10.8 says restore
+** re-declares queues by name and re-resolves handles -- so something has to be
+** able to ask which queues exist. Nothing did.
+**
+** Pass a handle of 0 to start; returns the next live handle and, if 'name' is
+** not NULL, points it at that queue's name. Returns 0 when there are no more.
+** Destroyed handles are skipped, which is why this is an iterator rather than
+** a count plus an index: 6.2 never reuses a handle, so the live set has holes.
+**
+** The name points into the queue's own string and stays valid as long as the
+** queue does. A caller that keeps it past then should copy it.
+*/
+LUA_API lua_Integer diluvium_queue_next (lua_State *L, lua_Integer after,
+                                         const char **name);
+
 #endif

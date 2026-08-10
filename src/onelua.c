@@ -129,10 +129,12 @@
 #include "drepl.c"
 #include "dline.c"
 #include "dtask.c"
+#include "dhash.c"
 #include "dmsgpack.c"
 #include "dqueue.c"
 #include "dendpoint.c"
 #include "dshim.c"
+#include "dsnap.c"
 #include "dlibs.c"
 #include "dv.c"
 #endif

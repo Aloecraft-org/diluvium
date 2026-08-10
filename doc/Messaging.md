@@ -120,10 +120,10 @@ said would happen:
 
 | Component | Target | Measured (linux-x86_64, `-O3`, stripped text) |
 |---|---|---|
-| msgpack codec | under 25 KB | 13.5 KB |
+| msgpack codec | under 25 KB | 13.3 KB, snapshot mode included |
 | queue subsystem | under **20 KB** | 17.6 KB — `dqueue.c` 15.0 + `dendpoint.c` 2.6 |
 | instance C ABI | under 10 KB | 6.1 KB |
-| hibernate | under 30 KB | 1.5 KB so far — `dshim.c` only |
+| hibernate | under 30 KB | 6.0 KB so far — `dshim.c` 1.5 + `dhash.c`/`dsnap.c` 4.5 |
 | swarm layer | separate library, not counted | not built |
 
 The queue target moved from 15 KB, and the reason is worth recording rather than
@@ -968,7 +968,7 @@ check red, and it is that one.
 | Category | Treatment |
 |---|---|
 | Numbers, strings, booleans, nil | Plain msgpack |
-| Tables | Msgpack map or array, with ext 0x04 backreferences for identity and cycles; metatable link and `__mode` preserved |
+| Tables | Msgpack map or array, with ext 0x04 backreferences for identity and cycles; metatable link and `__mode` preserved (see below) |
 | Lua closures | Ext 0x06: a Proto reference plus upvalue references. Protos deduplicated by hash. |
 | Upvalues | Serialized by identity. Two closures sharing an upvalue must still share it after a round trip. Use `lua_upvaluejoin` on restore. |
 | C closures and functions | Ext 0x07: resolved by name through a permanents table, both directions |
@@ -980,6 +980,45 @@ check red, and it is that one.
 
 Restrict v1 to a **single thread**. An agent driving nested coroutines is out of
 scope; refuse with a clear message.
+
+**How metatables travel, and why not inline.** A table's metatable is not part of
+its contents, and writing it inline would put it in the position numbering at a
+place the decoder cannot predict — the decoder has to create a table before it can
+know whether a metatable followed. So metatables go in a trailing section: the
+root value, then (owner position, metatable) pairs, then a nil.
+
+A nil terminator rather than a length prefix because the list grows while it is
+being written — a metatable may have a metatable, which is ordinary inheritance —
+so its length is unknown when a header would have to be emitted, and buffering the
+section to find out would copy the largest part of the graph once per level.
+
+Bare pairs rather than a two-element array per entry, and this one was found by a
+failing test rather than by design: an array is a *table* on the wire, and the
+decoder gives every table it creates a position. A wrapper therefore takes a
+position the encoder never assigned, and every position after the first metatable
+is off by one. The symptom was the first metatable restoring correctly and the
+rest not.
+
+**Metatables are applied after contents**, which is the only order available: the
+owner must exist before anything can reference it, and its contents are read on
+the way past. For a weak table that means entries were inserted while it was still
+strong and `__mode` takes effect afterwards. The collector reads `__mode` from the
+metatable at each traversal rather than caching it at insert time, so the weakness
+does apply — but this is the one place in a restore whose result depends on
+collector behaviour rather than on the format, and it is worth knowing before
+something is built on top of it.
+
+**Shape wrappers are refused.** `msgpack.as_array(t)`, `as_map` and `ext` are
+encoding directives, not program state, and their hidden metatable is shared
+runtime furniture that must not enter a snapshot's object graph. Silently
+unwrapping would restore a plain table where the program left a wrapper, which is
+a difference the program can see, so this is an error with a key path.
+
+**Depth is capped at 150 in snapshot mode, not 16.** The plain codec's cap of 16 is
+its cycle guard and the snapshot encoder does not need one, so the only thing left
+to bound is C recursion. 16 would refuse a linked list of twenty nodes, which
+would be absurd. 150 sits below Lua's own `LUAI_MAXCCALLS`, so a graph that would
+overflow the C stack is refused here first, with a message that says so.
 
 ### 10.4 The permanents table
 
@@ -1012,8 +1051,18 @@ Hashing rules:
 deliberately: the string hash seed is fixed (`luaconf.h` defines `luai_makeseed`
 as a constant, so the `lauxlib.c` fallback is dead code), `test_determinism.lua`
 asserts identical iteration order within and across processes, and string dedup
-order is write order. Add a test asserting that identical source produces
-byte-identical stripped dumps across processes, so this cannot regress silently.
+order is write order.
+
+**Measured, before anything was built on it.** Three processes of one build
+produce byte-identical stripped dumps of the same source. That is a test rather
+than an assumption now — `test/fingerprint_check.sh`, whose first check is exactly
+this, since the fingerprint *is* the hash of a stripped dump.
+
+**And it turned up the correction in 10.6.** Two *different builds* of this same
+tree do not agree: debug emits 20 instructions where release emits 12. The cause
+is deliberate and reproducible rather than nondeterminism — `src/ltests.h` sets
+`MAXINDEXRK` to 1, which is an `lcode.c` codegen knob — but it means "identical
+source produces identical dumps" holds per build, not per version.
 
 **It also depends on the secure-function scramble being deterministic.** See
 10.9. If the obfuscation ever acquires a per-dump nonce, content addressing breaks;
@@ -1031,6 +1080,57 @@ Every snapshot carries, before any payload:
 | Capability set in effect | Refuse restore under a different one |
 | Queue name list | For handle re-resolution |
 | Host identity stamp | See 10.10 |
+
+**Runtime identity cannot be a list of constants**, and this was corrected after
+measuring rather than reasoning. The list above — version, build, opcode set,
+number config, `LUAC_FORMAT` — reads as sufficient and is not: the debug and
+release builds of this tree agree on every one of those (`diluvium (lua)
+5.5.1|85|70` from both) and disagree on the bytecode they emit. A header carrying
+only that list would accept a snapshot whose Proto hashes can never match, and
+10.5's "exact match" would then fail deep inside restore as a missing Proto
+instead of at the header as a refusal.
+
+So the runtime identity is **the SHA-256 of a fixed canary chunk's stripped
+dump**. That is self-calibrating: it covers every codegen knob, including ones
+added after this was written, which an enumerated list cannot. The dump header
+carries the number sizes, endianness and format byte, so those come along for
+free; the version string is hashed in alongside so two builds with identical
+codegen and different versions are still told apart. Computed once and cached
+per state, since it compiles and dumps a chunk.
+
+`test/fingerprint_check.sh` holds the property, and it needs two builds of the
+tree — which is why it is a shell script and not part of `dsnap_check.c`. Its
+third check asserts the thing that made the correction necessary: that version
+and `LUAC_FORMAT` really are identical across the pair, so a reader does not have
+to take the paragraph above on trust.
+
+**The header is plain msgpack, not the graph format.** A reader that refuses the
+payload must still be able to read the header, including a reader in another
+language whose only msgpack is the ordinary kind. Otherwise "refused" arrives
+with no detail, which is the worst possible diagnostic for a snapshot that took
+an hour of work to produce.
+
+**Two fields are implemented ahead of their content, deliberately.** The
+permanents fingerprint hashes the permanents set, which is empty until the next
+milestone builds it; the capability set is a string because the capability system
+is M7 and inventing its shape now would be guessing. Both travel in the header
+and are compared today, so the field, the comparison and the refusal are all
+exercised before the content arrives — and when the permanents table is built,
+every snapshot taken before it is correctly refused rather than silently
+mismatched.
+
+**The host stamp is asymmetric, and that is the point.** An unstamped snapshot
+restores anywhere, because a process moving its own state has nothing to check
+against. A stamped one must match. And a host that supplies a stamp refuses a
+snapshot without one — otherwise stamping would be advisory, and an unstamped
+snapshot from anywhere would pass the very check the host added to stop that.
+
+**Refusals are returned, not raised.** 10.10 calls restore untrusted input, so the
+first thing that touches those bytes must be unable to take the host down — and a
+host needs a status it can report, not an error it has to catch to learn what it
+already needed to know. Bytes that are not msgpack at all are the common case for
+a file that is not a snapshot, and the codec raises on those; the check runs the
+decode under protection.
 
 **Capability enforcement on restore is not optional.** A snapshot taken under
 privileged capabilities must not be restorable into a context that should not have
@@ -1558,7 +1658,8 @@ lazily. Registered references are consulted first, so the two compose.
 Not done: `"gone"` for a non-resident instance with `wake_on_message`, which is
 9.5 and belongs to the swarm layer.
 
-**M6: hibernate** — accessor shim and preconditions done; the rest not started.
+**M6: hibernate** — accessor shim, preconditions, value graph and header done;
+closures, Protos, permanents, thread capture and the ABI not started.
 Accessor shim, precondition checks, value graph with backreferences, closures and
 upvalue identity, permanents table, content-addressed Protos through the real dump
 path, snapshot header, validation pass and structure-aware fuzzer, host-identity
@@ -1604,6 +1705,52 @@ Also fixed in passing: `src/makefile`'s object list, which had never been update
 past M0, so `make build_platform` had been failing to link since M1. The
 amalgamation path the test suite uses was unaffected, which is why it went
 unnoticed.
+
+*Then the value graph and the header.* `src/dhash.c` (SHA-256), the snapshot mode
+in `src/dmsgpack.c`, and `src/dsnap.c` (fingerprint and header). 4.5 KB on top of
+the shim; the codec came out 0.2 KB *smaller* than the figure recorded at M5,
+because the path-recording changes that made a 150-deep cap possible also removed
+work from the common path.
+
+SHA-256 rather than a fast hash because 10.5 makes a Proto's hash a security
+boundary: a collision is a snapshot naming one function and being handed another.
+`test/dhash_check.c` checks it against the published FIPS 180-4 vectors and
+against Python's hashlib for every length from 0 to 69 — one shot, a byte at a
+time, and split at every point — because "it round-trips" proves nothing about a
+hash. 252 checks. Two of the first expectations written were digests that had not
+actually been computed; the four published vectors passed and those two did not,
+which is the right way round for that mistake to happen.
+
+The graph work is in the codec rather than beside it, because identity tracking is
+inseparable from the table walk. `msgpack.encode` still refuses a cycle, which is
+correct there — a queue message with a cycle has no agreed meaning for whoever
+receives it — so snapshot mode is a separate entry point rather than a flag.
+
+`test/dsnap_check.c`, 71 checks, and the shape of them is the point: a graph
+serializer fails *quietly*. A round trip that silently unshares two references to
+one table passes any test written as "encode, decode, compare contents". So every
+case asserts an identity relation — that two paths reach the same table, that a
+cycle closes on itself, that one class table is still the metatable of all three
+instances — rather than comparing values.
+
+Verified by mutation, five breakages each turning a named case red. One of them
+originally produced a *hang* rather than a failure, because the metatable worklist
+re-queues forever if the identity map is inconsistent; the encoder now checks that
+invariant, and the same mutation reports eight named failures instead of nothing.
+That guard exists because of what the mutation run said, not because it was
+foreseen.
+
+Two additions the milestone list did not mention, both found by needing them:
+`diluvium_queue_next` (nothing could enumerate queues, and 10.6 puts their names
+in the header) and `diluvium_msgpack_decode_n` (the C decode entry point did not
+report bytes consumed, and a header followed by a payload is exactly the case that
+needs it).
+
+Not done: closures and upvalue identity, content-addressed Protos, the permanents
+table, userdata `__persist`, thread capture, the validation pass and fuzzer, and
+`dv_snapshot`/`dv_restore`. The header's permanents and capability fields are
+implemented and compared but hash empty sets until M6's remaining parts and M7
+fill them — stated in 10.6 rather than left to be discovered.
 
 **M7: swarm layer**
 Instance table, `system/lifecycle` and `system/events`, attenuation, budgets,
@@ -1798,6 +1945,14 @@ artifact between sessions that do not share context.
   hook" were missing, and both are reachable states with distinct causes. The
   `normal`-status case — a supervisor parked inside a resume of a child — is the one
   a swarm hits routinely.
+- **§10.6's runtime identity was a list of constants.** Version, opcode set,
+  number config and `LUAC_FORMAT` are all identical between this tree's debug and
+  release builds, which emit different bytecode — so that list would have accepted
+  snapshots whose Proto hashes can never match, failing deep inside restore rather
+  than at the header. Replaced with the hash of a canary chunk's stripped dump,
+  which is self-calibrating. Found by measuring dump determinism before building
+  on it, which is the procedure below working as intended for once rather than
+  after the fact.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

@@ -64,6 +64,24 @@
 */
 #define MP_MAX_DEPTH		16
 
+/*
+** Snapshot mode gets its own, much larger cap, because the reason the plain
+** one is 16 does not apply: cycles are handled by backreferences, so this is
+** only a bound on C recursion. And 16 would be far too shallow for real
+** program state -- a linked list of twenty nodes is twenty levels deep, and
+** refusing to hibernate an agent for holding one would be absurd.
+**
+** 150 is below Lua's own LUAI_MAXCCALLS of 200, so a graph that would overflow
+** the C stack here is refused by this check first, with a message that says
+** what happened.
+*/
+#define MP_SNAP_MAX_DEPTH	150
+
+/* The deepest level whose key is recorded for an error path. Beyond this the
+   path is truncated: it is a diagnostic, and a 100-element key trail helps
+   nobody. */
+#define MP_PATH_DEPTH		MP_MAX_DEPTH
+
 /* Registry keys. Addresses of these are the keys, so they cannot collide. */
 static const char MP_SHAPE_MT = 0;      /* metatable shared by all wrappers */
 static const char MP_RESOLVER = 0;      /* light userdata -> resolver */
@@ -320,15 +338,48 @@ typedef struct mp_path {
   size_t slen;
 } mp_path;
 
+/*
+** Snapshot-mode encode state.
+**
+** 'seen' maps each table already written to its 1-based position in the object
+** stream, which is what an ext 0x04 backreference names. Position is assigned
+** when a table is first *encountered*, before its contents are written, and the
+** decoder assigns positions the same way -- so both sides number the graph in
+** the same pre-order walk without either transmitting the numbers.
+**
+** 'metas' is a flat worklist: owner, metatable, owner, metatable. Metatables
+** are not written inline, because a table's metatable is not part of its
+** contents and writing it inline would put it in the numbering at a place the
+** decoder cannot predict -- it has to create the table before it can know
+** whether a metatable follows. So they go in a trailing section instead, and
+** get their positions there. The list grows while that section is being
+** written, since a metatable may itself have one.
+*/
+typedef struct mp_snap {
+  int seen;                            /* stack index: table -> position */
+  int metas;                           /* stack index: flat owner/meta list */
+  int nwritten;                        /* metas entries already emitted */
+  unsigned long n;                     /* positions assigned so far */
+  const diluvium_snap_hooks *hooks;
+} mp_snap;
+
 typedef struct mp_ctx {
   mp_buf *buf;
-  mp_path path[MP_MAX_DEPTH + 1];
+  mp_path path[MP_PATH_DEPTH + 1];
   int depth;
+  mp_snap *snap;                       /* NULL in the plain codec */
 } mp_ctx;
 
 
+#define mp_maxdepth(ctx)  \
+	((ctx)->snap != NULL ? MP_SNAP_MAX_DEPTH : MP_MAX_DEPTH)
+
+
 static void mp_path_push (lua_State *L, mp_ctx *ctx, int keyidx) {
-  mp_path *p = &ctx->path[ctx->depth - 1];
+  mp_path *p;
+  if (ctx->depth < 1 || ctx->depth > MP_PATH_DEPTH)
+    return;  /* deeper than the path is recorded; see MP_PATH_DEPTH */
+  p = &ctx->path[ctx->depth - 1];
   switch (lua_type(L, keyidx)) {
     case LUA_TNUMBER:
       if (lua_isinteger(L, keyidx)) {
@@ -352,7 +403,8 @@ static void mp_path_push (lua_State *L, mp_ctx *ctx, int keyidx) {
 static void mp_path_render (lua_State *L, mp_ctx *ctx, luaL_Buffer *b) {
   int i;
   int wrote = 0;
-  for (i = 0; i < ctx->depth; i++) {
+  int upto = (ctx->depth < MP_PATH_DEPTH) ? ctx->depth : MP_PATH_DEPTH;
+  for (i = 0; i < upto; i++) {
     mp_path *p = &ctx->path[i];
     switch (p->kind) {
       case 1:
@@ -382,6 +434,25 @@ static int mp_err_unencodable (lua_State *L, mp_ctx *ctx, int idx) {
   luaL_addstring(&b, "msgpack: cannot encode a ");
   luaL_addstring(&b, luaL_typename(L, idx));
   luaL_addstring(&b, " value at ");
+  mp_path_render(L, ctx, &b);
+  luaL_pushresult(&b);
+  return lua_error(L);
+}
+
+
+/*
+** The same shape for anything else the encoder refuses. 5.6 makes the key path
+** part of the contract rather than a nicety, on the grounds that this message
+** is the whole diagnostic a programmer gets when their state will not
+** serialize -- and that argument does not stop applying just because the reason
+** is something other than the type.
+*/
+static int mp_err_at (lua_State *L, mp_ctx *ctx, const char *what) {
+  luaL_Buffer b;
+  luaL_buffinit(L, &b);
+  luaL_addstring(&b, "msgpack: ");
+  luaL_addstring(&b, what);
+  luaL_addstring(&b, " at ");
   mp_path_render(L, ctx, &b);
   luaL_pushresult(&b);
   return lua_error(L);
@@ -540,6 +611,48 @@ static int mp_is_array (lua_State *L, int idx, size_t *out_n) {
 static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx);
 
 
+/*
+** Give a table its position in the object stream, or write a backreference to
+** the position it already has.
+**
+** Returns 1 when a backreference was written and the caller must not encode the
+** contents, 0 when the table is new and the caller should carry on. Assigning
+** the position *before* the contents are written is what makes a cycle work: a
+** table that contains itself meets its own position on the way down.
+*/
+static int mp_snap_intern (lua_State *L, mp_ctx *ctx, int abs) {
+  mp_snap *s = ctx->snap;
+  luaL_checkstack(L, 4, "msgpack: cannot track object identity");
+  lua_pushvalue(L, abs);
+  if (lua_rawget(L, s->seen) != LUA_TNIL) {
+    unsigned long pos = (unsigned long)lua_tointeger(L, -1);
+    unsigned char be[4];
+    lua_pop(L, 1);
+    be[0] = (unsigned char)((pos >> 24) & 0xff);
+    be[1] = (unsigned char)((pos >> 16) & 0xff);
+    be[2] = (unsigned char)((pos >> 8) & 0xff);
+    be[3] = (unsigned char)(pos & 0xff);
+    mp_enc_ext(ctx->buf, 0x04, (const char *)be, 4);
+    return 1;
+  }
+  lua_pop(L, 1);
+  if (s->n >= 0xffffffffUL)
+    luaL_error(L, "msgpack: too many distinct objects for a snapshot");
+  s->n++;
+  lua_pushvalue(L, abs);
+  lua_pushinteger(L, (lua_Integer)s->n);
+  lua_rawset(L, s->seen);
+  /* Queue the metatable rather than writing it here. See mp_snap. */
+  if (lua_getmetatable(L, abs)) {
+    lua_Integer k = (lua_Integer)lua_rawlen(L, s->metas);
+    lua_pushvalue(L, abs);
+    lua_rawseti(L, s->metas, k + 1);   /* the owner */
+    lua_rawseti(L, s->metas, k + 2);   /* its metatable */
+  }
+  return 0;
+}
+
+
 static void mp_encode_array_body (lua_State *L, mp_ctx *ctx, int idx,
                                   size_t n) {
   size_t i;
@@ -547,8 +660,10 @@ static void mp_encode_array_body (lua_State *L, mp_ctx *ctx, int idx,
   for (i = 1; i <= n; i++) {
     luaL_checkstack(L, 2, "msgpack: nesting too deep to encode");
     lua_rawgeti(L, idx, (lua_Integer)i);
-    ctx->path[ctx->depth - 1].kind = 1;
-    ctx->path[ctx->depth - 1].i = (lua_Integer)i;
+    if (ctx->depth >= 1 && ctx->depth <= MP_PATH_DEPTH) {
+      ctx->path[ctx->depth - 1].kind = 1;
+      ctx->path[ctx->depth - 1].i = (lua_Integer)i;
+    }
     mp_encode_value(L, ctx, lua_gettop(L));
     lua_pop(L, 1);
   }
@@ -586,9 +701,14 @@ static void mp_encode_map_body (lua_State *L, mp_ctx *ctx, int idx) {
 static void mp_encode_table (lua_State *L, mp_ctx *ctx, int idx, int forced) {
   size_t n;
   int abs = lua_absindex(L, idx);
-  if (ctx->depth >= MP_MAX_DEPTH)
-    luaL_error(L, "msgpack: table nesting deeper than %d, or a cycle",
-               MP_MAX_DEPTH);
+  if (ctx->depth >= mp_maxdepth(ctx)) {
+    if (ctx->snap != NULL)
+      luaL_error(L, "msgpack: table nesting deeper than %d in a snapshot",
+                 MP_SNAP_MAX_DEPTH);
+    else
+      luaL_error(L, "msgpack: table nesting deeper than %d, or a cycle",
+                 MP_MAX_DEPTH);
+  }
   ctx->depth++;
   if (forced == MP_SHAPE_ARRAY) {
     n = (size_t)luaL_len(L, abs);
@@ -601,7 +721,8 @@ static void mp_encode_table (lua_State *L, mp_ctx *ctx, int idx, int forced) {
   else
     mp_encode_map_body(L, ctx, abs);
   ctx->depth--;
-  ctx->path[ctx->depth].kind = 0;  /* leave no stale trail behind */
+  if (ctx->depth <= MP_PATH_DEPTH)
+    ctx->path[ctx->depth].kind = 0;  /* leave no stale trail behind */
 }
 
 
@@ -628,6 +749,20 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
     }
     case LUA_TTABLE: {
       int kind = mp_shape_of(L, abs);
+      if (ctx->snap != NULL) {
+        /* A shape wrapper is an encoding directive, not program state, and its
+           hidden metatable is shared runtime furniture that must not end up in
+           a snapshot's object graph. Refusing is the honest answer: silently
+           unwrapping would restore a plain table where the program left a
+           wrapper, which is a difference it can see. */
+        if (kind != 0)
+          mp_err_at(L, ctx, "a snapshot cannot contain a msgpack shape "
+                            "wrapper (as_array, as_map or ext)");
+        if (mp_snap_intern(L, ctx, abs))
+          return;
+        mp_encode_table(L, ctx, abs, 0);
+        return;
+      }
       if (kind == MP_SHAPE_EXT) {
         size_t len;
         const char *data;
@@ -665,6 +800,25 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
     if (r != NULL && r->encode != NULL && r->encode(L, abs, r->ud))
       return;
   }
+  if (ctx->snap != NULL) {
+    /*
+    ** 10.7 item 3 refuses light userdata outright, and it is worth saying why
+    ** here rather than only in the document: a light userdata is a bare
+    ** pointer. There is no type to consult, no metatable to carry a '__persist'
+    ** hook, and nothing that makes the address mean the same thing in the
+    ** process that restores it. Every other refusal in this function is "not
+    ** yet"; this one is permanent.
+    */
+    if (lua_type(L, abs) == LUA_TLIGHTUSERDATA)
+      mp_err_at(L, ctx, "a snapshot cannot contain light userdata (a bare "
+                        "pointer has no type and no way to be reconstituted)");
+    /* Functions, userdata and threads belong to the snapshot layer, which owns
+       ext 0x03 and 0x05 through 0x07. Until it is installed they fall through
+       to the ordinary error, which already names the type and the path. */
+    if (ctx->snap->hooks != NULL && ctx->snap->hooks->encode != NULL &&
+        ctx->snap->hooks->encode(L, abs, ctx->snap->hooks->ud))
+      return;
+  }
   mp_err_unencodable(L, ctx, abs);
 }
 
@@ -673,11 +827,38 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
 ** Decode
 ** ====================================================================== */
 
+/*
+** Snapshot-mode decode state. 'objs' is the mirror of the encoder's 'seen': an
+** array whose Nth slot is the Nth object the stream mentioned. A table is
+** registered as soon as it exists and before its contents are read, which is
+** the same pre-order rule the encoder uses -- so the two agree on numbering
+** without the numbers being on the wire, and a cycle resolves because the
+** backreference inside a table finds the table itself already registered.
+*/
+typedef struct mp_unsnap {
+  int objs;                            /* stack index: position -> object */
+  unsigned long n;                     /* positions filled so far */
+  const diluvium_snap_hooks *hooks;
+} mp_unsnap;
+
 typedef struct mp_cur {
   lua_State *L;
   const unsigned char *p;
   size_t left;
+  mp_unsnap *snap;                     /* NULL in the plain codec */
 } mp_cur;
+
+
+/*
+** Register the table on top of the stack as the next object. Leaves it on top.
+*/
+static void mp_unsnap_register (mp_cur *c) {
+  lua_State *L = c->L;
+  mp_unsnap *s = c->snap;
+  s->n++;
+  lua_pushvalue(L, -1);
+  lua_rawseti(L, s->objs, (lua_Integer)s->n);
+}
 
 
 static void mp_need (mp_cur *c, size_t n) {
@@ -729,6 +910,8 @@ static void mp_decode_array (mp_cur *c, size_t n, int depth) {
   size_t i;
   luaL_checkstack(L, 3, "msgpack: nesting too deep to decode");
   lua_createtable(L, (int)((n > (size_t)INT_MAX) ? 0 : n), 0);
+  if (c->snap != NULL)
+    mp_unsnap_register(c);  /* before the contents: a cycle needs this */
   for (i = 1; i <= n; i++) {
     mp_decode_value(c, depth + 1);
     lua_rawseti(L, -2, (lua_Integer)i);
@@ -741,6 +924,8 @@ static void mp_decode_map (mp_cur *c, size_t n, int depth) {
   size_t i;
   luaL_checkstack(L, 4, "msgpack: nesting too deep to decode");
   lua_createtable(L, 0, (int)((n > (size_t)INT_MAX) ? 0 : n));
+  if (c->snap != NULL)
+    mp_unsnap_register(c);  /* before the contents: a cycle needs this */
   for (i = 0; i < n; i++) {
     mp_decode_value(c, depth + 1);  /* key */
     if (lua_isnil(L, -1))
@@ -785,7 +970,38 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
       mp_ext_push(L, code, data, len);
       return;
     }
-    case 0x03: case 0x04: case 0x05: case 0x06: case 0x07:
+    case 0x04:
+      if (c->snap != NULL) {  /* backreference to an object already read */
+        unsigned long pos;
+        if (len != 4)
+          luaL_error(L, "msgpack: a backreference must be 4 bytes, not %d",
+                     (int)len);
+        pos = ((unsigned long)(unsigned char)data[0] << 24) |
+              ((unsigned long)(unsigned char)data[1] << 16) |
+              ((unsigned long)(unsigned char)data[2] << 8) |
+              (unsigned long)(unsigned char)data[3];
+        /* 10.10 wants this checked rather than trusted: in range, and never
+           forward. A forward reference would name an object that does not
+           exist yet, and accepting one would put a nil where a table belongs
+           and fail somewhere else entirely. */
+        if (pos < 1 || pos > c->snap->n)
+          luaL_error(L, "msgpack: backreference %I is out of range (%I objects "
+                        "so far)", (lua_Integer)pos, (lua_Integer)c->snap->n);
+        lua_rawgeti(L, c->snap->objs, (lua_Integer)pos);
+        return;
+      }
+      luaL_error(L, "msgpack: ext %s is only valid inside a snapshot stream",
+                 mp_hexbyte(code));
+      return;
+    case 0x03: case 0x05: case 0x06: case 0x07:
+      if (c->snap != NULL && c->snap->hooks != NULL &&
+          c->snap->hooks->decode != NULL &&
+          c->snap->hooks->decode(L, code, (const unsigned char *)data, len,
+                                 c->snap->hooks->ud))
+        return;
+      if (c->snap != NULL)
+        luaL_error(L, "msgpack: ext %s needs a snapshot decoder that is not "
+                      "installed", mp_hexbyte(code));
       luaL_error(L, "msgpack: ext %s is only valid inside a snapshot stream",
                  mp_hexbyte(code));
       return;
@@ -800,8 +1016,9 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
 static void mp_decode_value (mp_cur *c, int depth) {
   lua_State *L = c->L;
   unsigned char t;
-  if (depth > MP_MAX_DEPTH)
-    luaL_error(L, "msgpack: nesting deeper than %d", MP_MAX_DEPTH);
+  if (depth > (c->snap != NULL ? MP_SNAP_MAX_DEPTH : MP_MAX_DEPTH))
+    luaL_error(L, "msgpack: nesting deeper than %d",
+               c->snap != NULL ? MP_SNAP_MAX_DEPTH : MP_MAX_DEPTH);
   luaL_checkstack(L, 2, "msgpack: cannot grow the stack to decode");
   mp_need(c, 1);
   t = c->p[0];
@@ -923,9 +1140,10 @@ static int mp_encode (lua_State *L) {
   if (lua_gettop(L) != 1)
     return luaL_error(L, "msgpack.encode takes exactly one value");
   memset(&ctx, 0, sizeof(ctx));
-  for (i = 0; i <= MP_MAX_DEPTH; i++)
+  for (i = 0; i <= MP_PATH_DEPTH; i++)
     ctx.path[i].kind = 0;
   ctx.depth = 0;
+  ctx.snap = NULL;
   ctx.buf = mp_buf_new(L);  /* on the stack: freed by '__gc' however we exit */
   mp_encode_value(L, &ctx, 1);
   lua_pushlstring(L, (const char *)ctx.buf->b, ctx.buf->len);
@@ -945,6 +1163,7 @@ static int mp_decode (lua_State *L) {
   c.L = L;
   c.p = (const unsigned char *)s + (offset - 1);
   c.left = len - (size_t)(offset - 1);
+  c.snap = NULL;
   mp_decode_value(&c, 0);
   if (wants_next) {
     /* 5.4: decode(str, offset) also returns where the next value starts.
@@ -962,6 +1181,7 @@ LUA_API void diluvium_msgpack_encode (lua_State *L, int idx) {
   int base;
   memset(&ctx, 0, sizeof(ctx));
   ctx.depth = 0;
+  ctx.snap = NULL;
   ctx.buf = mp_buf_new(L);
   base = lua_gettop(L);  /* the buffer sits here and must be dropped after */
   mp_encode_value(L, &ctx, abs);
@@ -971,11 +1191,168 @@ LUA_API void diluvium_msgpack_encode (lua_State *L, int idx) {
 
 
 LUA_API void diluvium_msgpack_decode (lua_State *L, const char *s, size_t len) {
+  diluvium_msgpack_decode_n(L, s, len, NULL);
+}
+
+
+LUA_API void diluvium_msgpack_decode_n (lua_State *L, const char *s, size_t len,
+                                        size_t *used) {
   mp_cur c;
   c.L = L;
   c.p = (const unsigned char *)s;
   c.left = len;
+  c.snap = NULL;
   mp_decode_value(&c, 0);
+  if (used != NULL)
+    *used = len - c.left;
+}
+
+
+/* ======================================================================
+** Snapshot mode
+** ====================================================================== */
+
+LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
+                                    const diluvium_snap_hooks *h) {
+  mp_ctx ctx;
+  mp_snap snap;
+  int abs = lua_absindex(L, idx);
+  int base = lua_gettop(L);
+  int i;
+  luaL_checkstack(L, 8, "msgpack: cannot start a snapshot");
+  memset(&ctx, 0, sizeof(ctx));
+  for (i = 0; i <= MP_PATH_DEPTH; i++)
+    ctx.path[i].kind = 0;
+  ctx.depth = 0;
+  ctx.buf = mp_buf_new(L);                    /* base + 1 */
+  lua_newtable(L);                            /* base + 2: seen */
+  lua_newtable(L);                            /* base + 3: metas */
+  snap.seen = base + 2;
+  snap.metas = base + 3;
+  snap.nwritten = 0;
+  snap.n = 0;
+  snap.hooks = h;
+  ctx.snap = &snap;
+
+  mp_encode_value(L, &ctx, abs);              /* the root */
+
+  /*
+  ** Drain the metatable worklist. Written as a re-checked length rather than a
+  ** cached one on purpose: encoding a metatable can discover further
+  ** metatables and append to this same list, and a cached bound would drop
+  ** them silently -- which would restore a graph that looks right until
+  ** something two levels down has lost its metatable.
+  */
+  while ((lua_Integer)snap.nwritten * 2 < (lua_Integer)lua_rawlen(L, snap.metas)) {
+    lua_Integer k = (lua_Integer)snap.nwritten * 2;
+    unsigned long pos;
+    luaL_checkstack(L, 4, "msgpack: cannot walk metatables");
+    lua_rawgeti(L, snap.metas, k + 1);        /* the owner */
+    lua_pushvalue(L, -1);
+    lua_rawget(L, snap.seen);                 /* its position: it is interned */
+    pos = (unsigned long)lua_tointeger(L, -1);
+    lua_pop(L, 2);
+    /*
+    ** An owner reaches this list only from inside 'mp_snap_intern', after its
+    ** position is recorded, so a zero here is impossible unless the two have
+    ** drifted apart. Checked rather than asserted because the failure without
+    ** it is not a wrong answer but a *hang*: a position of zero means the
+    ** metatable is re-queued every pass and the loop never drains. Found by
+    ** removing the identity map to see what the tests would say, and getting
+    ** no answer at all.
+    */
+    if (pos == 0)
+      luaL_error(L, "msgpack: internal error, a queued metatable owner has no "
+                    "position");
+    snap.nwritten++;
+    /*
+    ** Position and metatable go out as two consecutive top-level values, not
+    ** as a two-element array. An array here would be a *table* on the wire, and
+    ** the decoder registers every table it creates as an object -- so the
+    ** wrapper would take a position the encoder never assigned and every
+    ** position after the first metatable would be off by one. Found exactly
+    ** that way: the first metatable restored correctly and the rest did not.
+    */
+    mp_enc_int(ctx.buf, (lua_Integer)pos);
+    lua_rawgeti(L, snap.metas, k + 2);        /* the metatable */
+    mp_encode_value(L, &ctx, lua_gettop(L));
+    lua_pop(L, 1);
+  }
+  mp_enc_nil(ctx.buf);                        /* end of the metatable section */
+
+  lua_pushlstring(L, (const char *)ctx.buf->b, ctx.buf->len);
+  lua_replace(L, base + 1);                   /* over the buffer */
+  lua_settop(L, base + 1);                    /* drop seen and metas */
+}
+
+
+LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
+                                    size_t len,
+                                    const diluvium_snap_hooks *h) {
+  mp_cur c;
+  mp_unsnap snap;
+  int base = lua_gettop(L);
+  luaL_checkstack(L, 8, "msgpack: cannot start a restore");
+  lua_newtable(L);                            /* base + 1: objs */
+  snap.objs = base + 1;
+  snap.n = 0;
+  snap.hooks = h;
+  c.L = L;
+  c.p = (const unsigned char *)s;
+  c.left = len;
+  c.snap = &snap;
+
+  mp_decode_value(&c, 0);                     /* the root: base + 2 */
+
+  /* The metatable section, terminated by nil. */
+  for (;;) {
+    lua_Integer pos;
+    if (c.left == 0)
+      luaL_error(L, "msgpack: snapshot graph ended without its metatable "
+                    "terminator");
+    mp_decode_value(&c, 0);                   /* the owner's position, or nil */
+    if (lua_isnil(L, -1)) {
+      lua_pop(L, 1);
+      break;
+    }
+    if (!lua_isinteger(L, -1))
+      luaL_error(L, "msgpack: a metatable entry's owner must be an integer "
+                    "position");
+    pos = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (pos < 1 || (unsigned long)pos > snap.n)
+      luaL_error(L, "msgpack: metatable owner position %I is out of range (%I "
+                    "objects)", pos, (lua_Integer)snap.n);
+    if (c.left == 0)
+      luaL_error(L, "msgpack: a metatable entry's owner has no metatable "
+                    "after it");
+    mp_decode_value(&c, 0);                   /* the metatable */
+    if (!lua_istable(L, -1))
+      luaL_error(L, "msgpack: a metatable must be a table");
+    lua_rawgeti(L, snap.objs, pos);           /* the owner */
+    if (!lua_istable(L, -1))
+      luaL_error(L, "msgpack: object %I is not a table and cannot take a "
+                    "metatable", pos);
+    lua_insert(L, -2);                        /* owner, metatable */
+    /*
+    ** The metatable goes on after the contents, which is the only order
+    ** available: the owner has to exist before anything can refer to it, and
+    ** its contents are read on the way past. For a weak table that means the
+    ** entries were inserted while it was still strong and '__mode' is applied
+    ** afterwards. The collector reads '__mode' from the metatable at each
+    ** traversal rather than caching it at insert time, so the weakness does
+    ** take effect -- but this is the one place in the restore where the result
+    ** depends on collector behaviour rather than on the format, and it is worth
+    ** knowing that before something else is built on top of it.
+    */
+    lua_setmetatable(L, -2);
+    lua_pop(L, 1);                            /* the owner */
+  }
+
+  if (c.left != 0)
+    luaL_error(L, "msgpack: %I bytes left over after the snapshot graph",
+               (lua_Integer)c.left);
+  lua_remove(L, base + 1);                    /* drop objs, leaving the root */
 }
 
 

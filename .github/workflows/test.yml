@@ -134,6 +134,23 @@ jobs:
       - name: Run the accessor-shim contract tests
         run: make dshim_check
 
+      # SHA-256 against the published vectors. Checked against the standard and
+      # not against itself, because 10.5 makes a Proto's hash a security
+      # boundary: a collision is a snapshot naming one function and being handed
+      # another. Builds without Lua, which is also part of the contract.
+      - name: Run the SHA-256 conformance tests
+        run: make dhash_check
+
+      # The snapshot value graph and header.
+      - name: Run the snapshot contract tests
+        run: make dsnap_check
+
+      # Needs two builds of the tree, so it cannot live in dsnap_check.c: the
+      # runtime fingerprint must separate builds whose version and LUAC_FORMAT
+      # are identical, which is the measurement 10.6 was corrected from.
+      - name: Check that the runtime fingerprint separates builds
+        run: ./test/fingerprint_check.sh
+
       # Needs a signal and a subprocess, so it cannot live in run_tests.sh.
       # The --task case is the one that regresses silently.
       - name: Check that Ctrl-C interrupts a runaway loop

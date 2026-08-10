@@ -821,6 +821,40 @@ LUA_API void diluvium_queue_setnotify (lua_State *L, diluvium_queue_notify fn,
 
 
 /*
+** Iterate the live queues. See dqueue.h for why this exists.
+**
+** Walks the dense handle array, skipping the 'false' slots a destroyed handle
+** leaves behind. Leaves the stack as it found it.
+*/
+LUA_API lua_Integer diluvium_queue_next (lua_State *L, lua_Integer after,
+                                        const char **name) {
+  int base = lua_gettop(L);
+  lua_Integer n, i;
+  if (name != NULL) *name = NULL;
+  dq_state(L);
+  n = (lua_Integer)lua_rawlen(L, -1);
+  for (i = (after < 0 ? 0 : after) + 1; i <= n; i++) {
+    if (lua_rawgeti(L, -1, i) == LUA_TTABLE) {
+      if (name != NULL) {
+        lua_getfield(L, -1, DQ_NAME);
+        *name = lua_tostring(L, -1);
+        /* The name is left on the stack under no protection, which would be a
+           collector hazard -- except that the queue table itself holds it and
+           the queue is anchored in the registry. So the string outlives this
+           call for exactly as long as its queue does, which is the contract. */
+        lua_pop(L, 1);
+      }
+      lua_settop(L, base);
+      return i;
+    }
+    lua_pop(L, 1);
+  }
+  lua_settop(L, base);
+  return 0;
+}
+
+
+/*
 ** Tell the host, if it asked and if this queue is one it can see. Called after
 ** a guest push has been accepted, never after a host push: a host does not need
 ** telling about a message it just sent.
