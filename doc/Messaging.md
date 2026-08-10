@@ -120,10 +120,10 @@ said would happen:
 
 | Component | Target | Measured (linux-x86_64, `-O3`, stripped text) |
 |---|---|---|
-| msgpack codec | under 25 KB | 13.3 KB, snapshot mode included |
+| msgpack codec | under 25 KB | 16.0 KB, snapshot mode included |
 | queue subsystem | under **20 KB** | 17.6 KB — `dqueue.c` 15.0 + `dendpoint.c` 2.6 |
 | instance C ABI | under 10 KB | 6.1 KB |
-| hibernate | under 30 KB | 6.0 KB so far — `dshim.c` 1.5 + `dhash.c`/`dsnap.c` 4.5 |
+| hibernate | under 30 KB | 10.8 KB so far — `dshim.c` 1.5 + `dhash.c`/`dsnap.c` 9.3 |
 | swarm layer | separate library, not counted | not built |
 
 The queue target moved from 15 KB, and the reason is worth recording rather than
@@ -305,7 +305,7 @@ not understand it.
 |---|---|---|
 | 0x01 | Decimal value | Reserved for decQuad. Do not implement. |
 | 0x02 | Endpoint reference | Implemented in Part 3. Requires a resolver; see 4.2. |
-| 0x03 | Proto reference by hash | Implemented in Part 6. |
+| 0x03 | Proto reference by hash | Implemented in Part 6, carried inside 0x06 rather than standing alone. |
 | 0x04 | Backreference | Implemented in Part 6. |
 | 0x05 | Persisted userdata | Implemented in Part 6. |
 | 0x06 | Closure | Implemented in Part 6. |
@@ -323,6 +323,28 @@ runtime change.
 
 Codes 0x03 through 0x07 are only valid inside a snapshot stream. `msgpack.decode`
 must reject them.
+
+**0x04 is the codec's own**; the other four belong to the snapshot layer through a
+hook seam, the same shape 4.2 uses for 0x02. Backreferences have to be the
+codec's, because only the codec walks tables and the position a backreference
+names is assigned by that walk.
+
+**0x03 does not appear as a standalone object.** Its payload — an inline flag, a
+32-byte hash, and the stripped dump when inlined — is carried inside every 0x06
+closure record instead. A snapshot has no bare prototypes to point at: a
+prototype is not a Lua value, so it could not take a position in the object graph
+without inventing a pseudo-value for it, and nothing would be gained. The code
+stays assigned and its payload layout is exactly what the table says, so a future
+standalone use needs no renumbering.
+
+**0x03 and 0x07 take no position in the object graph; 0x05 and 0x06 do.** A
+prototype is not a value, and a permanent is a name for something both processes
+already have — neither is part of the graph. Persisted userdata and closures are.
+This asymmetry is part of the format rather than an implementation detail: give a
+position to something the encoder did not, or withhold one it did, and every
+backreference past the first such object silently resolves to the wrong object,
+with no error anywhere. Nothing in the test file noticed when 0x07 was wrongly
+given one, until a case was written whose backreference *crosses* a permanent.
 
 ### 5.6 Non-encodable values
 
@@ -981,11 +1003,13 @@ check red, and it is that one.
 Restrict v1 to a **single thread**. An agent driving nested coroutines is out of
 scope; refuse with a clear message.
 
-**How metatables travel, and why not inline.** A table's metatable is not part of
-its contents, and writing it inline would put it in the position numbering at a
-place the decoder cannot predict — the decoder has to create a table before it can
-know whether a metatable followed. So metatables go in a trailing section: the
-root value, then (owner position, metatable) pairs, then a nil.
+**How metatables and upvalues travel, and why not inline.** Neither is part of its
+owner's contents, and writing either inline would put it in the position numbering
+at a place the decoder cannot predict — the decoder has to create the owner before
+it can know whether anything followed. So both go in one trailing *fixup* section:
+the root value, then tagged fixups, then a nil. Three tags: `META` (position,
+metatable), `UPVAL` (position, index, value) and `UPJOIN` (position, index, source
+position, source index).
 
 A nil terminator rather than a length prefix because the list grows while it is
 being written — a metatable may have a metatable, which is ordinary inheritance —
@@ -998,6 +1022,15 @@ decoder gives every table it creates a position. A wrapper therefore takes a
 position the encoder never assigned, and every position after the first metatable
 is off by one. The symptom was the first metatable restoring correctly and the
 rest not.
+
+**Upvalue identity is `UPJOIN`.** Two closures over one variable are written as
+one `UPVAL` and one `UPJOIN`, and the decoder replays the second with
+`lua_upvaluejoin`. The encoder claims an upvalue for the first closure that
+reaches it and drains closures in order, so an `UPJOIN` always follows the `UPVAL`
+it refers to. This is the one requirement in 10.3 that no amount of copying values
+can satisfy, and the only test that can tell the difference is one that mutates
+through one closure and reads through the other — comparing values passes even
+when each closure got a private copy.
 
 **Metatables are applied after contents**, which is the only order available: the
 owner must exist before anything can reference it, and its contents are read on
@@ -1030,6 +1063,28 @@ Build it by walking the base libraries at init. The result must be identical on
 save and restore, which means the same runtime build and module set. Include a
 fingerprint of it in the snapshot header.
 
+**`_G` and the library tables are in it too**, and that is the part the draft did
+not say. They are *tables*, so an encoder will happily serialize them — and then a
+snapshot of one closure that calls one global drags the entire global environment
+in, every C function in it included, and fails on the first of those. Naming them
+instead costs one short ext object for a closure's `_ENV` upvalue. The permanents
+check therefore runs on tables as well as functions, and it runs *before* the
+object graph gives anything a position.
+
+**Naming has to be order-independent.** A value reachable by two paths — `string`
+is both `_G.string` and `package.loaded.string` — must get the same name in every
+process, and first-path-wins only settles that if the order of paths is settled. So
+the modules are walked in a fixed list rather than by iterating `package.loaded`,
+and the fingerprint is computed over the *sorted* name list, so it does not depend
+on iteration order even though this tree's iteration order is deterministic. That
+costs one sort per state and removes a dependency; a fingerprint that varied
+silently would turn every restore into a refusal — safe, but useless.
+
+**A C function that is not in the set is a refusal, and says so.** The message
+names the permanents table and says a host registering its own C functions must
+name them, because that is the cause every time and the generic "cannot encode a
+function value" sends the reader looking in the wrong place.
+
 ### 10.5 Content-addressed code
 
 Do not choose between carrying bytecode and not carrying it. Reference by hash any
@@ -1046,6 +1101,23 @@ Hashing rules:
   set, number configuration, `LUAC_FORMAT`, and the permanents fingerprint.
 - Restore requires an exact match. Mismatch is a clean refusal, never a
   best-effort load.
+
+**And the hash is verified against the bytes, not trusted.** An inlined prototype
+whose bytes hash to something other than the name it carries is refused. That is
+not the same check as the loader's: `lverify.c` rejects malformed bytecode, and
+would reject most tampering anyway, which is exactly why this needed its own test
+— the first version flipped a byte of the instruction stream, the loader caught it,
+and the case stayed green with the hash verification removed. Flipping a byte of
+the *hash* is the case that isolates it: the bytecode loads perfectly, and what is
+wrong is that the record claims a name its bytes do not own. Since the reference
+case hands that name out to whoever asks for it later, accepting one would let a
+snapshot install code under someone else's name.
+
+**Dedup happens twice, for two reasons.** A prototype already in the target
+runtime's registry is referenced — that is 10.5's point, and what a host
+pre-registers for a shared library. A prototype already *inlined earlier in the
+same stream* is also referenced, which is what makes a swarm of ten agents over
+one generated function cost one copy and nine hashes rather than ten copies.
 
 **This depends on dump determinism**, which this tree already has and should keep
 deliberately: the string hash seed is fixed (`luaconf.h` defines `luai_makeseed`
@@ -1197,6 +1269,14 @@ machinery means `taintSecureStrings` and the per-string scramble flag come along
 free. A parallel encoder is precisely how this class of bug happens a second time —
 the string-taint fix exists because scrambling decided at one site did not hold at
 another.
+
+Rule 1 is satisfied structurally rather than by discipline: prototype encoding
+*is* `lua_dump`, so there is no parallel encoder that could drift. The test that
+this actually holds is the one from `test_secure_dump.lua` pointed at a snapshot
+instead of a dump — put a distinctive literal inside a `~function`, snapshot it,
+and search the whole stream for the literal. It is not there, and the function
+still returns it after a round trip, which matters because scrambling achieved by
+breaking the function would pass the first half alone.
 
 **2. State on the record that a snapshot is as sensitive as a memory dump.**
 Scrambling covers Protos, not live data. A secure function's constants may be
@@ -1658,8 +1738,9 @@ lazily. Registered references are consulted first, so the two compose.
 Not done: `"gone"` for a non-resident instance with `wake_on_message`, which is
 9.5 and belongs to the swarm layer.
 
-**M6: hibernate** — accessor shim, preconditions, value graph and header done;
-closures, Protos, permanents, thread capture and the ABI not started.
+**M6: hibernate** — accessor shim, preconditions, value graph, header, permanents,
+prototypes and closures done; userdata, thread capture, the validation fuzzer and
+the ABI not started.
 Accessor shim, precondition checks, value graph with backreferences, closures and
 upvalue identity, permanents table, content-addressed Protos through the real dump
 path, snapshot header, validation pass and structure-aware fuzzer, host-identity
@@ -1746,11 +1827,45 @@ in the header) and `diluvium_msgpack_decode_n` (the C decode entry point did not
 report bytes consumed, and a header followed by a payload is exactly the case that
 needs it).
 
-Not done: closures and upvalue identity, content-addressed Protos, the permanents
-table, userdata `__persist`, thread capture, the validation pass and fuzzer, and
-`dv_snapshot`/`dv_restore`. The header's permanents and capability fields are
-implemented and compared but hash empty sets until M6's remaining parts and M7
-fill them — stated in 10.6 rather than left to be discovered.
+*Then permanents, prototypes and closures.* 9.3 KB across `dhash.c` and `dsnap.c`,
+plus 2.7 KB of snapshot mode in the codec. `dsnap_check.c` is 112 checks.
+
+Four assumptions were probed against the tree before any of it was written, per
+17's procedure, and all four held: a *nested* closure can be dumped and reloaded
+(95 bytes stripped); `lua_load` forces upvalue 1 to the globals table, so every
+upvalue must be overwritten from the graph rather than trusted; `lua_upvaluejoin`
+genuinely restores sharing, verified by mutating through one closure and reading
+through the other; and two closures of one prototype dump identically, which is
+what content addressing needs.
+
+The fixup section from the previous slice was generalised rather than joined by a
+third mechanism: metatables and upvalues are both things that are not part of their
+owner's contents, so they are both tagged fixups. `UPJOIN` is the whole of 10.3's
+upvalue identity.
+
+Permanents cover `_G` and the library tables, not only C functions, and 10.4 has
+been corrected to say so — a snapshot of one closure calling one global would
+otherwise drag the entire global environment in. Measured: such a snapshot is 41
+bytes.
+
+Verified by mutation, seven breakages. **Two initially turned nothing red**, and
+both gaps were real:
+
+Giving ext 0x07 a position on decode broke nothing, because noticing needs a
+backreference that *crosses* a permanent — and then it silently resolves to the
+wrong object rather than failing. `a_permanent_does_not_shift_positions` is that
+case.
+
+Removing the inlined-prototype hash verification broke nothing, because the
+tampering case flipped a byte of bytecode and the loader caught it. Worse, both
+tampering cases turned out to be testing the *reference* path, because an earlier
+test had registered the same prototype — one of them passing on a "not present in
+this runtime" refusal unrelated to its own claim. Both now use distinct function
+bodies and assert the record inlines its prototype before tampering with it.
+
+Not done: userdata `__persist` (ext 0x05), thread capture, the structure-aware
+fuzzer, and `dv_snapshot`/`dv_restore`. The header's capability field is still
+compared against an empty set until M7.
 
 **M7: swarm layer**
 Instance table, `system/lifecycle` and `system/events`, attenuation, budgets,
@@ -1953,6 +2068,23 @@ artifact between sessions that do not share context.
   which is self-calibrating. Found by measuring dump determinism before building
   on it, which is the procedure below working as intended for once rather than
   after the fact.
+- **§10.4 named only C functions.** `_G` and the library tables are tables, so an
+  encoder serializes them happily — and a snapshot of one closure that calls one
+  global then drags the whole global environment in and fails on the first C
+  function it meets. The permanents check has to run on tables, and before the
+  object graph assigns positions.
+- **§5.5 implied ext 0x03 stands alone.** It cannot: a prototype is not a Lua
+  value, so it cannot take a position in the object graph. Its payload is carried
+  inside 0x06.
+- **A test can pass for the wrong reason, and mutation is what finds it.** Two
+  prototype-tampering cases were silently exercising the reference path instead of
+  the inline path, because an earlier test in the same file had registered the same
+  prototype; one of them was passing on a refusal that had nothing to do with what
+  it claimed to check. Removing the mitigation and watching *nothing* go red is the
+  only thing that surfaced it. That has now happened three times in this milestone
+  — the innermost-frame exemption, ext 0x07's position, and this — which is enough
+  to say the rule plainly: a green test is evidence only after its mitigation has
+  been removed once.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

@@ -31,6 +31,7 @@
 #include "lua.h"
 
 #include "dhash.h"
+#include "dmsgpack.h"
 
 
 /* Snapshot format version. Bumped when the stream layout changes. */
@@ -109,6 +110,52 @@ LUA_API int diluvium_snap_checkheader (lua_State *L,
 
 /* A sentence naming a refusal, for the diagnostic a person actually reads. */
 LUA_API const char *diluvium_snap_why (int code);
+
+
+/*
+** The permanents table (10.4).
+**
+** Every C function reachable from the program has to be in it -- not just
+** hostcalls. 'print', 'table.insert' and the rest are C closures and traversal
+** hits them immediately, and a C function cannot be serialized: its code is in
+** the host binary. So it is *named* instead, and the name is resolved back on
+** restore.
+**
+** '_G' and the standard library tables are in it too, and that is the part worth
+** stating. They are tables, so an encoder would happily serialize them -- and
+** would then drag the entire global environment into every snapshot, including
+** every C function in it, which would fail anyway. Naming them instead means a
+** closure's '_ENV' upvalue costs one short ext object.
+**
+** Built once per state, on first use. Idempotent.
+*/
+LUA_API void diluvium_snap_permanents (lua_State *L);
+
+
+/*
+** Register a function's prototype so a snapshot can reference it by hash instead
+** of carrying its bytecode (10.5).
+**
+** This is the whole of the "a swarm of generated one-off agents sharing a common
+** library inlines only the unique part" story: whatever a host pre-registers is
+** referenced, everything else is inlined. A host that registers nothing gets
+** self-contained snapshots, which is the right default.
+**
+** The function must be a Lua closure. Returns 1, or 0 if it is not.
+*/
+LUA_API int diluvium_snap_register (lua_State *L, int idx);
+
+/* How many prototypes are registered. For a host reporting its own state. */
+LUA_API int diluvium_snap_registered (lua_State *L);
+
+
+/*
+** The hooks the codec's snapshot mode needs, filled in for this runtime.
+**
+** Handed to 'diluvium_msgpack_encode_graph' and '..._decode_graph'. Valid for as
+** long as 'L' is; the state it needs lives in the registry, not in the struct.
+*/
+LUA_API const diluvium_snap_hooks *diluvium_snap_hooks_for (lua_State *L);
 
 
 /*

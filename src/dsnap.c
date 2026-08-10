@@ -108,25 +108,191 @@ LUA_API void diluvium_snap_fingerprint (lua_State *L, char *out) {
 }
 
 
+/* ======================================================================
+** Permanents (10.4)
+** ====================================================================== */
+
 /*
-** The permanents fingerprint.
+** Two registry tables, because the map is needed in both directions: value to
+** name while encoding, name to value while restoring. Kept as tables rather than
+** one table with mixed keys so that a program-supplied string can never collide
+** with a permanent's value.
+*/
+static const char DS_PERM_NAME = 0;     /* value -> name  */
+static const char DS_PERM_VALUE = 0;    /* name  -> value */
+static const char DS_PERM_FP = 0;       /* the cached fingerprint hex */
+
+/*
+** The modules walked, in this fixed order.
 **
-** 10.4 wants a hash of the permanents table, and the permanents table is the
-** next milestone. The mechanism is here now and computes over whatever the
-** permanents registry holds -- today nothing, so this is the hash of the empty
-** set. Written this way rather than left out so the field, the comparison and
-** its refusal are all exercised before the content arrives; when the table is
-** built, this starts returning a different value and every snapshot taken
-** before it is correctly refused.
+** Fixed rather than discovered by iterating 'package.loaded', and the reason is
+** determinism of *naming* rather than of iteration. A value reachable by two
+** paths -- 'string' is both '_G.string' and 'package.loaded.string' -- must get
+** the same name in every process, and first-path-wins only settles that if the
+** order of paths is settled. Iteration order inside one module is left to
+** 'pairs', which this tree makes deterministic (luaconf.h fixes the string hash
+** seed and test_determinism.lua asserts it), and the permanents fingerprint in
+** the header is the backstop if that ever stops being true.
+*/
+static const char *const DS_MODULES[] = {
+  "coroutine", "debug", "io", "math", "os", "string", "table", "utf8",
+  "msgpack", "queue", "endpoint", NULL
+};
+
+
+/*
+** Record one permanent. 'nameidx' and 'validx' are absolute stack indices of
+** the two registry tables.
+*/
+static void ds_perm_put (lua_State *L, int nameidx, int validx,
+                         const char *name) {
+  /* stack: ... value */
+  int t = lua_type(L, -1);
+  if (t != LUA_TFUNCTION && t != LUA_TTABLE) {
+    lua_pop(L, 1);
+    return;
+  }
+  lua_pushvalue(L, -1);
+  if (lua_rawget(L, nameidx) != LUA_TNIL) {  /* already named: first wins */
+    lua_pop(L, 2);
+    return;
+  }
+  lua_pop(L, 1);
+  /* name -> value */
+  lua_pushstring(L, name);
+  lua_pushvalue(L, -2);
+  lua_rawset(L, validx);
+  /* value -> name */
+  lua_pushstring(L, name);
+  lua_rawset(L, nameidx);
+}
+
+
+/* Walk one table's direct fields, naming C functions as "prefix.key". */
+static void ds_perm_walk (lua_State *L, int nameidx, int validx,
+                          int tableidx, const char *prefix) {
+  char buf[128];
+  lua_pushnil(L);
+  while (lua_next(L, tableidx) != 0) {
+    /* stack: ... key value */
+    if (lua_type(L, -2) == LUA_TSTRING && lua_iscfunction(L, -1)) {
+      const char *key = lua_tostring(L, -2);
+      if (prefix == NULL)
+        snprintf(buf, sizeof(buf), "%s", key);
+      else
+        snprintf(buf, sizeof(buf), "%s.%s", prefix, key);
+      ds_perm_put(L, nameidx, validx, buf);  /* pops the value */
+    }
+    else
+      lua_pop(L, 1);
+    /* the key stays, driving the walk */
+  }
+}
+
+
+LUA_API void diluvium_snap_permanents (lua_State *L) {
+  int base = lua_gettop(L);
+  int nameidx, validx, i;
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PERM_NAME) == LUA_TTABLE) {
+    lua_settop(L, base);
+    return;  /* already built */
+  }
+  lua_pop(L, 1);
+  lua_newtable(L);  nameidx = lua_gettop(L);
+  lua_newtable(L);  validx = lua_gettop(L);
+
+  /* '_G' first, and by that name, because it is the one every closure that
+     touches a global reaches through its '_ENV' upvalue. */
+  lua_pushglobaltable(L);
+  ds_perm_put(L, nameidx, validx, "_G");
+
+  lua_pushglobaltable(L);
+  ds_perm_walk(L, nameidx, validx, lua_gettop(L), NULL);
+  lua_pop(L, 1);
+
+  for (i = 0; DS_MODULES[i] != NULL; i++) {
+    char buf[128];
+    if (lua_getglobal(L, DS_MODULES[i]) != LUA_TTABLE) {
+      lua_pop(L, 1);
+      continue;  /* a library this build does not open */
+    }
+    snprintf(buf, sizeof(buf), "%s", DS_MODULES[i]);
+    lua_pushvalue(L, -1);
+    ds_perm_put(L, nameidx, validx, buf);
+    ds_perm_walk(L, nameidx, validx, lua_gettop(L), DS_MODULES[i]);
+    lua_pop(L, 1);
+  }
+
+  /* The string metatable. Reachable from any string through '__index', so a
+     program that keeps 'getmetatable("")' would otherwise serialize a table full
+     of C functions -- and it is shared runtime furniture, not program state. */
+  lua_pushliteral(L, "");
+  if (lua_getmetatable(L, -1)) {
+    lua_pushvalue(L, -1);
+    ds_perm_put(L, nameidx, validx, "string.metatable");
+    ds_perm_walk(L, nameidx, validx, lua_gettop(L), "string.metatable");
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+
+  lua_pushvalue(L, nameidx);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_PERM_NAME);
+  lua_pushvalue(L, validx);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_PERM_VALUE);
+  lua_settop(L, base);
+}
+
+
+/*
+** The permanents fingerprint: SHA-256 over the sorted name list.
+**
+** Sorted, so the value does not depend on iteration order even though this
+** tree's iteration order is deterministic. That costs one 'table.sort' once per
+** state and removes a dependency; a fingerprint that silently varied would turn
+** every restore into a refusal, which is safe but useless.
 */
 static void ds_permanents (lua_State *L, char *out) {
+  int base = lua_gettop(L);
   diluvium_sha256_ctx h;
   unsigned char digest[DILUVIUM_SHA256_SIZE];
-  (void)L;
+  lua_Integer i, n;
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PERM_FP) == LUA_TSTRING) {
+    memcpy(out, lua_tostring(L, -1), DILUVIUM_SHA256_HEX);
+    lua_settop(L, base);
+    return;
+  }
+  lua_pop(L, 1);
+  diluvium_snap_permanents(L);
   diluvium_sha256_init(&h);
-  diluvium_sha256_update(&h, "diluvium-permanents-0\0", 22);
+  diluvium_sha256_update(&h, "diluvium-permanents-1\0", 22);
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PERM_VALUE);
+  lua_newtable(L);                             /* the name list */
+  n = 0;
+  lua_pushnil(L);
+  while (lua_next(L, -3) != 0) {
+    lua_pop(L, 1);                             /* the value */
+    lua_pushvalue(L, -1);                      /* the name */
+    lua_rawseti(L, -3, ++n);
+  }
+  lua_getglobal(L, "table");
+  lua_getfield(L, -1, "sort");
+  lua_pushvalue(L, -3);
+  lua_call(L, 1, 0);
+  lua_pop(L, 1);                               /* the 'table' module */
+  for (i = 1; i <= n; i++) {
+    size_t len;
+    const char *nm;
+    lua_rawgeti(L, -1, i);
+    nm = lua_tolstring(L, -1, &len);
+    diluvium_sha256_update(&h, nm, len + 1);
+    lua_pop(L, 1);
+  }
+  lua_settop(L, base);
   diluvium_sha256_final(&h, digest);
   diluvium_sha256_hex(digest, out);
+  lua_pushlstring(L, out, DILUVIUM_SHA256_HEX - 1);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_PERM_FP);
+  lua_settop(L, base);
 }
 
 
@@ -352,4 +518,375 @@ int ds_decodeheader_trampoline (lua_State *L) {
     return luaL_error(L, "snapshot: the header is not a map");
   lua_pushinteger(L, (lua_Integer)used);
   return 2;
+}
+
+
+/* ======================================================================
+** Prototypes and closures (10.5, 10.9)
+** ====================================================================== */
+
+static const char DS_PROTOS = 0;        /* hash hex -> a function with it */
+
+/*
+** Hash a Lua closure's stripped dump and collect the bytes.
+**
+** The buffer is initialized *inside* the writer, on its first call, and that is
+** not a style choice. 'luaL_buffinit' pushes a placeholder in Lua 5.5, and
+** 'lua_dump' requires the function to be on top of the stack -- so initializing
+** the buffer first hides the function behind the placeholder and 'lua_dump'
+** aborts on its own api_check. Found exactly that way. lstrlib.c's 'str_dump'
+** carries the same workaround with the same comment, which is the strongest
+** available evidence that it is the intended shape rather than a local hack.
+**
+** 'lua_dump' also restores the stack top when it returns, so the result cannot
+** simply be left on the stack: it goes into a slot reserved below the function
+** before the dump starts.
+*/
+typedef struct ds_dump {
+  diluvium_sha256_ctx h;
+  luaL_Buffer b;
+  int started;                          /* the buffer has been initialized */
+  int slot;                             /* where the finished string goes */
+} ds_dump;
+
+static int ds_collect (lua_State *L, const void *p, size_t sz, void *ud) {
+  ds_dump *d = (ds_dump *)ud;
+  if (!d->started) {
+    d->started = 1;
+    luaL_buffinit(L, &d->b);
+  }
+  if (p == NULL) {                      /* ldump.c signals the end this way */
+    luaL_pushresult(&d->b);
+    lua_replace(L, d->slot);
+    return 0;
+  }
+  diluvium_sha256_update(&d->h, p, sz);
+  luaL_addlstring(&d->b, (const char *)p, sz);
+  return 0;
+}
+
+
+/*
+** Dump the Lua closure on top of the stack, stripped, replacing it with the
+** bytes and writing the digest to 'digest'.
+**
+** Stripped for two reasons that happen to agree. 10.5 wants line numbers and
+** source names out of the hash domain, so a comment reflow does not invalidate
+** every cached agent. And 10.9 wants the *real* dump path used rather than a
+** parallel encoder, so that 'taintSecureStrings' and the per-string scramble
+** flag come along -- which they do, because this is 'lua_dump' and nothing else.
+*/
+static void ds_dumpclosure (lua_State *L, unsigned char *digest) {
+  ds_dump d;
+  luaL_checkstack(L, 4, "snapshot: cannot dump a function");
+  lua_pushnil(L);
+  lua_insert(L, -2);                    /* reserved slot, then the closure */
+  d.slot = lua_absindex(L, -2);
+  d.started = 0;
+  diluvium_sha256_init(&d.h);
+  if (lua_dump(L, ds_collect, &d, 1) != 0)
+    luaL_error(L, "snapshot: a function could not be dumped");
+  lua_pop(L, 1);                        /* the closure; the bytes are below */
+  if (!lua_isstring(L, -1))
+    luaL_error(L, "snapshot: a function dumped to no bytes");
+  diluvium_sha256_final(&d.h, digest);
+}
+
+
+LUA_API int diluvium_snap_register (lua_State *L, int idx) {
+  int abs = lua_absindex(L, idx);
+  int base = lua_gettop(L);
+  unsigned char digest[DILUVIUM_SHA256_SIZE];
+  char hex[DILUVIUM_SHA256_HEX];
+  if (lua_type(L, abs) != LUA_TFUNCTION || lua_iscfunction(L, abs))
+    return 0;
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PROTOS) != LUA_TTABLE) {
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_PROTOS);
+  }
+  lua_pushvalue(L, abs);
+  ds_dumpclosure(L, digest);            /* leaves the dump bytes */
+  diluvium_sha256_hex(digest, hex);
+  lua_pushstring(L, hex);
+  lua_insert(L, -2);                    /* hex, bytes */
+  lua_rawset(L, -3);                    /* protos[hex] = bytes */
+  lua_settop(L, base);
+  return 1;
+}
+
+
+LUA_API int diluvium_snap_registered (lua_State *L) {
+  int n = 0;
+  int base = lua_gettop(L);
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PROTOS) == LUA_TTABLE) {
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+      lua_pop(L, 1);
+      n++;
+    }
+  }
+  lua_settop(L, base);
+  return n;
+}
+
+
+/* Is this hash in the runtime's proto registry? Pushes the dump if so. */
+static int ds_lookupproto (lua_State *L, const char *hex) {
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PROTOS) != LUA_TTABLE) {
+    lua_pop(L, 1);
+    return 0;
+  }
+  if (lua_getfield(L, -1, hex) != LUA_TSTRING) {
+    lua_pop(L, 2);
+    return 0;
+  }
+  lua_remove(L, -2);
+  return 1;
+}
+
+
+/*
+** Ext 0x06 payload: a closure.
+**
+**   byte 0        number of upvalues
+**   byte 1        0 = the prototype is referenced by hash, 1 = inlined after
+**   bytes 2..33   the SHA-256 of the stripped dump
+**   bytes 34..    the stripped dump, when inlined
+**
+** Bytes 1 through 33 are ext 0x03's payload -- a prototype reference by hash --
+** carried inside 0x06 rather than standing alone. A snapshot has no bare
+** prototypes to refer to: a prototype is not a Lua value, so it could not take a
+** position in the object graph without inventing a pseudo-value for it. 5.5 has
+** been corrected to say so.
+**
+** The upvalues are not here. They are queued as fixups by the codec, which is
+** what the hook's return of 2 asks for, because an upvalue is an arbitrary Lua
+** value and belongs in the graph rather than in an opaque payload.
+*/
+static int ds_encodeclosure (lua_State *L, int abs) {
+  int base = lua_gettop(L);
+  unsigned char digest[DILUVIUM_SHA256_SIZE];
+  char hex[DILUVIUM_SHA256_HEX];
+  int nup = 0;
+  size_t dumplen;
+  const char *dump;
+  luaL_Buffer out;
+  int known;
+  while (lua_getupvalue(L, abs, nup + 1) != NULL) {
+    lua_pop(L, 1);
+    nup++;
+  }
+  if (nup > 255)
+    luaL_error(L, "snapshot: a closure with %d upvalues is beyond the format",
+               nup);
+  lua_pushvalue(L, abs);
+  ds_dumpclosure(L, digest);            /* leaves the dump bytes */
+  diluvium_sha256_hex(digest, hex);
+  dump = lua_tolstring(L, -1, &dumplen);
+  /*
+  ** Referenced when the target runtime already has it, inlined otherwise --
+  ** 10.5's rule exactly, and the reason a swarm of one-off agents over a shared
+  ** library carries only the unique part. A stream-local record is kept too, so
+  ** the second closure of one prototype in a single snapshot references the copy
+  ** the first one inlined.
+  */
+  known = ds_lookupproto(L, hex);
+  if (known)
+    lua_pop(L, 1);                      /* the registry's copy */
+  luaL_buffinit(L, &out);
+  {
+    char head[2];
+    head[0] = (char)(unsigned char)nup;
+    head[1] = (char)(known ? 0 : 1);
+    luaL_addlstring(&out, head, 2);
+  }
+  luaL_addlstring(&out, (const char *)digest, DILUVIUM_SHA256_SIZE);
+  if (!known) {
+    luaL_addlstring(&out, dump, dumplen);
+    /* Register it, so a second closure of the same prototype later in this
+       stream is a reference rather than another copy. */
+    lua_pushvalue(L, abs);
+    diluvium_snap_register(L, -1);
+    lua_pop(L, 1);
+  }
+  luaL_pushresult(&out);
+  /* Hand the finished payload to the codec as an ext object. */
+  {
+    size_t plen;
+    const char *p = lua_tolstring(L, -1, &plen);
+    diluvium_msgpack_appendext(L, 0x06, p, plen);
+  }
+  lua_settop(L, base);
+  return 2;                             /* 2: queue this closure's upvalues */
+}
+
+
+static int ds_decodeclosure (lua_State *L, const unsigned char *data,
+                             size_t len) {
+  char hex[DILUVIUM_SHA256_HEX];
+  int nup, inlined, got;
+  unsigned char check[DILUVIUM_SHA256_SIZE];
+  const char *dump;
+  size_t dlen;
+  if (len < 2 + DILUVIUM_SHA256_SIZE)
+    return luaL_error(L, "snapshot: a closure record is %d bytes, too short to "
+                         "hold a prototype hash", (int)len);
+  nup = (int)data[0];
+  inlined = (int)data[1];
+  if (inlined != 0 && inlined != 1)
+    return luaL_error(L, "snapshot: a closure record's inline flag is %d, not 0 "
+                         "or 1", inlined);
+  diluvium_sha256_hex(data + 2, hex);
+  if (inlined) {
+    dump = (const char *)(data + 2 + DILUVIUM_SHA256_SIZE);
+    dlen = len - 2 - DILUVIUM_SHA256_SIZE;
+    /*
+    ** The hash is verified against the bytes rather than trusted. 10.5 makes the
+    ** hash the *name* of the code, so a record whose bytes hash to something
+    ** else is either corrupt or is trying to have code stored under a name it
+    ** does not own. The bytes still go through the loader and lverify.c after
+    ** this, so this is not the only check -- it is the one that keeps the name
+    ** meaning what it says, which is what the reference case relies on.
+    */
+    diluvium_sha256(dump, dlen, check);
+    if (memcmp(check, data + 2, DILUVIUM_SHA256_SIZE) != 0)
+      return luaL_error(L, "snapshot: an inlined prototype does not hash to the "
+                           "name it was given");
+    lua_pushlstring(L, dump, dlen);
+  }
+  else {
+    /* 10.5: "restore requires an exact match. Mismatch is a clean refusal,
+       never a best-effort load." */
+    if (!ds_lookupproto(L, hex))
+      return luaL_error(L, "snapshot: prototype %s is referenced but is not "
+                           "present in this runtime", hex);
+  }
+  dump = lua_tolstring(L, -1, &dlen);
+  if (luaL_loadbufferx(L, dump, dlen, "=snapshot", "b") != LUA_OK)
+    return luaL_error(L, "snapshot: a prototype would not load: %s",
+                      lua_tostring(L, -1));
+  lua_remove(L, -2);                    /* the dump bytes */
+  /*
+  ** The declared upvalue count is checked against the loaded closure's. A
+  ** mismatch means the record and its bytecode disagree, and while the fixups
+  ** are range-checked one by one anyway, catching it here says which record was
+  ** wrong instead of which fixup was.
+  */
+  for (got = 0; lua_getupvalue(L, -1, got + 1) != NULL; got++)
+    lua_pop(L, 1);
+  if (got != nup)
+    return luaL_error(L, "snapshot: a closure record claims %d upvalues but its "
+                         "prototype has %d", nup, got);
+  /*
+  ** 'lua_load' sets upvalue 1 to the globals table when a chunk has upvalues,
+  ** which is right for loading a chunk and wrong here: every upvalue is about to
+  ** be filled from the graph, and leaving this one would mean a closure whose
+  ** first upvalue silently defaulted to '_G' if its fixup were ever missing. So
+  ** it is cleared, turning that into a visible nil rather than a plausible
+  ** wrong answer.
+  */
+  if (nup > 0) {
+    lua_pushnil(L);
+    lua_setupvalue(L, -2, 1);
+  }
+  return 1;
+}
+
+
+/* ======================================================================
+** The hooks
+** ====================================================================== */
+
+static int ds_hook_permanent (lua_State *L, int idx, void *ud) {
+  int abs = lua_absindex(L, idx);
+  int base = lua_gettop(L);
+  (void)ud;
+  diluvium_snap_permanents(L);
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PERM_NAME) != LUA_TTABLE) {
+    lua_settop(L, base);
+    return 0;
+  }
+  lua_pushvalue(L, abs);
+  if (lua_rawget(L, -2) != LUA_TSTRING) {
+    lua_settop(L, base);
+    return 0;
+  }
+  {
+    size_t nlen;
+    const char *name = lua_tolstring(L, -1, &nlen);
+    diluvium_msgpack_appendext(L, 0x07, name, nlen);
+  }
+  lua_settop(L, base);
+  return 1;
+}
+
+
+static int ds_hook_encode (lua_State *L, int idx, void *ud) {
+  int abs = lua_absindex(L, idx);
+  (void)ud;
+  switch (lua_type(L, abs)) {
+    case LUA_TFUNCTION:
+      if (lua_iscfunction(L, abs)) {
+        /*
+        ** A C function that is not a permanent. There is nothing to serialize --
+        ** its code is in the host binary -- so this can only be a refusal. The
+        ** message is raised here rather than left to the codec's generic "cannot
+        ** encode a function value", because the cause is almost always a
+        ** host-registered function the host did not add to the permanents, and
+        ** saying so is the difference between a fixable report and a puzzle.
+        */
+        return luaL_error(L, "snapshot: this C function is not in the "
+                             "permanents table, so it has no name to be "
+                             "restored by (10.4); a host that registers its own "
+                             "C functions must name them");
+      }
+      return ds_encodeclosure(L, abs);
+    default:
+      return 0;                        /* userdata and threads: not yet */
+  }
+}
+
+
+static int ds_hook_decode (lua_State *L, int code, const unsigned char *data,
+                           size_t len, void *ud) {
+  (void)ud;
+  switch (code) {
+    case 0x06:
+      return ds_decodeclosure(L, data, len);
+    case 0x07: {
+      int base = lua_gettop(L);
+      diluvium_snap_permanents(L);
+      if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PERM_VALUE) != LUA_TTABLE) {
+        lua_settop(L, base);
+        return 0;
+      }
+      lua_pushlstring(L, (const char *)data, len);
+      if (lua_rawget(L, -2) == LUA_TNIL) {
+        /* 10.4 says the permanents set must be identical on save and restore,
+           and the header's fingerprint is what enforces that -- so reaching
+           here means the header was accepted and the sets still differ, which
+           is worth naming precisely. */
+        lua_pushlstring(L, (const char *)data, len);
+        return luaL_error(L, "snapshot: '%s' is named as a permanent but this "
+                             "runtime has no such name",
+                          lua_tostring(L, -1));
+      }
+      lua_insert(L, base + 1);
+      lua_settop(L, base + 1);
+      return 1;
+    }
+    default:
+      return 0;                        /* 0x03 nested in 0x06; 0x05 not yet */
+  }
+}
+
+
+LUA_API const diluvium_snap_hooks *diluvium_snap_hooks_for (lua_State *L) {
+  static const diluvium_snap_hooks hooks = {
+    ds_hook_permanent, ds_hook_encode, ds_hook_decode, NULL
+  };
+  diluvium_snap_permanents(L);
+  return &hooks;
 }

@@ -85,6 +85,7 @@
 /* Registry keys. Addresses of these are the keys, so they cannot collide. */
 static const char MP_SHAPE_MT = 0;      /* metatable shared by all wrappers */
 static const char MP_RESOLVER = 0;      /* light userdata -> resolver */
+static const char MP_CURRENT = 0;       /* light userdata -> encode in progress */
 
 /* Wrapper kinds, stored at index 2 of a wrapper table. */
 #define MP_SHAPE_ARRAY	1
@@ -347,18 +348,30 @@ typedef struct mp_path {
 ** decoder assigns positions the same way -- so both sides number the graph in
 ** the same pre-order walk without either transmitting the numbers.
 **
-** 'metas' is a flat worklist: owner, metatable, owner, metatable. Metatables
-** are not written inline, because a table's metatable is not part of its
-** contents and writing it inline would put it in the numbering at a place the
-** decoder cannot predict -- it has to create the table before it can know
-** whether a metatable follows. So they go in a trailing section instead, and
-** get their positions there. The list grows while that section is being
-** written, since a metatable may itself have one.
+** 'fix' is a flat worklist of three slots per entry: tag, and two operands whose
+** meaning depends on the tag. A metatable is queued as (META, owner, metatable);
+** a closure's upvalue as (UPVAL, closure, index), with the value fetched at
+** drain time rather than stored, since the closure still holds it.
+**
+** Neither a metatable nor an upvalue is written inline, and for the same reason:
+** it is not part of its owner's contents, so writing it inline would put it in
+** the numbering at a place the decoder cannot predict -- the decoder has to
+** create the owner before it can know whether anything follows. They go in a
+** trailing section and get their positions there. The list grows while that
+** section is being written, since a metatable may have a metatable and an
+** upvalue may be a table with one.
+**
+** 'upown' and 'upidx' map an upvalue's identity ('lua_upvalueid', a pointer) to
+** the closure position and index that first claimed it. A later closure sharing
+** it emits UPJOIN instead of UPVAL, which is the whole of 10.3's upvalue
+** identity requirement.
 */
 typedef struct mp_snap {
-  int seen;                            /* stack index: table -> position */
-  int metas;                           /* stack index: flat owner/meta list */
-  int nwritten;                        /* metas entries already emitted */
+  int seen;                            /* stack index: object -> position */
+  int fix;                             /* stack index: flat fixup worklist */
+  int upown;                           /* stack index: upvalue id -> position */
+  int upidx;                           /* stack index: upvalue id -> index */
+  int nwritten;                        /* fixup entries already emitted */
   unsigned long n;                     /* positions assigned so far */
   const diluvium_snap_hooks *hooks;
 } mp_snap;
@@ -611,14 +624,30 @@ static int mp_is_array (lua_State *L, int idx, size_t *out_n) {
 static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx);
 
 
+/* Append one fixup to the worklist: tag, then two operands from the stack. */
+static void mp_snap_queue (lua_State *L, mp_snap *s, int tag) {
+  /* stack: ... operand1 operand2 */
+  lua_Integer k = (lua_Integer)lua_rawlen(L, s->fix);
+  lua_rawseti(L, s->fix, k + 3);
+  lua_rawseti(L, s->fix, k + 2);
+  lua_pushinteger(L, tag);
+  lua_rawseti(L, s->fix, k + 1);
+}
+
+
 /*
-** Give a table its position in the object stream, or write a backreference to
+** Give an object its position in the object stream, or write a backreference to
 ** the position it already has.
 **
 ** Returns 1 when a backreference was written and the caller must not encode the
-** contents, 0 when the table is new and the caller should carry on. Assigning
-** the position *before* the contents are written is what makes a cycle work: a
-** table that contains itself meets its own position on the way down.
+** object, 0 when it is new and the caller should carry on. Assigning the
+** position *before* the contents are written is what makes a cycle work: a table
+** that contains itself meets its own position on the way down, and so does a
+** closure whose upvalue holds the table that holds the closure.
+**
+** Works for any collectable value, not only tables, because a closure needs
+** exactly the same treatment: two references to one closure must still be one
+** closure after a round trip.
 */
 static int mp_snap_intern (lua_State *L, mp_ctx *ctx, int abs) {
   mp_snap *s = ctx->snap;
@@ -643,13 +672,24 @@ static int mp_snap_intern (lua_State *L, mp_ctx *ctx, int abs) {
   lua_pushinteger(L, (lua_Integer)s->n);
   lua_rawset(L, s->seen);
   /* Queue the metatable rather than writing it here. See mp_snap. */
-  if (lua_getmetatable(L, abs)) {
-    lua_Integer k = (lua_Integer)lua_rawlen(L, s->metas);
-    lua_pushvalue(L, abs);
-    lua_rawseti(L, s->metas, k + 1);   /* the owner */
-    lua_rawseti(L, s->metas, k + 2);   /* its metatable */
+  if (lua_getmetatable(L, abs)) {     /* +metatable */
+    lua_pushvalue(L, abs);            /* +owner */
+    lua_insert(L, -2);                /* owner, metatable */
+    mp_snap_queue(L, s, DILUVIUM_FIX_META);
   }
   return 0;
+}
+
+
+/* Queue every upvalue of the Lua closure at 'abs' for filling. */
+static void mp_snap_queueupvals (lua_State *L, mp_snap *s, int abs) {
+  int i;
+  for (i = 1; lua_getupvalue(L, abs, i) != NULL; i++) {
+    lua_pop(L, 1);                    /* the value; fetched again at drain */
+    lua_pushvalue(L, abs);
+    lua_pushinteger(L, i);
+    mp_snap_queue(L, s, DILUVIUM_FIX_UPVAL);
+  }
 }
 
 
@@ -758,6 +798,12 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
         if (kind != 0)
           mp_err_at(L, ctx, "a snapshot cannot contain a msgpack shape "
                             "wrapper (as_array, as_map or ext)");
+        /* Permanents first, and before interning. '_G' is a table; an encoder
+           that interned it would drag the whole global environment into the
+           snapshot, every C function in it included. */
+        if (ctx->snap->hooks != NULL && ctx->snap->hooks->permanent != NULL &&
+            ctx->snap->hooks->permanent(L, abs, ctx->snap->hooks->ud))
+          return;
         if (mp_snap_intern(L, ctx, abs))
           return;
         mp_encode_table(L, ctx, abs, 0);
@@ -812,12 +858,32 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
     if (lua_type(L, abs) == LUA_TLIGHTUSERDATA)
       mp_err_at(L, ctx, "a snapshot cannot contain light userdata (a bare "
                         "pointer has no type and no way to be reconstituted)");
-    /* Functions, userdata and threads belong to the snapshot layer, which owns
-       ext 0x03 and 0x05 through 0x07. Until it is installed they fall through
-       to the ordinary error, which already names the type and the path. */
-    if (ctx->snap->hooks != NULL && ctx->snap->hooks->encode != NULL &&
-        ctx->snap->hooks->encode(L, abs, ctx->snap->hooks->ud))
+    /* A named object -- a C function, most often -- takes no position, because
+       it is not part of the object graph. */
+    if (ctx->snap->hooks != NULL && ctx->snap->hooks->permanent != NULL &&
+        ctx->snap->hooks->permanent(L, abs, ctx->snap->hooks->ud))
       return;
+    /* Everything else that gets here is a graph object and takes a position
+       before the hook writes it, so that a reference back to it -- from one of
+       its own upvalues, which is ordinary for a recursive local function --
+       resolves to a backreference rather than recursing. */
+    if (ctx->snap->hooks != NULL && ctx->snap->hooks->encode != NULL) {
+      int r;
+      if (mp_snap_intern(L, ctx, abs))
+        return;
+      r = ctx->snap->hooks->encode(L, abs, ctx->snap->hooks->ud);
+      if (r == 2) {
+        mp_snap_queueupvals(L, ctx->snap, abs);
+        return;
+      }
+      if (r == 1)
+        return;
+      /* The hook declined after a position was spent. That leaves a hole in the
+         numbering, which does not matter because the error below abandons the
+         whole encode -- but it does mean a caller must not swallow that error
+         and keep the buffer. Falling through gives the message that names the
+         type and the key path, which is the more useful one. */
+    }
   }
   mp_err_unencodable(L, ctx, abs);
 }
@@ -997,8 +1063,20 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
       if (c->snap != NULL && c->snap->hooks != NULL &&
           c->snap->hooks->decode != NULL &&
           c->snap->hooks->decode(L, code, (const unsigned char *)data, len,
-                                 c->snap->hooks->ud))
+                                 c->snap->hooks->ud)) {
+        /*
+        ** 0x05 and 0x06 are graph objects and take a position; 0x03 and 0x07
+        ** are named or embedded and do not. This mirrors exactly what the
+        ** encoder's 'permanent' and 'encode' hooks did on the way out, and the
+        ** mirror has to be exact: give a position to something the encoder did
+        ** not, or withhold one it did, and every position after the first such
+        ** object refers to the wrong object. Nothing detects that except a
+        ** backreference landing somewhere absurd, some distance later.
+        */
+        if (code == 0x05 || code == 0x06)
+          mp_unsnap_register(c);
         return;
+      }
       if (c->snap != NULL)
         luaL_error(L, "msgpack: ext %s needs a snapshot decoder that is not "
                       "installed", mp_hexbyte(code));
@@ -1212,6 +1290,19 @@ LUA_API void diluvium_msgpack_decode_n (lua_State *L, const char *s, size_t len,
 ** Snapshot mode
 ** ====================================================================== */
 
+LUA_API void diluvium_msgpack_appendext (lua_State *L, int code,
+                                         const char *data, size_t len) {
+  mp_ctx *ctx;
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_CURRENT);
+  ctx = (mp_ctx *)lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  if (ctx == NULL || ctx->snap == NULL)
+    luaL_error(L, "msgpack: nothing is being encoded, so an ext object has "
+                  "nowhere to go");
+  mp_enc_ext(ctx->buf, code, data, len);
+}
+
+
 LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
                                     const diluvium_snap_hooks *h) {
   mp_ctx ctx;
@@ -1219,6 +1310,7 @@ LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
   int abs = lua_absindex(L, idx);
   int base = lua_gettop(L);
   int i;
+  void *outer;
   luaL_checkstack(L, 8, "msgpack: cannot start a snapshot");
   memset(&ctx, 0, sizeof(ctx));
   for (i = 0; i <= MP_PATH_DEPTH; i++)
@@ -1226,63 +1318,161 @@ LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
   ctx.depth = 0;
   ctx.buf = mp_buf_new(L);                    /* base + 1 */
   lua_newtable(L);                            /* base + 2: seen */
-  lua_newtable(L);                            /* base + 3: metas */
+  lua_newtable(L);                            /* base + 3: fixup worklist */
+  lua_newtable(L);                            /* base + 4: upvalue owner pos */
+  lua_newtable(L);                            /* base + 5: upvalue owner index */
   snap.seen = base + 2;
-  snap.metas = base + 3;
+  snap.fix = base + 3;
+  snap.upown = base + 4;
+  snap.upidx = base + 5;
   snap.nwritten = 0;
   snap.n = 0;
   snap.hooks = h;
   ctx.snap = &snap;
+  /*
+  ** Published so a hook can append through 'diluvium_msgpack_appendext'. Saved
+  ** and restored rather than simply cleared: a nested snapshot encode is not
+  ** supported, but leaving a dangling pointer behind if one is attempted would
+  ** turn an unsupported case into a crash.
+  */
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_CURRENT);
+  outer = lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  lua_pushlightuserdata(L, &ctx);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &MP_CURRENT);
 
   mp_encode_value(L, &ctx, abs);              /* the root */
 
   /*
-  ** Drain the metatable worklist. Written as a re-checked length rather than a
-  ** cached one on purpose: encoding a metatable can discover further
-  ** metatables and append to this same list, and a cached bound would drop
-  ** them silently -- which would restore a graph that looks right until
-  ** something two levels down has lost its metatable.
+  ** Drain the fixup worklist. Written as a re-checked length rather than a
+  ** cached one on purpose: writing a fixup can discover more of them -- a
+  ** metatable with a metatable, an upvalue holding a table with one -- and a
+  ** cached bound would drop them silently, restoring a graph that looks right
+  ** until something two levels down has lost its metatable.
   */
-  while ((lua_Integer)snap.nwritten * 2 < (lua_Integer)lua_rawlen(L, snap.metas)) {
-    lua_Integer k = (lua_Integer)snap.nwritten * 2;
+  while ((lua_Integer)snap.nwritten * 3 < (lua_Integer)lua_rawlen(L, snap.fix)) {
+    lua_Integer k = (lua_Integer)snap.nwritten * 3;
+    int tag;
     unsigned long pos;
-    luaL_checkstack(L, 4, "msgpack: cannot walk metatables");
-    lua_rawgeti(L, snap.metas, k + 1);        /* the owner */
+    luaL_checkstack(L, 8, "msgpack: cannot walk the fixup list");
+    lua_rawgeti(L, snap.fix, k + 1);
+    tag = (int)lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    lua_rawgeti(L, snap.fix, k + 2);          /* the owner */
     lua_pushvalue(L, -1);
-    lua_rawget(L, snap.seen);                 /* its position: it is interned */
+    lua_rawget(L, snap.seen);
     pos = (unsigned long)lua_tointeger(L, -1);
-    lua_pop(L, 2);
+    lua_pop(L, 1);
     /*
-    ** An owner reaches this list only from inside 'mp_snap_intern', after its
-    ** position is recorded, so a zero here is impossible unless the two have
-    ** drifted apart. Checked rather than asserted because the failure without
-    ** it is not a wrong answer but a *hang*: a position of zero means the
-    ** metatable is re-queued every pass and the loop never drains. Found by
-    ** removing the identity map to see what the tests would say, and getting
-    ** no answer at all.
+    ** An owner reaches this list only from inside 'mp_snap_intern' or
+    ** 'mp_snap_queueupvals', after its position is recorded, so a zero here is
+    ** impossible unless the two have drifted apart. Checked rather than
+    ** asserted because the failure without it is not a wrong answer but a
+    ** *hang*: a position of zero means the entry is re-queued every pass and
+    ** the loop never drains. Found by removing the identity map to see what the
+    ** tests would say, and getting no answer at all.
     */
     if (pos == 0)
-      luaL_error(L, "msgpack: internal error, a queued metatable owner has no "
+      luaL_error(L, "msgpack: internal error, a queued fixup owner has no "
                     "position");
     snap.nwritten++;
-    /*
-    ** Position and metatable go out as two consecutive top-level values, not
-    ** as a two-element array. An array here would be a *table* on the wire, and
-    ** the decoder registers every table it creates as an object -- so the
-    ** wrapper would take a position the encoder never assigned and every
-    ** position after the first metatable would be off by one. Found exactly
-    ** that way: the first metatable restored correctly and the rest did not.
-    */
-    mp_enc_int(ctx.buf, (lua_Integer)pos);
-    lua_rawgeti(L, snap.metas, k + 2);        /* the metatable */
-    mp_encode_value(L, &ctx, lua_gettop(L));
-    lua_pop(L, 1);
+    if (tag == DILUVIUM_FIX_META) {
+      mp_enc_int(ctx.buf, DILUVIUM_FIX_META);
+      mp_enc_int(ctx.buf, (lua_Integer)pos);
+      lua_rawgeti(L, snap.fix, k + 3);        /* the metatable */
+      mp_encode_value(L, &ctx, lua_gettop(L));
+      lua_pop(L, 2);                          /* metatable, owner */
+    }
+    else if (tag == DILUVIUM_FIX_UPVAL) {
+      /* stack: ... closure */
+      int cl = lua_gettop(L);
+      int idx;
+      const void *id;
+      lua_rawgeti(L, snap.fix, k + 3);
+      idx = (int)lua_tointeger(L, -1);
+      lua_pop(L, 1);
+      id = lua_upvalueid(L, cl, idx);
+      if (id == NULL)
+        luaL_error(L, "msgpack: internal error, upvalue %d of a queued closure "
+                      "does not exist", idx);
+      /*
+      ** Whoever gets here first owns the upvalue; everyone after joins to it.
+      ** That is what keeps two closures over one variable sharing it after a
+      ** round trip, which 10.3 requires and which no amount of copying values
+      ** would achieve.
+      */
+      lua_pushlightuserdata(L, (void *)id);
+      if (lua_rawget(L, snap.upown) != LUA_TNIL) {
+        lua_Integer opos = lua_tointeger(L, -1);
+        lua_Integer oidx;
+        lua_pop(L, 1);
+        lua_pushlightuserdata(L, (void *)id);
+        lua_rawget(L, snap.upidx);
+        oidx = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        mp_enc_int(ctx.buf, DILUVIUM_FIX_UPJOIN);
+        mp_enc_int(ctx.buf, (lua_Integer)pos);
+        mp_enc_int(ctx.buf, idx);
+        mp_enc_int(ctx.buf, opos);
+        mp_enc_int(ctx.buf, oidx);
+      }
+      else {
+        lua_pop(L, 1);
+        lua_pushlightuserdata(L, (void *)id);
+        lua_pushinteger(L, (lua_Integer)pos);
+        lua_rawset(L, snap.upown);
+        lua_pushlightuserdata(L, (void *)id);
+        lua_pushinteger(L, idx);
+        lua_rawset(L, snap.upidx);
+        mp_enc_int(ctx.buf, DILUVIUM_FIX_UPVAL);
+        mp_enc_int(ctx.buf, (lua_Integer)pos);
+        mp_enc_int(ctx.buf, idx);
+        lua_getupvalue(L, cl, idx);
+        mp_encode_value(L, &ctx, lua_gettop(L));
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);                          /* the closure */
+    }
+    else
+      luaL_error(L, "msgpack: internal error, unknown fixup tag %d", tag);
   }
-  mp_enc_nil(ctx.buf);                        /* end of the metatable section */
+  mp_enc_nil(ctx.buf);                        /* end of the fixup section */
+
+  if (outer == NULL)
+    lua_pushnil(L);
+  else
+    lua_pushlightuserdata(L, outer);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &MP_CURRENT);
 
   lua_pushlstring(L, (const char *)ctx.buf->b, ctx.buf->len);
   lua_replace(L, base + 1);                   /* over the buffer */
-  lua_settop(L, base + 1);                    /* drop seen and metas */
+  lua_settop(L, base + 1);                    /* drop the working tables */
+}
+
+
+/* Read an integer operand from a fixup, or raise naming what was expected. */
+static lua_Integer mp_unsnap_readint (mp_cur *c, const char *what) {
+  lua_State *L = c->L;
+  lua_Integer v;
+  if (c->left == 0)
+    luaL_error(L, "msgpack: a fixup ended before its %s", what);
+  mp_decode_value(c, 0);
+  if (!lua_isinteger(L, -1))
+    luaL_error(L, "msgpack: a fixup's %s must be an integer", what);
+  v = lua_tointeger(L, -1);
+  lua_pop(L, 1);
+  return v;
+}
+
+
+/* The same, for an operand that names an object position. Range-checked. */
+static lua_Integer mp_unsnap_readpos (mp_cur *c, mp_unsnap *s,
+                                      const char *what) {
+  lua_Integer v = mp_unsnap_readint(c, what);
+  if (v < 1 || (unsigned long)v > s->n)
+    luaL_error(c->L, "msgpack: %s position %I is out of range (%I objects)",
+               what, v, (lua_Integer)s->n);
+  return v;
 }
 
 
@@ -1304,49 +1494,86 @@ LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
 
   mp_decode_value(&c, 0);                     /* the root: base + 2 */
 
-  /* The metatable section, terminated by nil. */
+  /* The fixup section, terminated by nil. */
   for (;;) {
-    lua_Integer pos;
+    int tag;
+    lua_Integer pos, idx;
     if (c.left == 0)
-      luaL_error(L, "msgpack: snapshot graph ended without its metatable "
+      luaL_error(L, "msgpack: snapshot graph ended without its fixup "
                     "terminator");
-    mp_decode_value(&c, 0);                   /* the owner's position, or nil */
+    mp_decode_value(&c, 0);                   /* the tag, or nil */
     if (lua_isnil(L, -1)) {
       lua_pop(L, 1);
       break;
     }
     if (!lua_isinteger(L, -1))
-      luaL_error(L, "msgpack: a metatable entry's owner must be an integer "
-                    "position");
-    pos = lua_tointeger(L, -1);
+      luaL_error(L, "msgpack: a fixup must begin with an integer tag");
+    tag = (int)lua_tointeger(L, -1);
     lua_pop(L, 1);
-    if (pos < 1 || (unsigned long)pos > snap.n)
-      luaL_error(L, "msgpack: metatable owner position %I is out of range (%I "
-                    "objects)", pos, (lua_Integer)snap.n);
-    if (c.left == 0)
-      luaL_error(L, "msgpack: a metatable entry's owner has no metatable "
-                    "after it");
-    mp_decode_value(&c, 0);                   /* the metatable */
-    if (!lua_istable(L, -1))
-      luaL_error(L, "msgpack: a metatable must be a table");
-    lua_rawgeti(L, snap.objs, pos);           /* the owner */
-    if (!lua_istable(L, -1))
-      luaL_error(L, "msgpack: object %I is not a table and cannot take a "
-                    "metatable", pos);
-    lua_insert(L, -2);                        /* owner, metatable */
-    /*
-    ** The metatable goes on after the contents, which is the only order
-    ** available: the owner has to exist before anything can refer to it, and
-    ** its contents are read on the way past. For a weak table that means the
-    ** entries were inserted while it was still strong and '__mode' is applied
-    ** afterwards. The collector reads '__mode' from the metatable at each
-    ** traversal rather than caching it at insert time, so the weakness does
-    ** take effect -- but this is the one place in the restore where the result
-    ** depends on collector behaviour rather than on the format, and it is worth
-    ** knowing that before something else is built on top of it.
-    */
-    lua_setmetatable(L, -2);
-    lua_pop(L, 1);                            /* the owner */
+    /* Validated before any operand is consumed. An unknown tag means the rest
+       of the section cannot be parsed at all -- the operand count depends on
+       the tag -- so reporting "bad owner" after reading whatever came next
+       would name the wrong thing. */
+    if (tag != DILUVIUM_FIX_META && tag != DILUVIUM_FIX_UPVAL &&
+        tag != DILUVIUM_FIX_UPJOIN)
+      luaL_error(L, "msgpack: fixup tag %d is not one this runtime knows", tag);
+    pos = mp_unsnap_readpos(&c, &snap, "fixup owner");
+    if (tag == DILUVIUM_FIX_META) {
+      mp_decode_value(&c, 0);                 /* the metatable */
+      if (!lua_istable(L, -1))
+        luaL_error(L, "msgpack: a metatable must be a table");
+      lua_rawgeti(L, snap.objs, pos);         /* the owner */
+      if (!lua_istable(L, -1))
+        luaL_error(L, "msgpack: object %I is not a table and cannot take a "
+                      "metatable", pos);
+      lua_insert(L, -2);                      /* owner, metatable */
+      /*
+      ** The metatable goes on after the contents, which is the only order
+      ** available: the owner has to exist before anything can refer to it, and
+      ** its contents are read on the way past. For a weak table that means the
+      ** entries were inserted while it was still strong and '__mode' is applied
+      ** afterwards. The collector reads '__mode' from the metatable at each
+      ** traversal rather than caching it at insert time, so the weakness does
+      ** take effect -- but this is the one place in the restore where the result
+      ** depends on collector behaviour rather than on the format, and it is
+      ** worth knowing that before something else is built on top of it.
+      */
+      lua_setmetatable(L, -2);
+      lua_pop(L, 1);                          /* the owner */
+    }
+    else if (tag == DILUVIUM_FIX_UPVAL || tag == DILUVIUM_FIX_UPJOIN) {
+      idx = mp_unsnap_readint(&c, "upvalue index");
+      lua_rawgeti(L, snap.objs, pos);         /* the closure */
+      if (!lua_isfunction(L, -1) || lua_iscfunction(L, -1))
+        luaL_error(L, "msgpack: object %I is not a Lua closure and has no "
+                      "upvalue %I", pos, idx);
+      if (tag == DILUVIUM_FIX_UPVAL) {
+        mp_decode_value(&c, 0);               /* the value */
+        if (lua_setupvalue(L, -2, (int)idx) == NULL)
+          luaL_error(L, "msgpack: object %I has no upvalue %I", pos, idx);
+        lua_pop(L, 1);                        /* the closure */
+      }
+      else {
+        lua_Integer spos = mp_unsnap_readpos(&c, &snap, "upvalue source");
+        lua_Integer sidx = mp_unsnap_readint(&c, "upvalue source index");
+        lua_rawgeti(L, snap.objs, spos);       /* the source closure */
+        if (!lua_isfunction(L, -1) || lua_iscfunction(L, -1))
+          luaL_error(L, "msgpack: object %I is not a Lua closure and cannot be "
+                        "an upvalue source", spos);
+        /* Range-checked before the join, because 'lua_upvaluejoin' has no way
+           to report a bad index and 10.10 will not have a malformed snapshot
+           reaching into memory. */
+        if (lua_getupvalue(L, -2, (int)idx) == NULL)
+          luaL_error(L, "msgpack: object %I has no upvalue %I to join", pos, idx);
+        lua_pop(L, 1);
+        if (lua_getupvalue(L, -1, (int)sidx) == NULL)
+          luaL_error(L, "msgpack: object %I has no upvalue %I to join from",
+                     spos, sidx);
+        lua_pop(L, 1);
+        lua_upvaluejoin(L, -2, (int)idx, -1, (int)sidx);
+        lua_pop(L, 2);                        /* source, closure */
+      }
+    }
   }
 
   if (c.left != 0)

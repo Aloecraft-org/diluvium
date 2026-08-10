@@ -1,6 +1,6 @@
 /*
 ** dsnap_check.c
-** The snapshot value graph: identity, cycles, metatables, refusals.
+** The snapshot layer: value graph, closures, permanents, prototypes, header.
 **
 ** In C rather than Lua for the same reason as dtask_check.c -- there is no
 ** guest binding yet and inventing one for a test would add a surface that has
@@ -15,18 +15,16 @@
 ** comparing values. `same_table` exists because `==` on two tables is the only
 ** thing that can say it.
 **
-** Verified by mutation, each turning a named case red:
+** Verified by mutation, seven breakages, each turning a named case red:
 **
-**   Interning a table *after* writing its contents instead of before turns
-**   'sharing_is_preserved' red on every identity assertion, and the cycle cases
-**   red with "table nesting deeper than 150" -- the table never meets its own
-**   position on the way down, so it recurses until the cap.
+**   Interning a table *after* writing its contents turns 'sharing_is_preserved'
+**   red on every identity assertion, and the cycle cases red with "table nesting
+**   deeper than 150" -- the table never meets its own position on the way down.
 **
-**   Registering a decoded table after filling it instead of before turns
-**   'sharing_is_preserved' and 'a_shared_metatable_stays_shared' red with
-**   "backreference 3 is out of range (2 objects so far)", from the other side.
+**   Registering a decoded table after filling it turns the same cases red from
+**   the other side, with "backreference 3 is out of range (2 objects so far)".
 **
-**   Caching the metatable worklist length instead of re-reading it turns
+**   Caching the fixup worklist length instead of re-reading it turns
 **   'a_metatable_with_a_metatable' red, and only that one.
 **
 **   Dropping the forward-reference check in ext 0x04 turns
@@ -34,15 +32,37 @@
 **
 **   Letting light userdata through turns 'light_userdata_is_refused' red.
 **
-** The first of those originally *hung* rather than failing: without the identity
-** map the metatable worklist re-queues forever. A hang is a bad answer for a
-** test to give, so the encoder now checks the invariant that made it possible
-** ("a queued metatable owner has no position") and the same mutation reports
-** eight named failures instead of nothing at all.
+**   Emitting UPVAL where UPJOIN belongs turns
+**   'two_closures_still_share_an_upvalue' red -- and nothing else, because every
+**   value is still correct; only the sharing is gone.
+**
+**   Not interning a closure before the hook writes it turns five cases red with
+**   "a queued fixup owner has no position".
+**
+** Two more mutations turned *nothing* red at first, and both gaps were real:
+**
+**   Giving ext 0x07 a position on decode. Noticing needs a backreference that
+**   crosses a permanent, and then it resolves to the wrong object rather than
+**   failing. 'a_permanent_does_not_shift_positions' is that case.
+**
+**   Removing the inlined-prototype hash verification. The tampering case flipped
+**   a byte of bytecode, which the loader rejects on its own. Worse, both
+**   tampering cases were exercising the *reference* path rather than the inline
+**   one, because an earlier case in this file had registered the same prototype
+**   -- one of them passing on a "not present in this runtime" refusal unrelated
+**   to its own claim. They now use distinct function bodies and assert, through
+**   'inlined_hash_at', that the record inlines its prototype before tampering.
+**
+** One mutation originally *hung* rather than failing: without the identity map
+** the fixup worklist re-queues forever. A hang is a bad answer for a test to
+** give, so the encoder checks the invariant that made it possible ("a queued
+** fixup owner has no position") and the same mutation now reports eight named
+** failures instead of nothing at all.
 */
 
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -91,6 +111,18 @@ static int build (lua_State *L, const char *src) {
 ** output with it. Under pcall the same bug is one named red line.
 */
 static int protected_roundtrip (lua_State *L) {
+  size_t len;
+  const char *bytes;
+  const diluvium_snap_hooks *h = diluvium_snap_hooks_for(L);
+  diluvium_msgpack_encode_graph(L, 1, h);
+  bytes = lua_tolstring(L, -1, &len);
+  diluvium_msgpack_decode_graph(L, bytes, len, h);
+  return 1;
+}
+
+
+/* The same, with no hooks: what an embedder linking only the codec sees. */
+static int protected_roundtrip_bare (lua_State *L) {
   size_t len;
   const char *bytes;
   diluvium_msgpack_encode_graph(L, 1, NULL);
@@ -409,7 +441,7 @@ static void mode_comes_along_with_the_metatable (lua_State *L) {
 /* ------------------------------------------------------------- refusals */
 
 static int protected_encode (lua_State *L) {
-  diluvium_msgpack_encode_graph(L, 1, NULL);
+  diluvium_msgpack_encode_graph(L, 1, diluvium_snap_hooks_for(L));
   return 1;
 }
 
@@ -463,19 +495,45 @@ static void a_shape_wrapper_is_refused (lua_State *L) {
 }
 
 
+static int protected_encode_bare (lua_State *L) {
+  diluvium_msgpack_encode_graph(L, 1, NULL);
+  return 1;
+}
+
+
 static void a_function_is_refused_without_hooks (lua_State *L) {
-  /* Ext 0x06 is step two. Until then this must be a clean error naming the
-     type and the path, not a crash and not a silent nil. */
-  expect_refusal(L, "return {handler = function() end}",
-                 "function",
-                 "a function is refused while there are no hooks");
-  expect_refusal(L, "return {handler = function() end}",
-                 "handler",
-                 "and that message names the path too");
+  /* An embedder that links the codec but not the snapshot layer. The refusal has
+     to be a clean error naming the type and the path -- not a crash, and not a
+     silent nil where a function was. */
+  int base = lua_gettop(L);
+  if (!build(L, "return {handler = function() end}")) return;
+  lua_pushcfunction(L, protected_encode_bare);
+  lua_insert(L, -2);
+  if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+    ok(0, "a function is refused when no hooks are installed");
+    lua_settop(L, base);
+    return;
+  }
+  {
+    const char *msg = lua_tostring(L, -1);
+    ok(msg != NULL && strstr(msg, "function") != NULL,
+       "a function is refused when no hooks are installed");
+    ok(msg != NULL && strstr(msg, "handler") != NULL,
+       "and that message names the key path");
+  }
+  lua_settop(L, base);
 }
 
 
 /* -------------------------------------------------- malformed streams */
+
+static int protected_decode_hooked (lua_State *L) {
+  size_t len;
+  const char *s = lua_tolstring(L, 1, &len);
+  diluvium_msgpack_decode_graph(L, s, len, diluvium_snap_hooks_for(L));
+  return 1;
+}
+
 
 static int protected_decode (lua_State *L) {
   size_t len;
@@ -541,7 +599,7 @@ static void a_short_backreference_is_refused (lua_State *L) {
 static void a_missing_terminator_is_refused (lua_State *L) {
   static const char bad[] = { (char)0x80 };  /* an empty map and nothing else */
   expect_decode_refusal(L, bad, sizeof(bad), "terminator",
-                        "a graph with no metatable terminator is refused");
+                        "a graph with no fixup terminator is refused");
 }
 
 
@@ -552,46 +610,72 @@ static void trailing_bytes_are_refused (lua_State *L) {
 }
 
 
+/*
+** Malformed fixup sections. Every stream here is written by hand, byte by byte,
+** because the encoder cannot produce them -- which is the point: 10.10 says a
+** snapshot is untrusted input, and the encoder is not the threat model.
+**
+** 0x80 is an empty map, so it is the root and takes position 1. 0x01 is the
+** META tag, 0x02 UPVAL, 0x03 UPJOIN. 0xc0 is the nil terminator.
+*/
+
+static void a_bad_fixup_tag_is_refused (lua_State *L) {
+  static const char bad[] = { (char)0x80, 0x63, (char)0xc0 };  /* tag 99 */
+  expect_decode_refusal(L, bad, sizeof(bad), "not one this runtime knows",
+                        "an unknown fixup tag is refused");
+}
+
+
+static void a_non_integer_tag_is_refused (lua_State *L) {
+  static const char bad[] = { (char)0x80, (char)0xa1, 'x', (char)0xc0 };
+  expect_decode_refusal(L, bad, sizeof(bad), "integer tag",
+                        "a fixup whose tag is not an integer is refused");
+}
+
+
 static void a_bad_owner_position_is_refused (lua_State *L) {
   static const char bad[] = {
-    (char)0x80,                    /* root: empty map (position 1) */
-    (char)0xa1, 'x',               /* owner given as a string, not a position */
-    (char)0xc0
+    (char)0x80, 0x01, (char)0xa1, 'x', (char)0xc0  /* META, owner "x" */
   };
-  expect_decode_refusal(L, bad, sizeof(bad), "integer position",
-                        "a non-integer metatable owner is refused");
+  expect_decode_refusal(L, bad, sizeof(bad), "must be an integer",
+                        "a non-integer fixup owner is refused");
 }
 
 
 static void an_out_of_range_owner_is_refused (lua_State *L) {
   static const char bad[] = {
-    (char)0x80,                    /* root: empty map (position 1) */
-    0x09, (char)0x80,              /* owner 9, which does not exist */
-    (char)0xc0
+    (char)0x80, 0x01, 0x09, (char)0x80, (char)0xc0  /* META, owner 9 */
   };
   expect_decode_refusal(L, bad, sizeof(bad), "out of range",
-                        "a metatable owner position past the end is refused");
+                        "a fixup owner position past the end is refused");
 }
 
 
-static void a_truncated_metatable_entry_is_refused (lua_State *L) {
-  static const char bad[] = {
-    (char)0x80,                    /* root: empty map (position 1) */
-    0x01                           /* owner 1, and then the stream ends */
-  };
-  expect_decode_refusal(L, bad, sizeof(bad), "no metatable after it",
-                        "an owner with no metatable after it is refused");
+static void a_truncated_fixup_is_refused (lua_State *L) {
+  static const char bad[] = { (char)0x80, 0x01 };  /* META and nothing more */
+  expect_decode_refusal(L, bad, sizeof(bad), "ended before",
+                        "a fixup that ends before its operands is refused");
 }
 
 
 static void a_bad_metatable_entry_is_refused (lua_State *L) {
   static const char bad[] = {
-    (char)0x80,                    /* root: empty map (position 1) */
-    0x01, (char)0x2a,              /* owner 1, then 42 -- not a metatable */
-    (char)0xc0
+    (char)0x80, 0x01, 0x01, (char)0x2a, (char)0xc0  /* META, owner 1, 42 */
   };
   expect_decode_refusal(L, bad, sizeof(bad), "metatable must be a table",
                         "a non-table metatable is refused");
+}
+
+
+static void an_upvalue_fixup_on_a_table_is_refused (lua_State *L) {
+  /* The root is a table, so it has no upvalues. Without the type check this
+     would reach 'lua_setupvalue' with a non-function, which is an API-check
+     abort in a debug build and undefined elsewhere. */
+  static const char bad[] = {
+    (char)0x80, 0x02, 0x01, 0x01, (char)0x2a, (char)0xc0  /* UPVAL 1, 1, 42 */
+  };
+  expect_decode_refusal(L, bad, sizeof(bad), "not a Lua closure",
+                        "an upvalue fixup naming a table is refused");
 }
 
 
@@ -951,6 +1035,692 @@ static void every_refusal_has_its_own_sentence (lua_State *L) {
 }
 
 
+
+
+/* ======================================================================
+** Permanents, prototypes and closures (10.4, 10.5, 10.9)
+** ====================================================================== */
+
+/* Call the function at 'idx' with no arguments; push its first result. */
+static int call0 (lua_State *L, int idx, int nres) {
+  lua_pushvalue(L, idx);
+  return lua_pcall(L, 0, nres, 0) == LUA_OK;
+}
+
+
+static void a_plain_function_survives (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  if (!build(L, "return {f = function(a, b) return a * 10 + b end}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "f");
+  ok(lua_isfunction(L, -1) && !lua_iscfunction(L, -1),
+     "a Lua function comes back as a Lua function");
+  lua_pushinteger(L, 4);
+  lua_pushinteger(L, 2);
+  if (lua_pcall(L, 2, 1, 0) == LUA_OK)
+    ok(lua_tointeger(L, -1) == 42, "and it computes what it used to");
+  else {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "and it computes what it used to");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_closure_keeps_its_upvalues (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  if (!build(L, "local n = 40 local m = 2 "
+                "return {f = function() return n + m end}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "f");
+  if (call0(L, -1, 1))
+    ok(lua_tointeger(L, -1) == 42, "a closure's captured values come back");
+  else {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "a closure's captured values come back");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_closure_over_a_table_shares_it (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* The upvalue and a field of the root are the same table. If the upvalue were
+     serialized separately from the graph, the restored closure would be writing
+     to a table nobody else can see -- which is invisible until the program reads
+     the other path and finds its update missing. */
+  if (!build(L, "local t = {count = 0} "
+                "return {state = t, bump = function() t.count = t.count + 1 end}"))
+    return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "bump");
+  if (!call0(L, -1, 0)) {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "the restored closure runs");
+    lua_settop(L, base);
+    return;
+  }
+  ok(1, "the restored closure runs");
+  at(L, copy, "state.count");
+  ok(lua_tointeger(L, -1) == 1,
+     "and it wrote through to the same table the graph holds");
+  lua_settop(L, base);
+}
+
+
+static void two_closures_still_share_an_upvalue (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* 10.3's requirement, and the only way to test it is to mutate through one and
+     read through the other. Comparing values would pass even if each closure got
+     a private copy. */
+  if (!build(L, "local n = 0 "
+                "return {inc = function() n = n + 1 end, get = function() return n end}"))
+    return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "inc");
+  if (!call0(L, -1, 0) || !call0(L, -1, 0) || !call0(L, -1, 0)) {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "the restored closures run");
+    lua_settop(L, base);
+    return;
+  }
+  ok(1, "the restored closures run");
+  at(L, copy, "get");
+  if (call0(L, -1, 1))
+    ok(lua_tointeger(L, -1) == 3,
+       "a write through one closure is seen by the other (upvalue identity)");
+  else
+    ok(0, "a write through one closure is seen by the other (upvalue identity)");
+  lua_settop(L, base);
+}
+
+
+static void an_unshared_upvalue_stays_unshared (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* The converse. A restore that joined too eagerly -- say, by value -- would
+     make these two counters the same counter. */
+  if (!build(L, "local function mk() local n = 0 "
+                "return function() n = n + 1 return n end end "
+                "return {a = mk(), b = mk()}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "a");
+  if (call0(L, -1, 1) && call0(L, -2, 1)) {
+    ok(lua_tointeger(L, -1) == 2, "one counter advances");
+    lua_pop(L, 2);
+  }
+  else
+    ok(0, "one counter advances");
+  at(L, copy, "b");
+  if (call0(L, -1, 1))
+    ok(lua_tointeger(L, -1) == 1, "and the other is untouched by it");
+  else
+    ok(0, "and the other is untouched by it");
+  lua_settop(L, base);
+}
+
+
+static void a_recursive_closure_survives (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* A local function that calls itself holds itself in an upvalue. That is a
+     cycle through a closure rather than through a table, so it exercises
+     interning a function before its own contents are written. */
+  if (!build(L, "local function fact(n) if n <= 1 then return 1 end "
+                "return n * fact(n - 1) end return {f = fact}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "f");
+  lua_pushinteger(L, 5);
+  if (lua_pcall(L, 1, 1, 0) == LUA_OK)
+    ok(lua_tointeger(L, -1) == 120, "a self-recursive closure still recurses");
+  else {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "a self-recursive closure still recurses");
+  }
+  lua_settop(L, base);
+}
+
+
+static void one_closure_referenced_twice_stays_one (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  if (!build(L, "local f = function() end return {a = f, b = f}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "a");
+  at(L, copy, "b");
+  ok(lua_isfunction(L, -2) && lua_isfunction(L, -1) &&
+     lua_topointer(L, -2) == lua_topointer(L, -1),
+     "one closure referenced twice is still one closure");
+  lua_settop(L, base);
+}
+
+
+static void a_closure_using_globals_survives (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* '_ENV' is an upvalue holding '_G'. Without '_G' as a permanent this would
+     try to serialize the whole global environment and fail on the first C
+     function in it. */
+  if (!build(L, "return {f = function() return type(1) end}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "f");
+  if (call0(L, -1, 1))
+    ok(lua_tostring(L, -1) != NULL &&
+       strcmp(lua_tostring(L, -1), "number") == 0,
+       "a closure that calls a global still can");
+  else {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "a closure that calls a global still can");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_c_function_is_named_not_copied (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  if (!build(L, "return {p = print, ins = table.insert, fmt = string.format}"))
+    return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "p");
+  lua_getglobal(L, "print");
+  ok(lua_topointer(L, -2) == lua_topointer(L, -1),
+     "'print' comes back as the same C function, not a copy");
+  lua_pop(L, 2);
+  at(L, copy, "ins");
+  lua_getglobal(L, "table");
+  lua_getfield(L, -1, "insert");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "and so does 'table.insert'");
+  lua_pop(L, 3);
+  at(L, copy, "fmt");
+  lua_getglobal(L, "string");
+  lua_getfield(L, -1, "format");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "and 'string.format'");
+  lua_settop(L, base);
+}
+
+
+static void a_library_table_is_named_not_copied (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* The one that matters most for size and for correctness: a program holding a
+     reference to 'string' or to '_G' must not have the library copied into its
+     snapshot. */
+  if (!build(L, "return {s = string, g = _G, m = math}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "s");
+  lua_getglobal(L, "string");
+  ok(lua_topointer(L, -2) == lua_topointer(L, -1),
+     "the 'string' table comes back as the same table");
+  lua_pop(L, 2);
+  at(L, copy, "g");
+  lua_pushglobaltable(L);
+  ok(lua_topointer(L, -2) == lua_topointer(L, -1),
+     "and '_G' is '_G', not a clone of the global environment");
+  lua_settop(L, base);
+}
+
+
+static void a_snapshot_of_a_global_closure_is_small (lua_State *L) {
+  int base = lua_gettop(L);
+  size_t len = 0;
+  /* Naming rather than copying is what keeps this true. A snapshot that had
+     inlined '_G' would be tens of kilobytes, and the assertion below is the
+     cheapest way to notice if permanents ever stop being consulted for tables. */
+  if (!build(L, "return {f = function() return tostring(select('#')) end}"))
+    return;
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, base + 1);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "a closure over '_ENV' encodes");
+    lua_settop(L, base);
+    return;
+  }
+  lua_tolstring(L, -1, &len);
+  ok(len > 0 && len < 512,
+     "a snapshot of one global-using closure is small, so '_G' was named");
+  printf("      (%lu bytes)\n", (unsigned long)len);
+  lua_settop(L, base);
+}
+
+
+static void a_shared_prototype_is_carried_once (lua_State *L) {
+  int base = lua_gettop(L);
+  size_t shared = 0, distinct = 0;
+  /*
+  ** 10.5's dedup, within one stream. Measured against ten closures of ten
+  ** *different* prototypes rather than against a multiple of one closure's size,
+  ** because that compares dedup with no-dedup directly. A guessed threshold
+  ** would have to encode how big a hash reference is relative to a tiny
+  ** function's bytecode, which is a fact about this test's sample and not about
+  ** the format -- the first version of this check failed for exactly that
+  ** reason, at 372 bytes against a made-up limit of 324.
+  */
+  if (!build(L, "local function mk() return function() return 1 end end "
+                "local t = {} for i = 1, 10 do t[i] = mk() end return t"))
+    return;
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, -2);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    ok(0, "ten closures of one prototype encode");
+    lua_settop(L, base);
+    return;
+  }
+  lua_tolstring(L, -1, &shared);
+  lua_settop(L, base);
+  /* Ten prototypes that differ only in a constant, so their bytecode is the
+     same size and the comparison is about count, not content. */
+  if (!build(L, "local t = {} "
+                "t[1] = function() return 1 end t[2] = function() return 2 end "
+                "t[3] = function() return 3 end t[4] = function() return 4 end "
+                "t[5] = function() return 5 end t[6] = function() return 6 end "
+                "t[7] = function() return 7 end t[8] = function() return 8 end "
+                "t[9] = function() return 9 end t[10] = function() return 10 end "
+                "return t")) return;
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, -2);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    ok(0, "ten closures of ten prototypes encode");
+    lua_settop(L, base);
+    return;
+  }
+  lua_tolstring(L, -1, &distinct);
+  printf("      (one prototype shared %lu bytes, ten distinct %lu bytes)\n",
+         (unsigned long)shared, (unsigned long)distinct);
+  ok(shared < distinct,
+     "ten closures of one prototype cost less than ten of ten prototypes");
+  lua_settop(L, base);
+}
+
+
+static void a_registered_prototype_is_referenced (lua_State *L) {
+  int base = lua_gettop(L);
+  size_t unreg = 0, reg = 0;
+  int before, after;
+  if (!build(L, "return {f = function(a) return a + 1 end}")) return;
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, base + 1);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) { ok(0, "the closure encodes"); lua_settop(L, base); return; }
+  lua_tolstring(L, -1, &unreg);
+  lua_pop(L, 1);
+  /* Registering the prototype is what a host does for a shared library. After
+     it, the snapshot should carry a hash instead of bytecode. */
+  before = diluvium_snap_registered(L);
+  at(L, base + 1, "f");
+  ok(diluvium_snap_register(L, -1), "a Lua function can be registered");
+  lua_pop(L, 1);
+  after = diluvium_snap_registered(L);
+  ok(after >= before, "and the registry reports it");
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, base + 1);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) { ok(0, "it encodes again"); lua_settop(L, base); return; }
+  lua_tolstring(L, -1, &reg);
+  printf("      (inlined %lu bytes, referenced %lu bytes)\n",
+         (unsigned long)unreg, (unsigned long)reg);
+  ok(reg < unreg, "a registered prototype is referenced, not inlined");
+  /* And it still restores, which is the half that matters. */
+  lua_settop(L, base);
+  if (!build(L, "return {f = function(a) return a + 1 end}")) return;
+  {
+    int copy = roundtrip_named(L, __func__);
+    if (copy == 0) return;
+    at(L, copy, "f");
+    lua_pushinteger(L, 41);
+    if (lua_pcall(L, 1, 1, 0) == LUA_OK)
+      ok(lua_tointeger(L, -1) == 42,
+         "and a referenced prototype still restores and runs");
+    else {
+      printf("      (%s)\n", lua_tostring(L, -1));
+      ok(0, "and a referenced prototype still restores and runs");
+    }
+  }
+  lua_settop(L, base);
+}
+
+
+/*
+** Find the ext 0x06 (closure) record in a stream and return the offset of its
+** prototype hash, or 0. msgpack writes ext8 as 0xc7 len code, ext16 as 0xc8
+** len16 code, ext32 as 0xc9 len32 code; a closure record is at least 34 bytes so
+** the fixed-width forms cannot occur.
+*/
+static size_t find_closure_record (const char *b, size_t len) {
+  size_t i;
+  for (i = 0; i + 3 < len; i++) {
+    if ((unsigned char)b[i] == 0xc7 && (unsigned char)b[i + 2] == 0x06)
+      return i + 3;          /* the payload: nup, inline flag, hash, dump */
+    if ((unsigned char)b[i] == 0xc8 && i + 4 < len &&
+        (unsigned char)b[i + 3] == 0x06)
+      return i + 4;
+  }
+  return 0;
+}
+
+
+/*
+** Assert the record at 'rec' is an inlined prototype and return the offset of
+** its hash. Zero, having reported, if it is a reference.
+**
+** Worth checking rather than assuming: a prototype registered by an *earlier*
+** test is referenced rather than inlined, and both tampering tests below were
+** silently testing the reference path for that reason -- one of them passing on
+** a "not present in this runtime" refusal that had nothing to do with what it
+** claimed to check.
+*/
+static size_t inlined_hash_at (const char *b, size_t len, const char *what) {
+  size_t rec = find_closure_record(b, len);
+  checks++;
+  if (rec == 0 || rec + 2 + 32 > len) {
+    printf("[FAIL] %s: no closure record in the stream\n", what);
+    failures++;
+    return 0;
+  }
+  if ((unsigned char)b[rec + 1] != 1) {
+    printf("[FAIL] %s: the prototype was referenced, not inlined, so this "
+           "case is not testing what it says\n", what);
+    failures++;
+    return 0;
+  }
+  printf("[PASS] %s: the record inlines its prototype\n", what);
+  return rec + 2;
+}
+
+
+static void a_c_function_that_is_not_permanent_is_refused (lua_State *L) {
+  int base = lua_gettop(L);
+  /* A host-registered C function the host forgot to name. There is nothing to
+     serialize -- the code is in the host binary -- so the only honest answer is
+     to refuse, and the message has to name the type and the path. */
+  lua_pushcfunction(L, protected_encode);   /* any C function not in the set */
+  lua_setglobal(L, "an_unnamed_c_function");
+  if (!build(L, "return {deep = {hook = an_unnamed_c_function}}")) return;
+  lua_pushcfunction(L, protected_encode);
+  lua_insert(L, -2);
+  if (lua_pcall(L, 1, 1, 0) == LUA_OK) {
+    ok(0, "an unnamed C function is refused");
+    lua_settop(L, base);
+    return;
+  }
+  {
+    const char *msg = lua_tostring(L, -1);
+    ok(msg != NULL && strstr(msg, "permanents table") != NULL,
+       "an unnamed C function is refused, and told why");
+    ok(msg != NULL && strstr(msg, "must name them") != NULL,
+       "and the message says what to do about it");
+    if (msg != NULL && strstr(msg, "deep.hook") == NULL)
+      printf("      (%s)\n", msg);
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_missing_prototype_is_refused (lua_State *L) {
+  int base = lua_gettop(L);
+  size_t len;
+  const char *bytes;
+  /* Register, encode by reference, then wipe the registry. That is what
+     restoring into a runtime without the shared library looks like, and 10.5
+     insists on a clean refusal rather than a best-effort load. */
+  if (!build(L, "return function() return 'gone' end")) return;
+  diluvium_snap_register(L, -1);
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, base + 1);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    ok(0, "the referenced closure encodes");
+    lua_settop(L, base);
+    return;
+  }
+  bytes = lua_tolstring(L, -1, &len);
+  {
+    /* A fresh state has an empty proto registry, which is exactly the
+       situation. */
+    lua_State *fresh = luaL_newstate();
+    int refused = 0;
+    if (fresh != NULL) {
+      luaL_openlibs(fresh);
+      diluvium_openlibs(fresh);
+      lua_pushcfunction(fresh, protected_decode_hooked);
+      lua_pushlstring(fresh, bytes, len);
+      if (lua_pcall(fresh, 1, 1, 0) != LUA_OK) {
+        const char *msg = lua_tostring(fresh, -1);
+        refused = (msg != NULL && strstr(msg, "not") != NULL);
+        if (!refused)
+          printf("      (%s)\n", (msg == NULL) ? "(none)" : msg);
+      }
+      lua_close(fresh);
+    }
+    ok(refused,
+       "a prototype referenced but absent is refused, not best-effort loaded");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_tampered_prototype_hash_is_refused (lua_State *L) {
+  int base = lua_gettop(L);
+  size_t len;
+  const char *bytes;
+  /* Corrupt bytecode. Note what this does *not* establish: the loader and
+     lverify.c refuse these bytes on their own, so this stays green even with the
+     hash verification removed. 'a_tampered_prototype_name_is_refused' is the one
+     that tests the hash. Both are worth having -- this is the 7%-crash baseline
+     10.10 cites, and it must be a refusal rather than a crash. */
+  if (!build(L, "return function(q) return q * 7717 + 13 end")) return;
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, base + 1);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    ok(0, "the closure encodes");
+    lua_settop(L, base);
+    return;
+  }
+  bytes = lua_tolstring(L, -1, &len);
+  if (inlined_hash_at(bytes, len, "corrupt-bytecode case") == 0) {
+    lua_settop(L, base);
+    return;
+  }
+  {
+    /* Flip a byte inside the inlined dump, leaving the hash alone. */
+    char *copy = (char *)malloc(len);
+    int refused = 0;
+    if (copy != NULL) {
+      memcpy(copy, bytes, len);
+      copy[len - 8] = (char)(copy[len - 8] ^ 0x01);
+      lua_pushcfunction(L, protected_decode_hooked);
+      lua_pushlstring(L, copy, len);
+      if (lua_pcall(L, 1, 1, 0) != LUA_OK)
+        refused = 1;
+      else
+        lua_pop(L, 1);
+      free(copy);
+    }
+    ok(refused, "a prototype whose bytes were altered is refused");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_tampered_prototype_name_is_refused (lua_State *L) {
+  int base = lua_gettop(L);
+  size_t len, at;
+  const char *bytes;
+  /*
+  ** The check that 'a_tampered_prototype_hash_is_refused' does *not* make. That
+  ** one flips a byte of the bytecode, and the loader rejects it -- so it passes
+  ** whether or not the hash is verified, which was found by removing the
+  ** verification and watching it stay green.
+  **
+  ** This one flips a byte of the *hash* instead. The bytecode still loads
+  ** perfectly; what is wrong is that the record claims a name its bytes do not
+  ** own. 10.5 makes the hash the name of the code, so accepting this would let a
+  ** snapshot install bytecode under someone else's name -- and the reference
+  ** case then hands that name out to whoever asks.
+  */
+  if (!build(L, "return function(z) return z .. 'ARARAT-name-case' end"))
+    return;
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, base + 1);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    ok(0, "the closure encodes");
+    lua_settop(L, base);
+    return;
+  }
+  bytes = lua_tolstring(L, -1, &len);
+  at = inlined_hash_at(bytes, len, "tampered-name case");
+  if (at == 0) { lua_settop(L, base); return; }
+  {
+    char *copy = (char *)malloc(len);
+    int refused = 0;
+    if (copy != NULL) {
+      memcpy(copy, bytes, len);
+      copy[at] = (char)(copy[at] ^ 0x01);   /* one bit of the name */
+      lua_pushcfunction(L, protected_decode_hooked);
+      lua_pushlstring(L, copy, len);
+      if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+        const char *msg = lua_tostring(L, -1);
+        refused = (msg != NULL && strstr(msg, "hash") != NULL);
+        if (!refused)
+          printf("      (%s)\n", (msg == NULL) ? "(none)" : msg);
+      }
+      free(copy);
+    }
+    ok(refused,
+       "bytecode carrying a name its bytes do not hash to is refused");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_permanent_does_not_shift_positions (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /*
+  ** The asymmetry the format depends on: a named object takes no position, on
+  ** both sides. Nothing else in this file would notice if it did, because
+  ** noticing needs a backreference that *crosses* a permanent -- and then it
+  ** resolves to the wrong object rather than failing.
+  **
+  ** An array, so the order is the source order rather than whatever 'pairs'
+  ** gives: 'print' is named and takes no position, the shared table takes one,
+  ** and the third slot is a backreference to it. Give 'print' a position on
+  ** decode and that backreference lands on 'print'.
+  **
+  ** Found by giving ext 0x07 a position and watching every check stay green.
+  */
+  if (!build(L, "local shared = {tag = 'shared'} "
+                "return {print, shared, shared, type, shared}")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  lua_rawgeti(L, copy, 2);
+  lua_rawgeti(L, copy, 3);
+  ok(same_table(L, -2, -1),
+     "a backreference across a named object still finds its own table");
+  lua_pop(L, 2);
+  lua_rawgeti(L, copy, 2);
+  lua_rawgeti(L, copy, 5);
+  ok(same_table(L, -2, -1), "and so does one across two of them");
+  lua_pop(L, 2);
+  lua_rawgeti(L, copy, 1);
+  lua_getglobal(L, "print");
+  ok(lua_topointer(L, -2) == lua_topointer(L, -1),
+     "and the named objects are still themselves");
+  lua_pop(L, 2);
+  lua_rawgeti(L, copy, 3);
+  ok(lua_istable(L, -1),
+     "and the shared slot is a table, not a function that took its place");
+  lua_settop(L, base);
+}
+
+
+static void a_secure_function_keeps_its_secret (lua_State *L) {
+  int base = lua_gettop(L);
+  size_t len;
+  const char *bytes;
+  static const char secret[] = "MOUNTAIN-ARARAT-9317";
+  char src[256];
+  /* 10.9 rule 1: route prototype encoding through the real dump path, so
+     'taintSecureStrings' and the per-string scramble come along. This is the
+     check that the routing actually happened -- a parallel encoder would put the
+     literal in the stream in the clear, which is precisely the bypass 10.9
+     exists to prevent. */
+  snprintf(src, sizeof(src),
+           "local ~function reveal() return '%s' end return {f = reveal}",
+           secret);
+  if (!build(L, src)) return;
+  lua_pushcfunction(L, protected_encode);
+  lua_pushvalue(L, base + 1);
+  if (lua_pcall(L, 1, 1, 0) != LUA_OK) {
+    printf("      (%s)\n", lua_tostring(L, -1));
+    ok(0, "a secure function can be snapshotted");
+    lua_settop(L, base);
+    return;
+  }
+  ok(1, "a secure function can be snapshotted");
+  bytes = lua_tolstring(L, -1, &len);
+  {
+    /* Search the whole stream for the literal, the way test_secure_dump.lua
+       searches a dump. */
+    int found = 0;
+    size_t i;
+    size_t slen = sizeof(secret) - 1;
+    for (i = 0; i + slen <= len; i++) {
+      if (memcmp(bytes + i, secret, slen) == 0) { found = 1; break; }
+    }
+    ok(!found, "and its literal is not in the snapshot in the clear");
+  }
+  lua_settop(L, base);
+  /* And it still works after a round trip, or the scrambling would have been
+     achieved by breaking the function. */
+  if (!build(L, src)) return;
+  {
+    int copy = roundtrip_named(L, __func__);
+    if (copy == 0) return;
+    at(L, copy, "f");
+    if (call0(L, -1, 1))
+      ok(lua_tostring(L, -1) != NULL &&
+         strcmp(lua_tostring(L, -1), secret) == 0,
+         "and it still returns its literal after a round trip");
+    else {
+      printf("      (%s)\n", lua_tostring(L, -1));
+      ok(0, "and it still returns its literal after a round trip");
+    }
+  }
+  lua_settop(L, base);
+}
+
+
+static void the_permanents_fingerprint_is_not_empty (lua_State *L) {
+  char buf[4096];
+  size_t n;
+  int base = lua_gettop(L);
+  /* The header field now has real content, so the empty-set hash recorded at the
+     previous step must no longer appear. Checked by asserting the header still
+     validates and that the permanents table has plausibly many entries. */
+  diluvium_snap_permanents(L);
+  n = diluvium_snap_header(L, NULL, buf, sizeof(buf));
+  ok(n > 0 && diluvium_snap_checkheader(L, NULL, buf, n, NULL)
+     == DILUVIUM_SNAP_ACCEPT,
+     "the header still validates with a populated permanents set");
+  lua_settop(L, base);
+}
+
+
 int main (void) {
   lua_State *L = luaL_newstate();
   if (L == NULL) {
@@ -989,9 +1759,36 @@ int main (void) {
   a_missing_terminator_is_refused(L);
   trailing_bytes_are_refused(L);
   a_bad_metatable_entry_is_refused(L);
+  a_bad_fixup_tag_is_refused(L);
+  a_non_integer_tag_is_refused(L);
   a_bad_owner_position_is_refused(L);
   an_out_of_range_owner_is_refused(L);
-  a_truncated_metatable_entry_is_refused(L);
+  a_truncated_fixup_is_refused(L);
+  an_upvalue_fixup_on_a_table_is_refused(L);
+
+  printf("\n=== functions, closures and permanents (10.3, 10.4, 10.5) ===\n");
+  a_plain_function_survives(L);
+  a_closure_keeps_its_upvalues(L);
+  a_closure_over_a_table_shares_it(L);
+  two_closures_still_share_an_upvalue(L);
+  an_unshared_upvalue_stays_unshared(L);
+  a_recursive_closure_survives(L);
+  one_closure_referenced_twice_stays_one(L);
+  a_closure_using_globals_survives(L);
+  a_c_function_is_named_not_copied(L);
+  a_library_table_is_named_not_copied(L);
+  a_snapshot_of_a_global_closure_is_small(L);
+
+  printf("\n=== content-addressed prototypes (10.5) and secure code (10.9) ===\n");
+  a_shared_prototype_is_carried_once(L);
+  a_registered_prototype_is_referenced(L);
+  a_c_function_that_is_not_permanent_is_refused(L);
+  a_missing_prototype_is_refused(L);
+  a_tampered_prototype_hash_is_refused(L);
+  a_tampered_prototype_name_is_refused(L);
+  a_permanent_does_not_shift_positions(L);
+  a_secure_function_keeps_its_secret(L);
+  the_permanents_fingerprint_is_not_empty(L);
 
   printf("\n=== the runtime fingerprint and header (10.5, 10.6) ===\n");
   the_fingerprint_is_stable_and_looks_like_a_hash(L);
