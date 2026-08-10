@@ -123,7 +123,7 @@ said would happen:
 | msgpack codec | under 25 KB | 13.5 KB |
 | queue subsystem | under **20 KB** | 17.6 KB — `dqueue.c` 15.0 + `dendpoint.c` 2.6 |
 | instance C ABI | under 10 KB | 6.1 KB |
-| hibernate | under 30 KB | not built |
+| hibernate | under 30 KB | 1.5 KB so far — `dshim.c` only |
 | swarm layer | separate library, not counted | not built |
 
 The queue target moved from 15 KB, and the reason is worth recording rather than
@@ -934,6 +934,35 @@ Note the useful consequence: an agent parked on `queue.wait` has no C frame at a
 because waiting is a yield. Idle-on-inbox is the overwhelmingly common state at
 scale, and it is capturable.
 
+**"Other than the top one" is load-bearing, and was worth stating.** The top frame
+of a suspended thread is by definition the one that called `lua_yieldk`, and a null
+`k` there is the ordinary case, not a defect: `ldo.c`'s `resume` takes the poscall
+path and hands the yielded values to that frame's caller, so there is no saved C
+state to want. `coroutine.yield` is built exactly this way. A walk that checked
+every frame uniformly would refuse every ordinary suspended coroutine — which is
+what the first implementation did, and what `dshim_check.c` caught on its first
+run.
+
+**The list of excluded situations above is right but describes the wrong failure.**
+A `table.sort` comparator or a `string.gsub` replacement cannot be *hibernated
+from*, but it also cannot *yield* — `lua_call` routes through `luaD_callnoyield`,
+which sets the bit `yieldable` tests, so the attempt raises "attempt to yield
+across a C-call boundary" rather than parking. So there is no reachable suspended
+thread with a continuation-less C frame below its yield. The precondition check is
+therefore a tripwire on a VM invariant rather than a gate that fires in practice,
+and the thing it guards against is a future host call that reaches Lua with
+`lua_call` where it should have used `lua_callk` — which would make the shape
+reachable for the first time, quietly. §14 was right to name this as the property
+that will break during refactoring; it just breaks by becoming *possible*, not by
+being mishandled.
+
+That has a consequence for how it can be tested, since no test over a real thread
+can distinguish the correct rule from an over-broad one. The rule is factored out
+as `diluvium_shim_framecapturable(frame, is_innermost)`, a pure predicate over a
+flattened frame, so it can be exercised with frames the test fills in itself.
+Verified by mutation: widening the exemption to all C frames turns exactly one
+check red, and it is that one.
+
 ### 10.3 What is captured
 
 | Category | Treatment |
@@ -1012,12 +1041,39 @@ and it is the check that makes the hierarchy structural rather than conventional
 
 Checked at hibernate time, refused if violated:
 
-1. No C frames without continuations below the call site (10.2).
+1. No C frames without continuations below the call site (10.2). Implemented as
+   `diluvium_shim_capturable`, which also refuses a thread that is not suspended
+   and a thread parked inside a debug hook — see below.
 2. No live host resources in the reachable graph. No open sockets, file handles, or
    sessions. Because hibernation is self-initiated, the program is in a position to
    release them first. Verify by rejecting any userdata lacking a `__persist` hook.
 3. No light userdata anywhere reachable.
 4. Single thread.
+
+Two more the draft did not list, both found by writing the check:
+
+5. **The thread must actually be suspended.** A running thread has state on the C
+   stack that nothing has written down; a thread that resumed another (`normal`
+   status) is in the same position one level up, and that is the case a swarm hits
+   for real — a supervisor parked inside a resume of a child. Both look identical
+   from the internals: status `LUA_OK` with a non-empty `CallInfo` chain. Which
+   means the frame count is part of the test and not a shortcut around it.
+
+   One case is deliberately *not* refused: a thread with an empty call chain. The
+   main thread sitting at the C host boundary and a thread that has never started
+   are indistinguishable — both are empty — so refusing self-capture belongs to the
+   snapshot layer, which knows which thread it was called on. Capturing an empty
+   thread is meaningless but harmless.
+
+6. **Not inside a debug hook.** A C hook can park a thread: `lua_yieldk` from a
+   hook returns rather than throwing, and `luaG_traceexec` then sets
+   `CIST_HOOKYIELD` and throws. The result is genuinely suspended, so the
+   suspended test passes it, and it is refused on its own grounds — the thread is
+   parked mid-instruction with `savedpc` past the instruction it has not executed.
+   Catching this needs the frame walk rather than an `allowhook` test, because
+   `luaD_hook` restores `allowhook` and clears `CIST_HOOKED` before the yield
+   propagates. A *Lua* hook cannot reach this state at all: `ldblib.c`'s `hookf`
+   uses `lua_call`, so the yield errors instead of parking.
 
 ### 10.8 Handle re-resolution
 
@@ -1502,7 +1558,7 @@ lazily. Registered references are consulted first, so the two compose.
 Not done: `"gone"` for a non-resident instance with `wake_on_message`, which is
 9.5 and belongs to the swarm layer.
 
-**M6: hibernate**
+**M6: hibernate** — accessor shim and preconditions done; the rest not started.
 Accessor shim, precondition checks, value graph with backreferences, closures and
 upvalue identity, permanents table, content-addressed Protos through the real dump
 path, snapshot header, validation pass and structure-aware fuzzer, host-identity
@@ -1512,6 +1568,42 @@ upvalues remain shared; a mismatched runtime identity refuses cleanly; a hiberna
 attempted below a continuation-less C frame refuses with a named error; a snapshot
 taken with a live `defer` in scope round-trips; a foreign host stamp is refused;
 the fuzzer reports no crashes.
+
+*Done so far.* `src/dshim.c` and `src/dshim.h` — 1.5 KB of the size budget, and
+the only file in the tree that reads Lua's internal headers, which is the whole
+point of 3.1's second clause. It reports frames, stack slots, upvalue open/closed
+state, proto identity, the secure-function flag, and capturability. Nothing but
+plain data crosses the interface, so `dsnap.c` can be written without internal
+headers even though it is the thing that needs the information.
+
+Every internal-structure assertion the draft made was checked at source level
+before a line was written, per 17's procedure, and all held: `CallInfo`'s field
+names and union layout, `CIST_C` at bit 15, `upisopen`, `StkIdRel` being a union,
+`tbclist`'s emptiness convention, `lua_closethread`'s signature, and `Proto`'s
+`is_encrypted`. What did *not* hold were two things about the design's own logic
+rather than the tree — see 10.2 and 10.7 — and both were caught by the tests
+rather than by re-reading.
+
+`test/dshim_check.c`, 82 checks. Two things it defends, which fail differently: an
+upstream *rename* breaks the compile, loudly, and that is what confining the
+dependency buys; an upstream change of *meaning* under the same field names would
+not, so the checks assert relations that only hold if the reads mean what they
+claim — frame counts against known call depths, `func_index` against the function
+actually in that slot, an open upvalue's slot against the live value in it. The
+capturability half runs nine different suspended shapes (bare yield, `pcall`,
+`xpcall`, `__index`, `__add`, generic `for`, nested coroutine, pending `<close>`)
+and four uncapturable ones.
+
+Verified by mutation, as with M2 and M3: seven deliberate breakages, each one
+turning a named check red, listed at the head of the test file. Two of them
+initially turned *nothing* red, which is the reason 10.2's factored predicate and
+10.7's items 5 and 6 exist — the first pass had a check that refused every
+ordinary coroutine and a check that would have accepted a running thread.
+
+Also fixed in passing: `src/makefile`'s object list, which had never been updated
+past M0, so `make build_platform` had been failing to link since M1. The
+amalgamation path the test suite uses was unaffected, which is why it went
+unnoticed.
 
 **M7: swarm layer**
 Instance table, `system/lifecycle` and `system/events`, attenuation, budgets,
@@ -1582,9 +1674,15 @@ Lean. Cover semantics and boundaries, not permutations.
 - **Deadlock, not hang.** An indefinite park under a host that cannot satisfy it
   reports and exits. Run as a subprocess, since the failure being tested is a
   program that never returns.
-- **No-C-frame assertion.** Park an agent on `queue.wait` and verify the CallInfo
+- **No-C-frame assertion** (`test/dshim_check.c`, `agent_parked_on_wait_is_capturable`).
+  Park an agent on `queue.wait` through the real driver and verify the CallInfo
   chain has no continuation-less `CIST_C` frame below the wait. This property is
-  what makes M6 possible and it will silently break during refactoring.
+  what makes M6 possible and it will silently break during refactoring. The test
+  says which frames carry continuations and not only that the verdict is OK, so a
+  regression names the frame that lost one. Worth recording: the wait path turns
+  out not to need the innermost-frame exemption at all — `dq_wait` yields with
+  `dq_wait_k` saved, so it would be capturable under the strictest reading of the
+  rule.
 - **Hibernate round-trip.** Parked agent, shared upvalues, queue contents, handle
   re-resolution, refusal cases from 10.7, and a live `defer` in scope. The `defer`
   case is the highest-coverage single test available here: `defer` desugars to a
@@ -1690,6 +1788,16 @@ artifact between sessions that do not share context.
   version-guarded and already uses `lua_isinteger`, so the warning to "expect
   real porting work" pointed at the wrong work. The real work was the ext
   registry, which upstream has none of.
+- **§10.2's exclusion list described the wrong failure.** A comparator or a `gsub`
+  replacement cannot hibernate, but it also cannot yield, so the shape the
+  precondition refuses is not reachable from Lua at all. The check is a tripwire on
+  a VM invariant, not a gate — and because of that, no test over a real thread can
+  tell the correct rule from an over-broad one, which is why the rule is factored
+  out as a pure predicate. See 10.2.
+- **§10.7 listed four preconditions; there are six.** "Suspended" and "not inside a
+  hook" were missing, and both are reachable states with distinct causes. The
+  `normal`-status case — a supervisor parked inside a resume of a child — is the one
+  a swarm hits routinely.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

@@ -286,6 +286,12 @@ dtask_check: _build_step0
 	  $(CURDIR)/test/dtask_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dtask_check
 
+dshim_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dshim_check \
+	  $(CURDIR)/test/dshim_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dshim_check
+
 # Run the suite. Keeps going after a failure and prints a summary, so one
 # broken test does not mask the state of the rest. The list of tests and the
 # skip reasons live in test/run_tests.sh -- add new tests there, not here.

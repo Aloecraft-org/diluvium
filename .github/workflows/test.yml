@@ -126,6 +126,14 @@ jobs:
       - name: Run the instance-ABI contract tests
         run: make dv_check
 
+      # The accessor shim is the only file that reads Lua's internal structs,
+      # so an upstream rename breaks the build; these catch the quieter
+      # failure, where the fields keep their names and change their meaning.
+      # They also hold the invariant hibernation rests on -- no
+      # continuation-less C frame below a yield.
+      - name: Run the accessor-shim contract tests
+        run: make dshim_check
+
       # Needs a signal and a subprocess, so it cannot live in run_tests.sh.
       # The --task case is the one that regresses silently.
       - name: Check that Ctrl-C interrupts a runaway loop

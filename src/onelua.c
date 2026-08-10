@@ -121,7 +121,9 @@
 #include "linit.c"
 #endif
 
-/* Diluvium REPL support -- on-top code, public C API only. In the
+/* Diluvium on-top code. Public C API only, with one deliberate exception:
+   dshim.c reads core internal headers, because a coroutine's call chain and
+   open upvalues are not in the public API and cannot be. See dshim.h. In the
    amalgamation so the interpreter and the WASM host share it. */
 #ifndef MAKE_LUAC
 #include "drepl.c"
@@ -130,6 +132,7 @@
 #include "dmsgpack.c"
 #include "dqueue.c"
 #include "dendpoint.c"
+#include "dshim.c"
 #include "dlibs.c"
 #include "dv.c"
 #endif
