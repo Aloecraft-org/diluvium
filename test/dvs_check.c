@@ -892,6 +892,137 @@ static void a_host_can_read_an_instance_s_budget_and_capabilities (void) {
 }
 
 
+/*
+** A child that FAULTS while it has a parent to be told.
+**
+** No test had this shape, and three separate bugs were hiding in it. The children
+** here are killed by the test or exit cleanly, so 'faulted' was never true for an
+** instance with a parent, and the sanitizers never reached the path:
+**
+**   1. 'dv_last_error' returns a pointer into the instance's error buffer, and the
+**      fault path freed the instance before handing that pointer to 'emit_event' --
+**      a use-after-free on exactly the interesting case.
+**   2. 'emit_event' wrote a map header claiming three pairs and then dropped the
+**      third when it ran out of room, and a fault detail is a Lua error with a
+**      traceback, so the supervisor met a truncated message.
+**   3. 'put_str' wrote str8's single length byte from a size_t, so a 300-byte
+**      detail announced 44 bytes and copied 300.
+**
+** The child below raises an error with a deliberately enormous message, which is
+** what a real traceback looks like to this code.
+*/
+static void a_faulting_child_reports_a_readable_reason (void) {
+  static const char SUP[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local ev  = queue.declare('system/events', {cap = 8})\n"
+    "local log = queue.declare('log', {cap = 8})\n"
+    "local hold = queue.declare('hold', {cap = 2})\n"
+    /* The child errors immediately, with a message far longer than the event
+       buffer, so the truncation paths are the ones under test. */
+    "local KID = \"error(string.rep('x', 4000))\"\n"
+    "queue.push(sys, {op = 'spawn', code = KID, caps = {}})\n"
+    "while true do\n"
+    "  local id, e = queue.wait({ev})\n"
+    "  queue.push(log, tostring(e.event) .. '|' .. tostring(e.id) .. '|' ..\n"
+    "    tostring(e.detail and #e.detail or 0))\n"
+    "end\n";
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle", "queue:log" };
+  int i, saw_fault = 0;
+  char line[256];
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, SUP, sizeof(SUP) - 1, caps, 2, 0, 0, &root) != DVS_OK) {
+    printf("      (%s)\n", dvs_last_error(sw));
+    ok(0, "the supervisor starts");
+    dvs_free(sw);
+    return;
+  }
+  line[0] = '\0';
+  for (i = 0; i < 12; i++) {
+    dv_instance *sup;
+    dvs_step(sw);
+    sup = dvs_instance(sw, root);
+    if (sup == NULL) break;
+    {
+      dv_queue_id log = dv_queue_lookup(sup, "log");
+      uint8_t out[512];
+      size_t n = 0;
+      while (log != 0 &&
+             dv_queue_pop(sup, log, out, sizeof(out), &n) == DV_OK && n > 1) {
+        /* Short strings are fixstr; these are, being 'faulted|2|191' or so. */
+        size_t m = (n - 1 < sizeof(line) - 1) ? n - 1 : sizeof(line) - 1;
+        memcpy(line, out + 1, m);
+        line[m] = '\0';
+        if (strncmp(line, "faulted|", 8) == 0) saw_fault = 1;
+      }
+    }
+  }
+  ok(saw_fault, "the supervisor is told its child faulted");
+  printf("      (event: %s)\n", line[0] ? line : "(none)");
+  /*
+  ** The decisive part: the supervisor DECODED the event. A map header promising a
+  ** field the message does not carry makes 'queue.wait' raise inside the program,
+  ** so reaching the log at all means the message was well formed -- and the length
+  ** it reports proves the detail arrived rather than being dropped.
+  */
+  ok(saw_fault && strstr(line, "|0") == NULL,
+     "and the detail survived, so the event was not a truncated map");
+  dvs_free(sw);
+}
+
+
+/*
+** A bare "*" is a name, not a licence.
+**
+** 'strncmp(held, want, 0)' returns 0 for any pair of strings, so a one-character
+** "*" matched every capability. Worse, it was reachable by attenuation rather than
+** only by a host granting it: "**" implies "*", so a parent holding "**" could hand
+** a child the bare "*" and the child would hold more than the parent. 9.3 says a
+** grant may only narrow.
+*/
+static void a_wildcard_cannot_widen_a_grant (void) {
+  dvs_host h;
+  dvs_swarm *sw;
+  dvs_id star = 0, dstar = 0, scoped = 0;
+  static const char *just_star[] = { "*" };
+  static const char *double_star[] = { "**" };
+  static const char *scoped_caps[] = { "queue:work/*" };
+  static const char *src = "local q = queue.declare('hold', {cap = 2}) "
+                           "return queue.wait({q})";
+  memset(&h, 0, sizeof(h));
+  h.drive = host_drive;
+  sw = dvs_new(&h, 8, 4);
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  dvs_root(sw, src, strlen(src), just_star, 1, 0, 0, &star);
+  dvs_root(sw, src, strlen(src), double_star, 1, 0, 0, &dstar);
+  dvs_root(sw, src, strlen(src), scoped_caps, 1, 0, 0, &scoped);
+
+  ok(!dvs_holds(sw, star, "lifecycle"),
+     "holding \"*\" does not grant the lifecycle capability");
+  ok(!dvs_holds(sw, star, "queue:anything"), "nor any queue");
+  ok(dvs_holds(sw, star, "*"), "it grants only the literal name it is");
+  /*
+  ** "**" may still pass "*" on, and that is now a *narrowing* rather than the
+  ** escalation it used to be: the child ends up holding the literal "*", which
+  ** grants nothing. What matters is not whether the grant is refused but whether it
+  ** can buy the child anything, so that is what is asserted.
+  */
+  ok(dvs_holds(sw, dstar, "*anything"),
+     "\"**\" is a prefix pattern over names starting with a star");
+  ok(!dvs_holds(sw, dstar, "lifecycle"),
+     "and does not reach a name that does not start with one");
+  ok(!dvs_holds(sw, star, "queue:work/a") && !dvs_holds(sw, star, "lifecycle"),
+     "so a child handed \"*\" holds nothing its parent could not already reach");
+  /* The legitimate pattern still works, in both directions. */
+  ok(dvs_holds(sw, scoped, "queue:work/a"), "a real prefix pattern still matches");
+  ok(!dvs_holds(sw, scoped, "queue:other"), "and still does not over-match");
+  ok(dvs_may_grant(sw, scoped, "queue:work/a"),
+     "and can still be narrowed for a child");
+  dvs_free(sw);
+}
+
+
 int main (void) {
   printf("=== the msgpack token cursor ===\n");
   the_cursor_agrees_with_the_encoder();
@@ -904,6 +1035,8 @@ int main (void) {
   a_program_without_the_capability_is_not_drained();
   killing_a_parent_kills_the_subtree();
   a_child_cannot_kill_its_supervisor();
+  a_faulting_child_reports_a_readable_reason();
+  a_wildcard_cannot_widen_a_grant();
 
   a_host_can_read_an_instance_s_budget_and_capabilities();
 

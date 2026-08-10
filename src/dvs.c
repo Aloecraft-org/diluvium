@@ -236,7 +236,18 @@ void dvs_free (dvs_swarm *sw) {
 */
 static int implies (const char *held, const char *want) {
   size_t n = strlen(held);
-  if (n > 0 && held[n - 1] == '*')
+  /*
+  ** A trailing '*' is a prefix wildcard, and the prefix must be non-empty. A bare
+  ** "*" would otherwise match every capability there is, via 'strncmp(held, want,
+  ** 0)', which returns 0 for any pair of strings -- and that is worse than a
+  ** god-mode capability, because it can be reached by *attenuation*: a parent
+  ** holding "**" implies "*" (prefix "*" matches the want "*"), so it could grant a
+  ** child the bare "*" and the child would then hold everything the parent did not.
+  ** 9.3 says a grant may only narrow, so a rule that lets one widen is a break in
+  ** the model rather than a sharp edge. A one-character "*" is therefore a literal
+  ** name, matching only itself.
+  */
+  if (n > 1 && held[n - 1] == '*')
     return strncmp(held, want, n - 1) == 0;
   return strcmp(held, want) == 0;
 }
@@ -453,7 +464,18 @@ static void put_str (char **p, char *end, const char *s) {
     *(*p)++ = (char)(0xa0 | n);
   }
   else {
-    if (*p + 2 + n > end) return;
+    /*
+    ** str8 carries one length byte, so 255 is the most it can describe. Writing
+    ** '(char)n' for a longer string truncated the length and then copied the whole
+    ** thing: a message claiming 44 bytes followed by 300 of them. Clamp the string
+    ** instead of lying about it, and clamp again to the room left, so the header
+    ** below always matches what actually gets written.
+    */
+    if (n > 255) n = 255;
+    if (*p + 2 + n > end) {
+      if ((size_t)(end - *p) < 3) return;
+      n = (size_t)(end - *p) - 2;
+    }
     *(*p)++ = (char)0xd9;
     *(*p)++ = (char)n;
   }
@@ -482,6 +504,7 @@ static void emit_event (dvs_swarm *sw, dvs_id to, const char *what,
   dvs_slot *sl = find(sw, to);
   dv_queue_id q;
   char buf[512];
+  char det[192];
   char *p = buf;
   char *end = buf + sizeof(buf);
   if (sl == NULL || sl->inst == NULL)
@@ -489,6 +512,29 @@ static void emit_event (dvs_swarm *sw, dvs_id to, const char *what,
   q = dv_queue_lookup(sl->inst, "system/events");
   if (q == 0)
     return;                     /* it did not declare one; nothing to say */
+  /*
+  ** The detail is copied into a bounded buffer before the map header is written,
+  ** and that ordering is the fix rather than a tidiness: the header commits to a
+  ** pair count, 'put_str' returns silently when it runs out of room, and a fault
+  ** detail is a Lua error with a traceback, which is easily longer than this whole
+  ** buffer.
+  **
+  ** Honest limits on this one. The fault path cannot actually reach it: 'dv_last_
+  ** error' is itself bounded to about 192 bytes, so no test drives a longer detail
+  ** through here, and removing either this copy or 'put_str''s clamp turns nothing
+  ** red. The reachable trigger is 'sw->error', which is 512 bytes and is passed as a
+  ** detail by 'do_hibernate'. Both are kept anyway, and the copy is kept in
+  ** preference to relying on the other buffer's size: the invariant "the pair count
+  ** matches what was written" should be checkable in this function, not by reading
+  ** another file and hoping it does not change. 192 bytes always fits alongside the
+  ** keys and is under str8's 255-byte ceiling.
+  */
+  if (detail != NULL) {
+    size_t i = 0;
+    while (i + 1 < sizeof(det) && detail[i] != '\0') { det[i] = detail[i]; i++; }
+    det[i] = '\0';
+    detail = det;
+  }
   *p++ = (char)(0x80 | (detail != NULL ? 3 : 2));
   put_str(&p, end, "event");
   put_str(&p, end, what);
@@ -1135,10 +1181,26 @@ int dvs_step (dvs_swarm *sw) {
       ** decision back into this layer, which is where 9.1.2 says it must not be.
       */
       const char *what = over ? "exceeded" : faulted ? "faulted" : "exited";
-      const char *detail = faulted ? dv_last_error(sl->inst) : NULL;
+      /*
+      ** Copied, not pointed at. 'dv_last_error' returns a pointer into the
+      ** instance's own error buffer, and 'kill_subtree' below calls 'dv_free' on
+      ** that instance -- so passing the pointer on to 'emit_event' afterwards read
+      ** freed memory. The sanitizers never saw it because no test had a child that
+      ** *faulted* while it had a parent to be told: the children in dvs_check.c are
+      ** killed by the test or exit cleanly.
+      */
+      char why[192];
+      why[0] = '\0';
+      if (faulted) {
+        const char *e = dv_last_error(sl->inst);
+        size_t i = 0;
+        if (e != NULL)
+          while (i + 1 < sizeof(why) && e[i] != '\0') { why[i] = e[i]; i++; }
+        why[i] = '\0';
+      }
       kill_subtree(sw, id, 0);
       if (parent != 0)
-        emit_event(sw, parent, what, id, detail);
+        emit_event(sw, parent, what, id, faulted ? why : NULL);
     }
   }
   return dvs_alive(sw);
