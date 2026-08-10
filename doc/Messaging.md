@@ -2711,6 +2711,14 @@ sweep: **35 confirmed, 32 refuted** — a little under half the raw output did n
 survive scrutiny. An unverified finding list, from an agent or a person, is a
 hypothesis list.
 
+**The evidence is in `doc/audit/M0-M7.md`**, and this section is the summary of it.
+That file carries, for each finding, the quotes at their line numbers, the failure
+traced to a caller, a proposed fix, the skeptic's verdict, and the corrections the
+skeptic made to the reporter's own anchors — plus all 32 refuted findings in full,
+which is the half that stops a later session re-litigating something already checked.
+It also carries a status per finding against the tree as it stands. Read it before
+picking up any entry below.
+
 Two other numbers. **Fourteen of the confirmed findings are in `dvs.c`**, written
 the same day, which passed 92 of its own checks and both sanitizers. And of the
 ~24 distinct defects, **ten are hibernation** — which is the single most useful fact
