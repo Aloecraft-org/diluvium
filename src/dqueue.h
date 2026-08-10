@@ -96,4 +96,73 @@ LUA_API lua_Integer diluvium_queue_ready (lua_State *co,
 */
 LUA_API void diluvium_queue_fire (lua_State *co, lua_Integer id, int why);
 
+
+/*
+** Byte-level access, for the instance ABI.
+**
+** A host already holds msgpack, so moving a message through the codec would
+** decode and re-encode it for nothing -- and 11.1 says bytes in, bytes out.
+** These are the paths that keep that promise literal.
+**
+** Nothing here validates the bytes. That is deliberate and worth knowing: a
+** host that pushes malformed msgpack will have the guest raise when it pops,
+** and validating would mean a full decode on every message to catch a case
+** only a broken host can create. The alternative -- decode to check, discard,
+** then store the bytes -- costs the thing the ABI exists to avoid.
+*/
+#define DILUVIUM_Q_OK		0
+#define DILUVIUM_Q_FULL		1
+#define DILUVIUM_Q_DISABLED	2
+#define DILUVIUM_Q_EMPTY	3
+#define DILUVIUM_Q_DROPPED	4
+#define DILUVIUM_Q_UNKNOWN	5
+
+/* Name to handle, or 0 when there is no such queue. */
+LUA_API lua_Integer diluvium_queue_find (lua_State *L, const char *name);
+
+/* One of the DILUVIUM_Q_* codes above. */
+LUA_API int diluvium_queue_push_bytes (lua_State *L, lua_Integer id,
+                                       const char *s, size_t len);
+
+/*
+** Borrow the message at the head without removing it. The bytes stay valid
+** until 'diluvium_queue_drop' or the next 'diluvium_queue_peek_bytes' on this
+** state, because the peeked string is anchored in the registry -- not merely
+** because the queue still holds it. That distinction matters: without the
+** anchor, a guest that ran in between and popped the message would leave the
+** host holding a pointer into collectable memory.
+*/
+LUA_API int diluvium_queue_peek_bytes (lua_State *L, lua_Integer id,
+                                       const char **s, size_t *len);
+
+/* Remove the head, which is what a peek/drop pair together amount to. */
+LUA_API int diluvium_queue_drop (lua_State *L, lua_Integer id);
+
+/*
+** Everything a host might want to know about a queue. Out params rather than a
+** struct so this header stays independent of the ABI's. Returns 1 for a live
+** handle, 0 otherwise; any out pointer may be NULL.
+*/
+LUA_API int diluvium_queue_stat (lua_State *L, lua_Integer id,
+                                 lua_Integer *capacity, lua_Integer *len,
+                                 int *enabled, int *exported,
+                                 int *direction, int *on_full);
+
+/*
+** Called when the guest pushes to an exported queue, so a host need not poll.
+**
+** Only exported queues, and only guest pushes: a host that pushed a message
+** does not need telling about it. Fires synchronously, inside whatever call the
+** guest was making, so a callback that re-enters the runtime is a re-entrancy
+** bug waiting to happen -- the ABI's wrapper says so in its own words.
+**
+** The callback and its user data are held in a userdata in the registry, so
+** there is no allocation to free and no function pointer squeezed through a
+** 'void *'.
+*/
+typedef void (*diluvium_queue_notify) (lua_State *L, lua_Integer id, void *ud);
+
+LUA_API void diluvium_queue_setnotify (lua_State *L, diluvium_queue_notify fn,
+                                       void *ud);
+
 #endif

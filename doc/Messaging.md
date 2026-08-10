@@ -1115,7 +1115,10 @@ uint32_t     dv_abi_version(void);
 /* lifecycle */
 dv_instance* dv_new(const dv_config* cfg);
 void         dv_free(dv_instance* inst);
-dv_status    dv_load(dv_instance* inst, const uint8_t* code, size_t len);
+dv_status    dv_load(dv_instance* inst, const uint8_t* code, size_t len,
+                          const char* name);
+const char*  dv_last_error(dv_instance* inst);
+const char*  dv_status_name(dv_status s);
 
 /* queues */
 dv_queue_id  dv_queue_lookup(dv_instance* inst, const char* name);
@@ -1131,6 +1134,7 @@ void         dv_queue_release(dv_instance* inst, dv_queue_id id);
 /* scheduling */
 dv_status    dv_run(dv_instance* inst, dv_waitset* out_waitset);
 dv_status    dv_resume(dv_instance* inst, dv_queue_id fired);
+dv_status    dv_waitset_get(dv_instance* inst, dv_waitset* out);
 
 /* snapshots */
 dv_status    dv_snapshot(dv_instance* inst, uint8_t** out, size_t* out_len);
@@ -1162,6 +1166,24 @@ re-enter the ABI.
 
 `dv_run` returns `DV_IDLE` with a populated wait-set when the guest parks,
 `DV_DONE` on completion, `DV_ERROR` on a Lua error.
+
+**`dv_waitset_get` was missing from the first draft, and the gap is worth
+recording.** `dv_resume` can also return `DV_IDLE` — a program looping on
+`queue.wait` parks again immediately, which is the normal shape rather than an
+edge case — and its signature has nowhere to put a wait-set. Without this, a
+host would have to guess, and a zeroed struct reads as "parked on no queues at
+all", which is the kind of wrong that looks like it works. Found while writing
+the Rust wrapper, which is the argument for writing a binding in the same
+milestone as the ABI rather than after it.
+
+`dv_load` also takes a `name`, since without one every traceback says
+`(dv_load)` and a host with several programs cannot tell them apart.
+`dv_last_error` returns the message and traceback for the last `DV_ERROR`;
+`dv_status_name` gives a status a printable name, for logs and for binding error
+types.
+
+`DV_QUEUE_DROPPED` joins 11.3's list: `on_full = "drop_oldest"` accepted the
+message *and* evicted one, which is neither `DV_OK` nor a refusal.
 
 ### 11.4 Threading contract
 
@@ -1222,6 +1244,17 @@ build-from-source fallback, plus a safe wrapper.
 The wrapper presents queues in `tokio::sync::mpsc` shape so `select!` works with no
 adaptation. Use `rmp-serde` so host code gets `Deserialize` on messages. Rust is one
 of the two demo targets and gets the most polish.
+
+**Field names cross the boundary, and every binding must agree.** `rmp-serde`'s
+default `to_vec` encodes a struct as an *array of field values*, so a Rust
+`Order { id, item, qty }` arrives in Lua as `{1, "widget", 2}` — coupling every
+guest to the declaration order of a Rust struct, invisibly, until somebody moves
+a field. The wrapper uses `to_vec_named`. Found by a guest reading `order.qty`
+as nil, which is the cheapest possible way to find it and the reason the binding
+belongs in the same milestone as the ABI.
+
+The same rule binds the JS and Python wrappers: a struct, object or dataclass
+crosses as a msgpack **map**, keyed by name.
 
 ### 12.3 JavaScript (npm)
 
@@ -1379,11 +1412,39 @@ Lab is ready to answer what a prompt shows while a program waits.
 Sizes at `-O3` on linux-x86_64: queues 10.4 KB against 15 KB, msgpack 13.8 KB
 against 25 KB, driver 1.7 KB.
 
-**M4: instance C ABI plus reference host**
-Full `dv_*` surface minus snapshots, status codes, threading contract, version
-negotiation, minimal Rust host.
-Accept when: an agent exchanges messages with the Rust host across the boundary,
-including the peek/release zero-copy path with its registry anchor.
+**M4: instance C ABI plus reference host** — done.
+`src/dv.h` and `src/dv.c`, plus `bindings/rust/` (a `diluvium-sys` crate that
+builds the amalgamation from source, and a safe `diluvium` wrapper).
+
+`dv_run` and `dv_resume` are steps, not loops. The CLI's driver loops because a
+CLI can afford to block; a host with an event loop of its own cannot, so the ABI
+returns the moment the program parks. Both drive the same body via
+`diluvium_task_pushbody`, so the subtleties about continuations and
+non-yieldable protected calls live in one file rather than two.
+
+Accepted on `test/dv_check.c` (73 checks, written against `dv.h` alone — which
+is also a check that the header suffices on its own) and 16 Rust tests plus a
+doctest and an example host. Between them: the version refused at `dv_new`;
+errors crossing with a traceback that names the failing frame; a guest queue
+invisible until the program declares it; every row of 6.4 from the host side;
+`DV_BUFFER_TOO_SMALL` leaving the message in place so a host can size a buffer
+and retry; the peek/release zero-copy path with its registry anchor; export
+notifications firing for exported queues and not for private ones; parking,
+resuming, and a park for *space* reporting `for_write` so a host knows to drain
+rather than feed; `DV_BUSY` when a parked program is run instead of resumed; and
+a host answering a 5-second timeout in microseconds, because it owns the clock.
+
+The Rust wrapper is `Send` but not `Sync`, which is 11.4 stated in the type
+system rather than in a comment.
+
+Sizes at `-O3` on linux-x86_64: ABI **5.5 KB** against a 10 KB budget.
+
+Worth watching: queues are now **13.6 KB** against a 15 KB budget, having grown
+from 10.4 with the byte-level host paths. M5 adds endpoints to the same file, so
+the budget will bind there rather than later. Splitting the host-facing half of
+`dqueue.c` into its own translation unit is the obvious move if it does, and it
+costs nothing to defer until the number says so. msgpack is 13.5 KB against 25;
+the driver 1.7 KB.
 
 **M5: endpoints and delivery model**
 `endpoint.bind`, `endpoint.status`, ext 0x02 with a live resolver, `"gone"`
@@ -1438,8 +1499,13 @@ Lean. Cover semantics and boundaries, not permutations.
   runaway loop, in both execution modes. Shell rather than Lua because it needs
   a subprocess and a signal. The `--task` case is the one that regresses
   silently, since the handler still runs and still looks like it worked.
-- **Yield/resume.** One test per host binding: push in, agent wakes, agent pushes
-  out, host receives.
+- **Instance ABI** (`test/dv_check.c`, `make dv_check`). Written against `dv.h`
+  with no access to the runtime's internals, so it also checks the header is
+  sufficient for a host. Runs wherever the suite runs, including where no Rust
+  toolchain exists.
+- **Yield/resume, per binding** (`bindings/rust/diluvium/tests/host.rs`). Push
+  in, program wakes, program pushes out, host receives — with the host's own
+  types on one side and Lua tables on the other.
 - **Non-yieldable rejection** (`test/test_wait.lua`). One test per context in
   8.4, plus one asserting a yield inside `pcall` **succeeds**, and one asserting
   a VM-dispatched metamethod parks — the pair is what keeps the boundary from

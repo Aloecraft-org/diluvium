@@ -130,6 +130,7 @@
 #include "dmsgpack.c"
 #include "dqueue.c"
 #include "dlibs.c"
+#include "dv.c"
 #endif
 
 /* test library -- used only for internal development */

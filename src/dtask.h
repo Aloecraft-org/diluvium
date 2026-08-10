@@ -98,4 +98,20 @@ typedef int (*diluvium_task_wait) (lua_Integer ms, void *ud);
 
 LUA_API void diluvium_task_setwait (diluvium_task_wait fn, void *ud);
 
+
+/*
+** Push the task body onto a thread, ready to be resumed with
+** (handler, function, args...) above it.
+**
+** Exposed so that a host driving its own steps -- the instance ABI, whose
+** whole point is that the host decides when to continue -- runs the same body
+** as 'diluvium_task_call' rather than a second copy of it. What lives in that
+** body is subtle enough to be worth having once: the protected call must be
+** 'lua_pcallk' with a continuation and must execute inside a function the
+** resume is running, or everything beneath it becomes non-yieldable, and the
+** continuation must re-raise on an error status or every error turns into a
+** successful return. Both mistakes produce a build that looks fine.
+*/
+LUA_API void diluvium_task_pushbody (lua_State *co);
+
 #endif

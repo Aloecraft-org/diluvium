@@ -93,6 +93,11 @@ static int taskbody (lua_State *co) {
 }
 
 
+LUA_API void diluvium_task_pushbody (lua_State *co) {
+  lua_pushcfunction(co, taskbody);
+}
+
+
 /*
 ** Make the caller's stack hold exactly 'nres' of the values now on it,
 ** padding with nil or dropping the excess, the way 'lua_pcall' leaves it.

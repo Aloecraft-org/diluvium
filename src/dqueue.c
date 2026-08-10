@@ -158,6 +158,10 @@ static int dq_field_bool (lua_State *L, int qidx, const char *k) {
 }
 
 
+/* Defined with the rest of the host-facing code, used by 'push'. */
+static void dq_notify (lua_State *L, lua_Integer id, int qidx);
+
+
 /* ======================================================================
 ** declare / lookup / destroy
 ** ====================================================================== */
@@ -489,7 +493,9 @@ static int dq_push (lua_State *L) {
       lua_pushvalue(L, items - 1);   /* the encoded string */
       lua_rawseti(L, items, head);
       dq_set_int(L, q, DQ_HEAD, (head % cap) + 1);
-      lua_pop(L, 2);
+      lua_pop(L, 1);           /* the items table */
+      dq_notify(L, id, q);
+      lua_pop(L, 1);           /* the encoded string */
       lua_pushboolean(L, 1);
       lua_pushliteral(L, "dropped_oldest");
       return 2;
@@ -517,7 +523,9 @@ static int dq_push (lua_State *L) {
   lua_pushvalue(L, items - 1);       /* the encoded string */
   lua_rawseti(L, items, dq_slot(head, count, cap));
   dq_set_int(L, q, DQ_COUNT, count + 1);
-  lua_pop(L, 2);
+  lua_pop(L, 1);                     /* the items table */
+  dq_notify(L, id, q);
+  lua_pop(L, 1);                     /* the encoded string */
   lua_pushboolean(L, 1);
   lua_pushliteral(L, "ok");
   return 2;
@@ -759,6 +767,193 @@ static int dq_info (lua_State *L) {
   lua_getfield(L, q, DQ_DIRECTION);  lua_setfield(L, -2, "direction");
   lua_pushinteger(L, dq_field_int(L, q, DQ_COUNT));
   lua_setfield(L, -2, "len");
+  return 1;
+}
+
+
+/* ======================================================================
+** Byte-level access, for the instance ABI
+** ====================================================================== */
+
+/* Where a peeked message is anchored while the host holds a pointer into it. */
+static const char DQ_PEEKED = 0;
+
+/* Where the host's push notification lives. */
+static const char DQ_NOTIFY = 0;
+
+typedef struct dq_notify_box {
+  diluvium_queue_notify fn;
+  void *ud;
+} dq_notify_box;
+
+
+LUA_API void diluvium_queue_setnotify (lua_State *L, diluvium_queue_notify fn,
+                                       void *ud) {
+  if (fn == NULL) {
+    lua_pushnil(L);
+  }
+  else {
+    dq_notify_box *box =
+      (dq_notify_box *)lua_newuserdatauv(L, sizeof(dq_notify_box), 0);
+    box->fn = fn;
+    box->ud = ud;
+  }
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DQ_NOTIFY);
+}
+
+
+/*
+** Tell the host, if it asked and if this queue is one it can see. Called after
+** a guest push has been accepted, never after a host push: a host does not need
+** telling about a message it just sent.
+*/
+static void dq_notify (lua_State *L, lua_Integer id, int qidx) {
+  dq_notify_box *box;
+  if (!dq_field_bool(L, qidx, DQ_EXPORTED))
+    return;
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DQ_NOTIFY) != LUA_TUSERDATA) {
+    lua_pop(L, 1);
+    return;
+  }
+  box = (dq_notify_box *)lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  if (box != NULL && box->fn != NULL)
+    box->fn(L, id, box->ud);
+}
+
+
+LUA_API lua_Integer diluvium_queue_find (lua_State *L, const char *name) {
+  lua_Integer id;
+  dq_state(L);
+  lua_getfield(L, -1, "names");
+  lua_getfield(L, -1, name);
+  id = lua_tointeger(L, -1);
+  lua_pop(L, 3);
+  return id;  /* 0 when absent, since no handle is ever 0 */
+}
+
+
+LUA_API int diluvium_queue_push_bytes (lua_State *L, lua_Integer id,
+                                       const char *s, size_t len) {
+  lua_Integer cap, count, head, policy;
+  int q, items, result;
+  if (dq_classify(L, id) != 1)
+    return DILUVIUM_Q_UNKNOWN;
+  dq_get(L, id);
+  q = lua_gettop(L);
+  if (!dq_field_bool(L, q, DQ_ENABLED)) {
+    lua_pop(L, 1);
+    return DILUVIUM_Q_DISABLED;
+  }
+  cap = dq_field_int(L, q, DQ_CAP);
+  count = dq_field_int(L, q, DQ_COUNT);
+  head = dq_field_int(L, q, DQ_HEAD);
+  policy = dq_field_int(L, q, DQ_POLICY);
+  lua_getfield(L, q, DQ_ITEMS);
+  items = lua_gettop(L);
+  if (count == cap) {
+    /* A host cannot park, so "block" degrades to "full" here rather than
+       silently accepting. 7.5 requires that accepting a message be O(1) and
+       never wait, so a blocking push across the boundary is not a thing the
+       ABI can offer -- and a host that wants backpressure has the queue's
+       length to look at. */
+    if (policy != DQ_DROP_OLDEST) {
+      lua_pop(L, 2);
+      return DILUVIUM_Q_FULL;
+    }
+    lua_pushlstring(L, s, len);
+    lua_rawseti(L, items, head);
+    dq_set_int(L, q, DQ_HEAD, (head % cap) + 1);
+    lua_pop(L, 2);
+    return DILUVIUM_Q_DROPPED;
+  }
+  lua_pushlstring(L, s, len);
+  lua_rawseti(L, items, dq_slot(head, count, cap));
+  dq_set_int(L, q, DQ_COUNT, count + 1);
+  result = DILUVIUM_Q_OK;
+  lua_pop(L, 2);
+  return result;
+}
+
+
+LUA_API int diluvium_queue_peek_bytes (lua_State *L, lua_Integer id,
+                                       const char **s, size_t *len) {
+  lua_Integer head;
+  int q;
+  if (dq_classify(L, id) != 1)
+    return DILUVIUM_Q_UNKNOWN;
+  dq_get(L, id);
+  q = lua_gettop(L);
+  if (dq_field_int(L, q, DQ_COUNT) == 0) {
+    lua_pop(L, 1);
+    return DILUVIUM_Q_EMPTY;
+  }
+  head = dq_field_int(L, q, DQ_HEAD);
+  lua_getfield(L, q, DQ_ITEMS);
+  lua_rawgeti(L, -1, head);
+  /* Anchor before handing the pointer out. The queue holding the string is not
+     enough on its own: the contract is that these bytes stay valid until the
+     drop, and only an anchor makes that true independently of what else runs. */
+  lua_pushvalue(L, -1);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DQ_PEEKED);
+  *s = lua_tolstring(L, -1, len);
+  lua_pop(L, 3);
+  return DILUVIUM_Q_OK;
+}
+
+
+LUA_API int diluvium_queue_drop (lua_State *L, lua_Integer id) {
+  lua_Integer cap, count, head;
+  int q;
+  /* Release the anchor first, whatever happens next: leaving it would keep one
+     message alive for the life of the instance. */
+  lua_pushnil(L);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DQ_PEEKED);
+  if (dq_classify(L, id) != 1)
+    return DILUVIUM_Q_UNKNOWN;
+  dq_get(L, id);
+  q = lua_gettop(L);
+  count = dq_field_int(L, q, DQ_COUNT);
+  if (count == 0) {
+    lua_pop(L, 1);
+    return DILUVIUM_Q_EMPTY;
+  }
+  cap = dq_field_int(L, q, DQ_CAP);
+  head = dq_field_int(L, q, DQ_HEAD);
+  lua_getfield(L, q, DQ_ITEMS);
+  lua_pushnil(L);
+  lua_rawseti(L, -2, head);
+  dq_set_int(L, q, DQ_HEAD, (head % cap) + 1);
+  dq_set_int(L, q, DQ_COUNT, count - 1);
+  lua_pop(L, 2);
+  return DILUVIUM_Q_OK;
+}
+
+
+LUA_API int diluvium_queue_stat (lua_State *L, lua_Integer id,
+                                 lua_Integer *capacity, lua_Integer *len,
+                                 int *enabled, int *exported,
+                                 int *direction, int *on_full) {
+  int q;
+  if (dq_classify(L, id) != 1)
+    return 0;
+  dq_get(L, id);
+  q = lua_gettop(L);
+  if (capacity != NULL) *capacity = dq_field_int(L, q, DQ_CAP);
+  if (len != NULL) *len = dq_field_int(L, q, DQ_COUNT);
+  if (enabled != NULL) *enabled = dq_field_bool(L, q, DQ_ENABLED);
+  if (exported != NULL) *exported = dq_field_bool(L, q, DQ_EXPORTED);
+  if (on_full != NULL) *on_full = (int)dq_field_int(L, q, DQ_POLICY);
+  if (direction != NULL) {
+    const char *d;
+    lua_getfield(L, q, DQ_DIRECTION);
+    d = lua_tostring(L, -1);
+    *direction = (d == NULL) ? 0
+               : (strcmp(d, "guest_write") == 0) ? 1
+               : (strcmp(d, "guest_read") == 0) ? 2 : 0;
+    lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
   return 1;
 }
 

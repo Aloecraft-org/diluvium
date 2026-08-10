@@ -121,10 +121,40 @@ jobs:
       - name: Run the call-driver contract tests
         run: make dtask_check
 
+      # The instance ABI, written against dv.h alone. Runs everywhere the suite
+      # does, so the surface hosts depend on is covered even where cargo is not.
+      - name: Run the instance-ABI contract tests
+        run: make dv_check
+
       # Needs a signal and a subprocess, so it cannot live in run_tests.sh.
       # The --task case is the one that regresses silently.
       - name: Check that Ctrl-C interrupts a runaway loop
         run: ./test/interrupt_check.sh --bin dist/diluvium_debug
+
+  rust-binding:
+    name: Rust binding
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # No toolchain action: the runner image ships a stable Rust, and pinning
+      # one here would hide the version skew a published crate actually meets.
+      - name: Versions
+        run: cargo --version && rustc --version && cc --version | head -1
+
+      # The -sys crate compiles the amalgamation from source, so this also
+      # checks that src/ builds with -DMAKE_LIB outside the project Makefile.
+      - name: Test the binding
+        working-directory: bindings/rust
+        run: cargo test --all
+
+      - name: The example host runs
+        working-directory: bindings/rust
+        run: cargo run --quiet --example echo
 
   patch-guard:
     name: Core patch guard

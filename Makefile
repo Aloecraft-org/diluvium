@@ -272,6 +272,14 @@ failing_test_cases:
 interrupt_check: test_build
 	@$(CURDIR)/test/interrupt_check.sh --bin $(TEST_BIN)
 
+# Contract tests for the instance ABI, written against dv.h alone -- which is
+# also a check that the header is sufficient on its own for a host.
+dv_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dv_check \
+	  $(CURDIR)/test/dv_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dv_check
+
 dtask_check: _build_step0
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
 	  -o $(CURDIR)/dist/dtask_check \
