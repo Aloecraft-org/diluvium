@@ -529,51 +529,109 @@ Agents run inside a coroutine, always, entered via `lua_resume`. Lua will not
 permit a yield from the main thread unless it was resumed, so this is structural
 rather than stylistic.
 
-Both the agent-hosting path and the REPL/kernel path must be coroutine-entered from
-the start. This is the piece most likely to be painful to retrofit; the *entry
-shape* is the irreversible part, and adding `queue.wait` on top of an
-already-coroutine-entered path is additive and local. Do the entry shape first, as
-its own milestone, with no yielding capability attached (see 13, M0).
+**Coroutine hosting is a new entry path, not a conversion of the existing ones.**
+This was drafted the other way and the draft was wrong; see 8.2.1. The driver is
+`src/dtask.c`, on-top code using only the public C API, and `lua.c`,
+`repl_eval` and `run_lua` keep stock semantics and are not touched.
 
-**Implementation constraints, established against this tree:**
+There are therefore two front doors, deliberately:
 
-1. The driver lives in `drepl.c`, on-top code using only the public C API and
-   already shared by the native interpreter and the WASM host. `lua.c` keeps a
-   delegation only. Three entry paths converge on it: `docall` in `lua.c`, and
-   `repl_eval` and `run_lua` in `wasm_stubs.c`.
+| Door | Semantics | Held to |
+|---|---|---|
+| `lua.c` / the CLI | Stock Lua. Main thread, non-yieldable top level. | The upstream conformance suite |
+| The `dv_*` ABI, via `dtask.c` | Coroutine-hosted. Yieldable top level, parks on queues. | This document |
 
-2. **The inner protected call must be `lua_pcallk` with a non-NULL continuation,
-   and it must execute inside a resumed C closure.** `lua_pcallk` takes the
-   continuation branch only when `k != NULL` *and* `yieldable(L)` is already true
-   (`lapi.c`). Otherwise it falls through to `luaD_pcall`, whose `f_call` uses
-   `luaD_callnoyield`, and `nyci` sets the very bit `yieldable()` tests
-   (`lstate.h`) — making everything beneath it non-yieldable. A freshly created
-   thread that has never been resumed is not yieldable, so a driver that makes a
-   thread and calls `lua_pcallk` on it directly falls into exactly that trap. The
-   body must be pushed as a C closure and entered via `lua_resume`, with the
-   `lua_pcallk` happening inside it.
+The consequence worth stating plainly: **a program using `queue.wait` is not
+runnable by `diluvium foo.lua`.** The intended fix is an opt-in agent mode on the
+CLI (`diluvium --agent foo.lua`) that enters through the driver. That is a new
+path rather than a conversion, so it is conformance-safe, and it is also what
+would let agent semantics be tested from the ordinary `.lua` suite instead of
+only from a C harness. Not built yet.
 
-   This is why the milestone's acceptance criterion is that
-   `coroutine.isyieldable()` returns **true** at the deepest point of each
-   converted path. "Nothing yields and the suite is green" does not prove the
-   conversion achieved anything; that assertion does.
+### 8.2.1 Why not the existing entry paths
 
-3. Preserving the existing message handler at the same position keeps stderr
-   byte-identical, so no traceback assertions churn. Building a better traceback
-   from the dead-but-unwound thread is a genuine improvement and should be its
-   own change with its own test updates, never a side effect of a plumbing
-   conversion.
+Running ordinary script and REPL chunks on a coroutine is observable from Lua.
+Measured on this tree: inside a coroutine, `coroutine.running()` reports
+`ismain=false` and `coroutine.isyieldable()` returns true. Four sites in the
+suite assert the opposite, and all four are in the default runner table:
 
-4. `globalL` in `lua.c` is what `laction` installs a `lua_sethook` on for SIGINT.
-   It must point at the **running thread**, not the main state, or interrupting a
-   runaway loop silently stops working. Nothing in the suite presses Ctrl-C, so
-   this regression ships green unless tested deliberately.
+- `test/coroutine.lua:10-14` — `ismain` must be true; `isyieldable()` must be
+  false; `pcall(coroutine.yield)` must fail. This is the top of the file.
+- `test/coroutine.lua:159-163` — `coroutine.close(main)` must error naming "main".
+- `test/errors.lua:399` — `coroutine.yield()` must report "outside a coroutine".
+- `test/locals.lua:1177` — "attempt to yield from outside".
 
-5. Error objects and the traceback live on the **thread's** stack, not the
-   caller's. Every caller that reads the message needs an `lua_xmove`.
+These are upstream Lua conformance tests asserting exactly what the constraint
+table calls non-negotiable. Amending them would erase the conformance oracle in
+the one area — yields across C boundaries — that `queue.wait` most needs one for.
+More than a test problem: a library branching on `coroutine.isyieldable()` to
+decide whether to yield would change behavior in ordinary scripts.
 
-6. Write the `LUA_YIELD` branch even while nothing can reach it, and make it a
-   loud explicit error rather than a silent fallthrough.
+Note for later: `script/wasi_check.sh` drives the standalone binary, not
+`repl_eval`, so the WASM REPL path is *not* conformance-tested and could be
+converted when Lab is ready to answer what a parked prompt does. That is an M3
+decision, not a constraint.
+
+**Implementation constraints, established against this tree and each verified by
+removing it and watching a test fail:**
+
+1. **The inner protected call must be `lua_pcallk` with a non-NULL continuation,
+   and it must execute inside a C function the resume is running.** `lua_pcallk`
+   takes the continuation branch only when `k != NULL` *and* `yieldable(L)` is
+   already true (`lapi.c:1095`). Otherwise it falls through to `luaD_pcall`,
+   whose `f_call` uses `luaD_callnoyield`, and `nyci` sets the very bit
+   `yieldable()` tests — making everything beneath it non-yieldable. A fresh
+   thread that has never been resumed is not yieldable, so a driver that creates
+   a thread and calls `lua_pcallk` on it directly falls into exactly that trap.
+
+   This is why the acceptance criterion is that `coroutine.isyieldable()` returns
+   **true** inside the driver. "Nothing yields and the suite is green" does not
+   prove the work achieved anything; that assertion does. Substituting a plain
+   `lua_pcall` fails it.
+
+2. **All completion logic goes in the continuation, and an error status must be
+   re-raised there.** A continuation runs on error as well as on yield: the raise
+   makes `precover` find the `CIST_YPCALL` frame and unroll into it, calling the
+   continuation with the error status — while `lua_pcallk` itself assigns
+   `status = LUA_OK` unconditionally in that branch (`lapi.c:1112`) and the raise
+   long-jumps clean out of the C frame. **The code after the call is unreachable
+   on the error path.** A continuation that simply returns its results turns
+   every error into a successful resume with exit status 0.
+
+   This is the worst failure mode available here because it looks like a passing
+   build, and it is subtle in a specific way: with the re-raise removed, tests
+   asserting that the message and traceback are *present* still pass — the
+   traceback comes back as a successful return value. Only a test asserting the
+   *status* catches it.
+
+3. Install the message handler on the thread, where the error is raised, so the
+   traceback describes the failing frames rather than the driver. Frames the
+   driver adds below the chunk do not shift `debug.getinfo` levels, which count
+   downward from the running function (`ldebug.c:167`), so traceback shape is not
+   frame-count sensitive.
+
+4. `lua_checkstack` in both directions. A fresh thread has around 20 free slots,
+   and `lua_xmove` does not grow its destination; past the limit it writes beyond
+   the stack, which `api_check` catches only in a debug build. This is a
+   memory-safety case, not a tidiness one.
+
+5. Anchor the thread in the registry, not on the caller's stack. Callers do
+   arithmetic against `lua_gettop`, and a GC step triggered inside the body would
+   otherwise be free to collect the thread it is running on.
+
+6. A fresh thread per call. A thread that has raised is dead and cannot be
+   resumed, so a cache would have to detect that anyway.
+
+7. Write the `LUA_YIELD` branch even while nothing parks, and make it loud, so an
+   untaught caller fails rather than mistaking a suspended thread for a finished
+   one.
+
+8. Provide the SIGINT hook point — `lua.c`'s `globalL` is what `laction` installs
+   a `lua_sethook` on, and if code runs on a thread while `globalL` names the main
+   state, Ctrl-C silently stops interrupting anything. Nothing in the suite
+   presses Ctrl-C. Since the CLI is not converted, this hazard is not live today
+   and the hook is present but **untested**; that is worth knowing rather than
+   assuming coverage.
 
 ### 8.3 Wait-set protocol
 
@@ -1131,22 +1189,29 @@ hostcall-portability claim.
 
 Each independently mergeable. Report stripped size deltas at each.
 
-**M0: coroutine-entered entry paths**
-The entry shape only, with no yielding capability attached. Driver in `drepl.c`;
-`docall`, `repl_eval` and `run_lua` delegating to it; `lua_pcallk` with a
-continuation inside a resumed C closure; message handler preserved so stderr is
-byte-identical; `globalL` following the running thread; `lua_xmove` at every site
-that reads an error message; a loud `LUA_YIELD` branch.
+**M0: the coroutine-hosted call driver** — done.
+`src/dtask.c` and `dtask.h`: `diluvium_task_call` with `lua_pcall`'s stack
+contract, `lua_pcallk` plus continuation inside a resumed C body, error re-raised
+from the continuation, `lua_checkstack` both directions, registry-anchored fresh
+thread per call, loud `LUA_YIELD` branch, SIGINT hook point. Nothing existing
+converted, so the conformance suite is untouched.
 
-Accept when: `coroutine.isyieldable()` is **true** at the deepest point of every
-converted path; the suite is back to its baseline with no assertion churn; and
-each of the three silent-failure modes in 8.2 has a test that fails when the
-mitigation is removed — Ctrl-C interrupting a runaway loop, an error message
-surviving the state hop, and the yieldability assertion itself.
+Accepted on: `coroutine.isyieldable()` true inside the driver and the calling
+state still non-yieldable; errors reporting with a traceback naming the failing
+frame; 64 arguments and 64 results crossing intact; the caller's stack left as
+`lua_pcall` leaves it; a top-level yield reported rather than swallowed. Tests in
+`test/dtask_check.c`, run by `make dtask_check`. Each of the three mitigations
+that can fail silently was verified by removing it and watching a named test fail
+— re-raise removed gives 3 failures, plain `lua_pcall` gives 5, dropped
+`lua_checkstack` aborts under `api_check`.
 
 Sequenced first because the entry shape is the part that is painful to retrofit,
 and separated from M3 because "what does the prompt do while parked" is a UX
 question that deserves a considered answer rather than a same-day one.
+
+Not covered, and stated rather than implied: the SIGINT hook has no test, because
+with the CLI unconverted there is no path on which Ctrl-C can regress. It needs
+one at the same time as the first caller that wires `globalL` to it.
 
 **M1: msgpack codec**
 Port to 5.5, integer subtype, explicit array/map rule plus `as_array`/`as_map`,
@@ -1219,14 +1284,15 @@ Lean. Cover semantics and boundaries, not permutations.
   regress.
 - **Delivery semantics.** Push to full, disabled, and gone destinations. Assert
   none of them raise and none of them block.
-- **Yieldability of the entry path.** `coroutine.isyieldable()` true at the
-  deepest point of each converted path. This is the assertion that proves M0 did
-  something; without it, a plain `lua_pcall` regression is invisible.
-- **Interrupt.** Send SIGINT to a runaway loop in the interpreter and assert it is
-  interrupted. Untested today, and the reason the `globalL` hazard in 8.2 would
-  otherwise ship green.
-- **Error message across the state hop.** A script that errors, driven through
-  each entry path, with the message compared to the pre-conversion baseline.
+- **Driver contract** (`test/dtask_check.c`, `make dtask_check`). Yieldability
+  inside the driver and non-yieldability outside it; error status, message and
+  traceback across the state hop; argument and result counts past a fresh
+  thread's free slots; the caller's stack unchanged; a top-level yield reported.
+  In C because the driver has no guest binding by design.
+- **Interrupt.** Send SIGINT to a runaway loop and assert it is interrupted.
+  **Not written yet**, and only reachable once a caller wires `globalL` to the
+  driver's hook. Write it with that caller, not before, and do not treat the
+  hook's existence as coverage.
 - **Yield/resume.** One test per host binding: push in, agent wakes, agent pushes
   out, host receives.
 - **Non-yieldable rejection.** One test per context in 8.4, plus one asserting
@@ -1325,6 +1391,15 @@ artifact between sessions that do not share context.
   interface.
 - **The peek contract ignored the collector.** 11.2 now requires a registry
   anchor.
+- **§8.2 said to convert the existing entry paths.** It cannot be done: top-level
+  yieldability is observable from Lua and four upstream conformance tests assert
+  the opposite, so coroutine hosting has to be a new door. This was the *second*
+  correction of the same kind as the `pcall` one, found the same way — checking
+  the claim against the tree instead of against an abstract Lua — which is why
+  the lesson below is stated as a procedure rather than an observation.
+- **The continuation was described as being for yields.** It runs on errors too,
+  and the post-call code is unreachable on that path, so a naive continuation
+  swallows every error into a successful exit. See 8.2 item 2.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

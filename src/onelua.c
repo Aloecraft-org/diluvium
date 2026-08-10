@@ -126,6 +126,7 @@
 #ifndef MAKE_LUAC
 #include "drepl.c"
 #include "dline.c"
+#include "dtask.c"
 #endif
 
 /* test library -- used only for internal development */

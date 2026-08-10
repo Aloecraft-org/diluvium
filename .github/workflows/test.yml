@@ -115,6 +115,12 @@ jobs:
             --timeout 300 \
             ${{ inputs.include_skipped && '--include-skipped' || '' }}
 
+      # The call driver has no guest binding, so run_tests.sh cannot reach it.
+      # Same debug flags as the suite: 'api_check' is where its stack
+      # arithmetic fails loudly instead of corrupting silently.
+      - name: Run the call-driver contract tests
+        run: make dtask_check
+
   patch-guard:
     name: Core patch guard
     needs: resolve

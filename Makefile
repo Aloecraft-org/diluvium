@@ -259,6 +259,18 @@ failing_test_cases:
 	@echo 'Tests excluded from the default run (see test/run_tests.sh):'
 	@$(TEST_RUNNER) --list-skipped
 
+# Contract tests for the coroutine-hosted call driver. C rather than Lua
+# because the driver has no guest binding by design -- its callers are the
+# host ABI and, later, an opt-in agent mode -- so there is nothing for the
+# .lua suite to call yet. Built with the same debug flags as the suite, since
+# 'api_check' is where a stack-arithmetic mistake surfaces as an abort
+# instead of silent corruption.
+dtask_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dtask_check \
+	  $(CURDIR)/test/dtask_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dtask_check
+
 # Run the suite. Keeps going after a failure and prints a summary, so one
 # broken test does not mask the state of the rest. The list of tests and the
 # skip reasons live in test/run_tests.sh -- add new tests there, not here.
