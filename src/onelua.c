@@ -128,6 +128,7 @@
 #include "dline.c"
 #include "dtask.c"
 #include "dmsgpack.c"
+#include "dqueue.c"
 #include "dlibs.c"
 #endif
 

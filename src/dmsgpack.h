@@ -27,6 +27,19 @@ LUAMOD_API int luaopen_dmsgpack (lua_State *L);
 
 
 /*
+** The codec from C, for callers that are not the guest: queues encode at push
+** and decode at pop (6.5), and the instance ABI moves msgpack bytes in and out
+** without ever seeing a Lua value. Both raise on failure rather than
+** returning a status, so a caller that cannot let an error escape must be
+** inside a protected call already.
+**
+** 'encode' pushes one string; 'decode' pushes one value.
+*/
+LUA_API void diluvium_msgpack_encode (lua_State *L, int idx);
+LUA_API void diluvium_msgpack_decode (lua_State *L, const char *s, size_t len);
+
+
+/*
 ** Ext 0x02 is an endpoint reference, and resolving one means asking the
 ** swarm layer's instance table -- which the codec must not depend on, or the
 ** layering in doc/Messaging.md 4.1 would be a fiction. So the dependency is

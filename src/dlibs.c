@@ -12,10 +12,12 @@
 #include "lauxlib.h"
 #include "dlibs.h"
 #include "dmsgpack.h"
+#include "dqueue.h"
 
 
 static const luaL_Reg diluvium_libs[] = {
   {"msgpack", luaopen_dmsgpack},
+  {"queue", luaopen_dqueue},
   {NULL, NULL}
 };
 

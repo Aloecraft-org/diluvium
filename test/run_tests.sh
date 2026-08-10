@@ -68,6 +68,7 @@ test_determinism|run||
 test_fstrings|run||
 test_interop|run||
 test_msgpack|run||
+test_queue|run||
 test_nullco|run||
 test_safenav|run||
 test_secure_dump|run||

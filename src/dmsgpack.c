@@ -956,6 +956,29 @@ static int mp_decode (lua_State *L) {
 }
 
 
+LUA_API void diluvium_msgpack_encode (lua_State *L, int idx) {
+  mp_ctx ctx;
+  int abs = lua_absindex(L, idx);
+  int base;
+  memset(&ctx, 0, sizeof(ctx));
+  ctx.depth = 0;
+  ctx.buf = mp_buf_new(L);
+  base = lua_gettop(L);  /* the buffer sits here and must be dropped after */
+  mp_encode_value(L, &ctx, abs);
+  lua_pushlstring(L, (const char *)ctx.buf->b, ctx.buf->len);
+  lua_remove(L, base);  /* drop the buffer, leaving only the string */
+}
+
+
+LUA_API void diluvium_msgpack_decode (lua_State *L, const char *s, size_t len) {
+  mp_cur c;
+  c.L = L;
+  c.p = (const unsigned char *)s;
+  c.left = len;
+  mp_decode_value(&c, 0);
+}
+
+
 LUA_API void diluvium_msgpack_setresolver (lua_State *L,
                                     const diluvium_msgpack_resolver *r) {
   if (r == NULL)

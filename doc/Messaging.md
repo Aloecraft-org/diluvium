@@ -351,6 +351,12 @@ to outlive the instance. On restore, handles are re-resolved by name (Section 10
 Document this prominently. Storing a handle and restoring it later is the obvious
 mistake and it fails by silently addressing the wrong queue.
 
+**Handles are therefore never reused within an instance.** A destroyed handle
+stays destroyed, so using a stale one raises instead of hitting whichever queue
+took its place. That converts the failure this section warns about from a wrong
+answer somewhere else into an error at the call site. The cost is that a program
+churning queues walks the handle space upward, which no real program does.
+
 ### 6.3 Lua API
 
 ```lua
@@ -368,7 +374,19 @@ queue.disable(id)
 queue.len(id)                 -> integer
 queue.capacity(id)            -> integer
 queue.state(id)               -> "enabled" | "disabled"
+queue.info(id)                -> table
 ```
+
+`queue.info` was not in the first draft and is needed to make `exported` and
+`direction` more than write-only: both are recorded at declare time and nothing
+could read them back, which made them untestable and invisible to a program
+deciding how to treat a queue it did not declare. It returns `name`,
+`capacity`, `on_full`, `exported`, `direction` and `len`.
+
+A name must be a **string**, and a number is not coerced into one.
+`luaL_checkstring` would accept `5` and declare a queue called `"5"`; since
+handles are integers, a name that reads like a handle is a mistake worth making
+impossible rather than merely unlikely.
 
 `opts` fields:
 
@@ -407,6 +425,18 @@ String statuses at the Lua level. No numeric codes.
 A full, disabled, or gone destination is a **normal outcome, not an error.** Do not
 raise.
 
+`on_full = "drop_newest"` has no status of its own, and does not need one: the
+newest message is the one being pushed, so dropping it and rejecting it are the
+same event. It reports `"full"`.
+
+`"empty"` is also what distinguishes an absent message from a `nil` one, since
+`nil` is encodable and can be pushed. A `pop` returning `nil, "ok"` delivered a
+nil; `nil, "empty"` delivered nothing.
+
+Disabling a queue stops it accepting, not delivering: a disabled queue can still
+be drained of what it already holds. 6.1 wants a program going down to reject new
+messages cleanly, not to abandon ones it already accepted.
+
 ### 6.5 Encoding
 
 All values pushed to a queue are msgpack-encoded at push and decoded at pop,
@@ -429,6 +459,11 @@ the benchmark suite so the decision can be revisited with numbers.
 `inbox` and `outbox` are reserved per-instance defaults, auto-declared at startup
 with `exported = true`. A program may re-declare them with different options before
 first use. (Confirmed; open question 4 is closed.)
+
+Re-declaring means `destroy` then `declare`: `declare` refuses a name that
+already exists rather than reconfiguring it. A call that sometimes creates and
+sometimes mutates is worse than one that says which it did, and the new handle
+that `declare` returns is the honest signal that the old one is stale.
 
 Names are namespaced with `/`, for example `sensors/gps`. (Confirmed; open question
 3 is closed.) The separator is structural only in this milestone; no hierarchical
@@ -1272,12 +1307,35 @@ truncation of a valid encoding refused without a crash.
 Stripped size 13.0 KB of text at `-O3` on linux-x86_64, against a 25 KB budget.
 Not yet measured on musl or wasm, which 3.2 asks for.
 
-**M2: queue subsystem, local only**
-Declare, lookup, destroy, push, pop, enable, disable, len, capacity, state. All
-`on_full` policies except `"block"`. No host boundary.
-Accept when: the status table in 6.4 is covered by tests and the
-`proc_10ms`/`proc_50ms`/`proc_500ms` pattern runs end to end in-process. Note that
-without `queue.wait` this pattern is necessarily polled; that is expected at M2.
+**M2: queue subsystem, local only** — done.
+`src/dqueue.c`. Declare, lookup, destroy, push, pop, enable, disable, len,
+capacity, state, info. `on_full` of `reject`, `drop_oldest` and `drop_newest`;
+`"block"` is **refused at declare time** with a message saying it needs the
+wait-set protocol, rather than silently treated as `reject` — which would hand a
+program the opposite of the backpressure it asked for and look like it worked.
+
+State lives in registry-anchored Lua tables rather than C structs. The C version
+is faster per operation and adds a place to leak on each of destroy, error and
+state close; since 6.5 already accepts a msgpack encode per push, table accesses
+beside it are noise. The benchmark will say if that stops being true.
+
+Accepted on `test/test_queue.lua`, 287 checks: one case per row of 6.4; that a
+full, disabled or empty queue never raises; that a pushed table cannot be
+mutated by the sender afterwards, nested tables included; that a bounded queue
+holds FIFO order across twenty ring wraps; that `pop` returns rather than parking
+inside a coroutine where a yield would be legal; that a stale handle raises; and
+the `proc_10ms`/`proc_50ms`/`proc_500ms` chain end to end, polled, since
+`queue.wait` is M3.
+
+Stripped size 5.9 KB of text at `-O3` on linux-x86_64 against a 15 KB budget.
+msgpack is now 13.8 KB against 25 KB. Neither measured on musl or wasm yet.
+
+One finding worth keeping: the chain test first reported `sum(1..40)` where
+`sum(1..50)` was expected. The queue was right and the test had under-sized its
+middle stage, which rejected the last two of ten pushes. The under-sized case is
+now pinned deliberately as its own test, since "a stage that cannot keep up does
+not grow, and the sender is told which messages did not make it" is the other
+half of *bounded, always*.
 
 **M3: yield-aware layer**
 `queue.wait`, `on_full = "block"`, `lua_isyieldable` guard with specific
@@ -1331,8 +1389,10 @@ Lean. Cover semantics and boundaries, not permutations.
 - **msgpack round-trip corpus.** One file covering each type, integer vs float,
   nested tables, forced array and map, empty table, deep nesting at the cap, cyclic
   input.
-- **Queue semantics table.** One test per row of 6.4. These are the rows that will
-  regress.
+- **Queue semantics table** (`test/test_queue.lua`). One test per row of 6.4.
+  These are the rows that will regress. Plus the model rather than the surface:
+  value-not-reference semantics, FIFO across ring wraps, `pop` not parking, and
+  a stale handle raising.
 - **Delivery semantics.** Push to full, disabled, and gone destinations. Assert
   none of them raise and none of them block.
 - **Driver contract** (`test/dtask_check.c`, `make dtask_check`). Yieldability
