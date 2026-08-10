@@ -2676,3 +2676,100 @@ artifact between sessions that do not share context.
   source level before the milestone that depends on them, not trusted because the
   surrounding reasoning holds together. Those five were checked while writing this
   revision and hold; the next set should get the same treatment.
+
+---
+
+## 18. The M0–M7 audit: confirmed defects and release profiles
+
+Ten independent auditors read the milestones clause by clause against the tree, and
+every finding was then handed to a skeptic told to refuse it. The numbers are worth
+recording before the findings, because they calibrate how much to trust this kind of
+sweep: **35 confirmed, 32 refuted** — a little under half the raw output did not
+survive scrutiny. An unverified finding list, from an agent or a person, is a
+hypothesis list.
+
+Two other numbers. **Fourteen of the confirmed findings are in `dvs.c`**, written
+the same day, which passed 92 of its own checks and both sanitizers. And of the
+~24 distinct defects, **ten are hibernation** — which is the single most useful fact
+in this section, because it means the largest block of remaining work is optional
+(see the profiles below).
+
+### 18.1 What was confirmed
+
+Grouped, deduplicated, and ordered by what a caller would hit first.
+
+**The snapshot layer.**
+
+| Defect | Consequence |
+|---|---|
+| The thread record drops `u2.funcidx` (`dsnap.c`) | The worst of the set. Every parked instance carries a `CIST_YPCALL` driver frame from `dtask.c`, so **any error raised in any restored program** unwinds with `funcidx == 0` — the stack base. `luaF_close` then closes every to-be-closed slot and open upvalue in the thread; with no tbc at all it reads the uninitialised `delta` padding of slot 0 and writes the error object over the driver's own function slot. Memory corruption on the wake-then-error path. |
+| The snapshot fuzzer has no effective field-validation coverage | The payload digest added during M6 refuses every mutant *before* the field checks it was built to exercise, so §10.10's "0 crashes" is currently hollow. Self-inflicted, in the same change that fixed a real gap. |
+| No host-identity stamp in the swarm layer | `dvs_hibernate` and `dvs_wake` pass NULL both ways, so §10.10's "a foreign stamp is refused" is not true of the swarm's own snapshots. |
+| §10.2's "a parked agent has no C frame" is false | The wait chain is two C frames carrying continuations. The conclusion (it is capturable) still holds; the reason given for it does not. |
+| §10.7's precondition 4 ("single thread") has no implementing code | Nested coroutines are captured rather than refused. |
+
+**The swarm layer.**
+
+| Defect | Consequence |
+|---|---|
+| A spawn request's budget is silently ignored | A child spawned the way §9.1 documents runs **unbudgeted**, and a guest can escape its own budget through a child and hang `dvs_step`. |
+| A woken instance has no instruction budget | The count hook is never re-armed, so waking launders a budget away. |
+| A clean exit is reported as `"faulted"` | `dv_last_error` is sticky, so a supervisor restarts healthy children. Certain to occur, not a corner case. |
+| `do_kill` narrows a 64-bit id to 32 bits | Destroys a different live instance instead of refusing. `do_hibernate`'s self-versus-target guard compares the same truncated value. |
+| `do_spawn` truncates code at the first NUL | The child runs a prefix and it is reported as a successful spawn. Harmless for source, silent corruption for bytecode. |
+| `kill_subtree` recurses once per link | Its own comment says it does not. A deep delegation chain overflows the C stack, and §9.1.1 says depth is unbounded. |
+| `do_query` emits a `"gone"` event | Not one of the events §9.2 lists. |
+
+**Endpoints and the codec.**
+
+| Defect | Consequence |
+|---|---|
+| References can still be forged, two ways | The trust gate added earlier is incomplete. A guest can **launder** a decoded ext `0x02` through a queue, because the delivery path is trusted and re-decodes it; and the "hidden" metatable is **reachable through the `debug` library**, which defeats `__metatable` generally and not only here. §7.3's unforgeability claim remains false. |
+| A guest cannot pass a reference in a message | It encodes as a plain one-element array, so §7.4's store-and-forward does not round-trip the thing it forwards. |
+| Rebinding a destroyed token returns the destroyed handle | And poisons the token permanently. |
+| A guest can mint reserved ext codes | The encoder trusts the wrapper's `code` field. |
+| The malformed-input assertions in `test_msgpack.lua` cannot fail | `pcall` never returns nil, so the comparison is against a value that cannot occur. |
+
+**Claims about the tree that were wrong**, including two written while fixing other
+things in this revision: a stray `lua.h` in the swarm layer does *not* fail the build
+(`dvs.c` already includes it transitively through `dmsgpack.h`, so the **symbol**
+check is the only real guarantee); `dshim.c` is not the only file that reads Lua's
+internal headers; `make verify_wasm` names four files no target produces and its
+first step reports success regardless; `patch_series.sh check` exits 0 having checked
+nothing when the fork point is unreachable.
+
+### 18.2 Release profiles, which is the part that matters
+
+The defect list looks worse than the project's usability, because most of it is
+conditional on things a given deployment may not do. Three profiles, in increasing
+order of what they demand:
+
+**Profile A — trusted programs, resident instances.** Every program is written or
+templated by the operator; nothing untrusted is loaded; no hibernation. The
+capability layer is then a structuring device rather than a security boundary, and
+the forgery findings do not apply — forging a reference takes deliberately
+constructed ext bytes or a `debug` call, and does not happen by accident. Budgets are
+set by the host with `dv_set_budget` rather than through a spawn request, which
+sidesteps two of the six blocking findings without any change to the runtime. What
+still has to be fixed: the faulted-versus-exited confusion, `do_kill`'s truncation,
+the NUL truncation if bytecode is ever spawned, and `kill_subtree`'s recursion if
+delegation is deeper than a few levels. **This is a small list and it is the nearest
+usable release.**
+
+**Profile B — untrusted or generated programs.** Adds the whole capability layer as a
+boundary: both forgery routes closed, the `debug` library removed or restricted for
+guest instances, reserved ext codes refused on encode, budgets enforced through the
+documented path. Nothing here is speculative work, but the forgery fix is a design
+decision — a reference's authority cannot be its bytes — and not a patch.
+
+**Profile C — hibernation at scale.** Adds `u2.funcidx`, real field-validation
+coverage, the host-identity stamp, budget re-arming on wake, and endpoint survival
+across a snapshot. Ten of the ~24 defects live here, including three of the six
+blocking ones. A deployment that keeps agent state at the application level and
+spawns fresh instances per unit of work never enters this profile — and pays little
+for it, since `dv_new` plus `dv_load` of a small chunk is comparable to `dv_new` plus
+`dv_restore` of a value graph.
+
+The order is deliberate: A is close, B is a design decision plus its consequences,
+and C is the largest block and the most avoidable. A project that does not need C
+should say so explicitly rather than carry it as unfinished work.
