@@ -86,6 +86,7 @@
 static const char MP_SHAPE_MT = 0;      /* metatable shared by all wrappers */
 static const char MP_RESOLVER = 0;      /* light userdata -> resolver */
 static const char MP_CURRENT = 0;       /* light userdata -> encode in progress */
+static const char MP_CURDEC = 0;        /* light userdata -> decode in progress */
 
 /* Wrapper kinds, stored at index 2 of a wrapper table. */
 #define MP_SHAPE_ARRAY	1
@@ -681,6 +682,28 @@ static int mp_snap_intern (lua_State *L, mp_ctx *ctx, int abs) {
 }
 
 
+/*
+** Queue every stack slot of the thread at 'abs', then a build. The build must be
+** last, because building the frames validates them against the slots -- a frame
+** claims its function is at slot N, and that can only be checked once slot N
+** holds something.
+*/
+static void mp_snap_queuethread (lua_State *L, mp_snap *s, int abs) {
+  int i;
+  for (i = 1; ; i++) {
+    if (!s->hooks->slot(L, abs, i, s->hooks->ud))
+      break;
+    lua_pop(L, 1);                    /* the value; fetched again at drain */
+    lua_pushvalue(L, abs);
+    lua_pushinteger(L, i);
+    mp_snap_queue(L, s, DILUVIUM_FIX_SLOT);
+  }
+  lua_pushvalue(L, abs);
+  lua_pushinteger(L, 0);
+  mp_snap_queue(L, s, DILUVIUM_FIX_BUILD);
+}
+
+
 /* Queue every upvalue of the Lua closure at 'abs' for filling. */
 static void mp_snap_queueupvals (lua_State *L, mp_snap *s, int abs) {
   int i;
@@ -847,22 +870,31 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
       return;
   }
   if (ctx->snap != NULL) {
-    /*
-    ** 10.7 item 3 refuses light userdata outright, and it is worth saying why
-    ** here rather than only in the document: a light userdata is a bare
-    ** pointer. There is no type to consult, no metatable to carry a '__persist'
-    ** hook, and nothing that makes the address mean the same thing in the
-    ** process that restores it. Every other refusal in this function is "not
-    ** yet"; this one is permanent.
-    */
-    if (lua_type(L, abs) == LUA_TLIGHTUSERDATA)
-      mp_err_at(L, ctx, "a snapshot cannot contain light userdata (a bare "
-                        "pointer has no type and no way to be reconstituted)");
     /* A named object -- a C function, most often -- takes no position, because
-       it is not part of the object graph. */
+       it is not part of the object graph. Asked before the light-userdata
+       refusal below, and the order matters: see that comment. */
     if (ctx->snap->hooks != NULL && ctx->snap->hooks->permanent != NULL &&
         ctx->snap->hooks->permanent(L, abs, ctx->snap->hooks->ud))
       return;
+    /*
+    ** 10.7 item 3 refuses light userdata, and the reason is worth saying here
+    ** rather than only in the document: a light userdata is a bare pointer. There
+    ** is no type to consult, no metatable to carry a '__persist' hook, and
+    ** nothing that makes the address mean the same thing in the process that
+    ** restores it.
+    **
+    ** But "anywhere reachable" was too absolute, and the runtime's own wait
+    ** protocol proved it: 'queue.wait' pushes a light userdata sentinel onto the
+    ** thread's stack before yielding, so a parked agent -- the thing hibernation
+    ** exists for -- always has one. A light userdata the *runtime* owns can be
+    ** named like any other permanent, and the name resolves to the same sentinel
+    ** in the new process. Only an unnamed one is impossible, which is why the
+    ** permanent check runs first.
+    */
+    if (lua_type(L, abs) == LUA_TLIGHTUSERDATA)
+      mp_err_at(L, ctx, "a snapshot cannot contain light userdata that the "
+                        "runtime has not named (a bare pointer has no type and "
+                        "no way to be reconstituted)");
     /* Everything else that gets here is a graph object and takes a position
        before the hook writes it, so that a reference back to it -- from one of
        its own upvalues, which is ordinary for a recursive local function --
@@ -874,6 +906,13 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
       r = ctx->snap->hooks->encode(L, abs, ctx->snap->hooks->ud);
       if (r == 2) {
         mp_snap_queueupvals(L, ctx->snap, abs);
+        return;
+      }
+      if (r == 3) {
+        if (ctx->snap->hooks->slot == NULL)
+          mp_err_at(L, ctx, "the snapshot layer claimed a thread but offers no "
+                            "way to read its stack");
+        mp_snap_queuethread(L, ctx->snap, abs);
         return;
       }
       if (r == 1)
@@ -1059,7 +1098,7 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
       luaL_error(L, "msgpack: ext %s is only valid inside a snapshot stream",
                  mp_hexbyte(code));
       return;
-    case 0x03: case 0x05: case 0x06: case 0x07:
+    case 0x03: case 0x05: case 0x06: case 0x07: case 0x08:
       if (c->snap != NULL && c->snap->hooks != NULL &&
           c->snap->hooks->decode != NULL &&
           c->snap->hooks->decode(L, code, (const unsigned char *)data, len,
@@ -1073,7 +1112,7 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
         ** object refers to the wrong object. Nothing detects that except a
         ** backreference landing somewhere absurd, some distance later.
         */
-        if (code == 0x05 || code == 0x06)
+        if (code == 0x05 || code == 0x06 || code == 0x08)
           mp_unsnap_register(c);
         return;
       }
@@ -1290,16 +1329,48 @@ LUA_API void diluvium_msgpack_decode_n (lua_State *L, const char *s, size_t len,
 ** Snapshot mode
 ** ====================================================================== */
 
-LUA_API void diluvium_msgpack_appendext (lua_State *L, int code,
-                                         const char *data, size_t len) {
+static mp_ctx *mp_current (lua_State *L) {
   mp_ctx *ctx;
   lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_CURRENT);
   ctx = (mp_ctx *)lua_touserdata(L, -1);
   lua_pop(L, 1);
+  return ctx;
+}
+
+
+LUA_API void diluvium_msgpack_appendext (lua_State *L, int code,
+                                         const char *data, size_t len) {
+  mp_ctx *ctx = mp_current(L);
   if (ctx == NULL || ctx->snap == NULL)
     luaL_error(L, "msgpack: nothing is being encoded, so an ext object has "
                   "nowhere to go");
   mp_enc_ext(ctx->buf, code, data, len);
+}
+
+
+LUA_API void diluvium_msgpack_appendfixup (lua_State *L, int tag,
+                                           const lua_Integer *ops, int nops) {
+  mp_ctx *ctx = mp_current(L);
+  int i;
+  if (ctx == NULL || ctx->snap == NULL)
+    luaL_error(L, "msgpack: nothing is being encoded, so a fixup has nowhere "
+                  "to go");
+  mp_enc_int(ctx->buf, tag);
+  for (i = 0; i < nops; i++)
+    mp_enc_int(ctx->buf, ops[i]);
+}
+
+
+LUA_API lua_Integer diluvium_msgpack_position (lua_State *L, int idx) {
+  mp_ctx *ctx = mp_current(L);
+  lua_Integer pos;
+  if (ctx == NULL || ctx->snap == NULL)
+    return 0;
+  lua_pushvalue(L, idx);
+  lua_rawget(L, ctx->snap->seen);
+  pos = lua_tointeger(L, -1);
+  lua_pop(L, 1);
+  return pos;
 }
 
 
@@ -1383,6 +1454,28 @@ LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
       mp_encode_value(L, &ctx, lua_gettop(L));
       lua_pop(L, 2);                          /* metatable, owner */
     }
+    else if (tag == DILUVIUM_FIX_SLOT) {
+      /* stack: ... thread */
+      int th = lua_gettop(L);
+      lua_Integer slot;
+      lua_Integer ops[2];
+      lua_rawgeti(L, snap.fix, k + 3);
+      slot = lua_tointeger(L, -1);
+      lua_pop(L, 1);
+      ops[0] = (lua_Integer)pos;
+      ops[1] = slot;
+      diluvium_msgpack_appendfixup(L, DILUVIUM_FIX_SLOT, ops, 2);
+      if (!snap.hooks->slot(L, th, (int)slot, snap.hooks->ud))
+        luaL_error(L, "msgpack: internal error, a queued stack slot vanished");
+      mp_encode_value(L, &ctx, lua_gettop(L));
+      lua_pop(L, 2);                          /* the value, the thread */
+    }
+    else if (tag == DILUVIUM_FIX_BUILD) {
+      lua_Integer ops[1];
+      ops[0] = (lua_Integer)pos;
+      diluvium_msgpack_appendfixup(L, DILUVIUM_FIX_BUILD, ops, 1);
+      lua_pop(L, 1);                          /* the thread */
+    }
     else if (tag == DILUVIUM_FIX_UPVAL) {
       /* stack: ... closure */
       int cl = lua_gettop(L);
@@ -1391,6 +1484,18 @@ LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
       lua_rawgeti(L, snap.fix, k + 3);
       idx = (int)lua_tointeger(L, -1);
       lua_pop(L, 1);
+      /*
+      ** An upvalue open against a thread in this graph is an alias for a stack
+      ** slot, not a value. The layer gets first refusal because only it knows
+      ** which threads are being captured; writing the value instead would sever
+      ** the alias, and the parked coroutine could then assign to that local
+      ** without the closure seeing it.
+      */
+      if (snap.hooks != NULL && snap.hooks->openupval != NULL &&
+          snap.hooks->openupval(L, cl, idx, snap.hooks->ud)) {
+        lua_pop(L, 1);                        /* the closure */
+        continue;
+      }
       id = lua_upvalueid(L, cl, idx);
       if (id == NULL)
         luaL_error(L, "msgpack: internal error, upvalue %d of a queued closure "
@@ -1476,12 +1581,28 @@ static lua_Integer mp_unsnap_readpos (mp_cur *c, mp_unsnap *s,
 }
 
 
+LUA_API void diluvium_msgpack_pushobject (lua_State *L, lua_Integer pos) {
+  mp_unsnap *s;
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_CURDEC);
+  s = (mp_unsnap *)lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  if (s == NULL)
+    luaL_error(L, "msgpack: nothing is being decoded, so there is no object at "
+                  "position %I", pos);
+  if (pos < 1 || (unsigned long)pos > s->n)
+    luaL_error(L, "msgpack: position %I is out of range (%I objects)", pos,
+               (lua_Integer)s->n);
+  lua_rawgeti(L, s->objs, pos);
+}
+
+
 LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
                                     size_t len,
                                     const diluvium_snap_hooks *h) {
   mp_cur c;
   mp_unsnap snap;
   int base = lua_gettop(L);
+  void *outerdec;
   luaL_checkstack(L, 8, "msgpack: cannot start a restore");
   lua_newtable(L);                            /* base + 1: objs */
   snap.objs = base + 1;
@@ -1491,6 +1612,13 @@ LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
   c.p = (const unsigned char *)s;
   c.left = len;
   c.snap = &snap;
+  /* Published so a fixup hook can resolve a position. Saved and restored, since
+     a nested decode is unsupported but must not leave a dangling pointer. */
+  lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_CURDEC);
+  outerdec = lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  lua_pushlightuserdata(L, &snap);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &MP_CURDEC);
 
   mp_decode_value(&c, 0);                     /* the root: base + 2 */
 
@@ -1514,8 +1642,7 @@ LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
        of the section cannot be parsed at all -- the operand count depends on
        the tag -- so reporting "bad owner" after reading whatever came next
        would name the wrong thing. */
-    if (tag != DILUVIUM_FIX_META && tag != DILUVIUM_FIX_UPVAL &&
-        tag != DILUVIUM_FIX_UPJOIN)
+    if (tag < 1 || tag > DILUVIUM_FIX_LAST)
       luaL_error(L, "msgpack: fixup tag %d is not one this runtime knows", tag);
     pos = mp_unsnap_readpos(&c, &snap, "fixup owner");
     if (tag == DILUVIUM_FIX_META) {
@@ -1540,6 +1667,35 @@ LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
       */
       lua_setmetatable(L, -2);
       lua_pop(L, 1);                          /* the owner */
+    }
+    else if (tag == DILUVIUM_FIX_SLOT || tag == DILUVIUM_FIX_BUILD ||
+             tag == DILUVIUM_FIX_UPOPEN) {
+      /*
+      ** The layer's tags. The codec parses their shape -- which it must, since a
+      ** reader has to be able to walk the section without knowing what a tag
+      ** means -- and hands the parsed operands over.
+      */
+      lua_Integer ops[4];
+      int nops = (tag == DILUVIUM_FIX_BUILD) ? 0 :
+                 (tag == DILUVIUM_FIX_SLOT) ? 1 : 3;
+      int hasvalue = (tag == DILUVIUM_FIX_SLOT);
+      int i;
+      ops[0] = pos;
+      for (i = 0; i < nops; i++)
+        ops[i + 1] = (i == 1 && tag == DILUVIUM_FIX_UPOPEN)
+                     ? mp_unsnap_readpos(&c, &snap, "upvalue owner thread")
+                     : mp_unsnap_readint(&c, "fixup operand");
+      if (hasvalue) {
+        if (c.left == 0)
+          luaL_error(L, "msgpack: a fixup ended before its value");
+        mp_decode_value(&c, 0);
+      }
+      if (snap.hooks == NULL || snap.hooks->fixup == NULL ||
+          !snap.hooks->fixup(L, tag, ops, nops + 1, snap.hooks->ud))
+        luaL_error(L, "msgpack: fixup tag %d needs a snapshot layer that is not "
+                      "installed", tag);
+      if (hasvalue)
+        lua_pop(L, 1);
     }
     else if (tag == DILUVIUM_FIX_UPVAL || tag == DILUVIUM_FIX_UPJOIN) {
       idx = mp_unsnap_readint(&c, "upvalue index");
@@ -1575,6 +1731,18 @@ LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
       }
     }
   }
+
+  /* Everything is in place, so anything that needed the finished graph runs now.
+     Still inside the published decode, because a finisher resolves positions. */
+  if (snap.hooks != NULL && snap.hooks->finish != NULL &&
+      !snap.hooks->finish(L, snap.hooks->ud))
+    luaL_error(L, "msgpack: the snapshot layer could not finish the restore");
+
+  if (outerdec == NULL)
+    lua_pushnil(L);
+  else
+    lua_pushlightuserdata(L, outerdec);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &MP_CURDEC);
 
   if (c.left != 0)
     luaL_error(L, "msgpack: %I bytes left over after the snapshot graph",

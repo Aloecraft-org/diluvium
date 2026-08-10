@@ -24,6 +24,7 @@
 #include "lauxlib.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
+#include "dshim.h"
 
 
 /* Registry key; its address is the key, so it cannot collide. */
@@ -304,6 +305,11 @@ static const char DQ_PARK_MARK = 0;
 
 static void dq_park_mark (lua_State *L) {
   lua_pushlightuserdata(L, (void *)&DQ_PARK_MARK);
+}
+
+
+LUA_API void diluvium_queue_pushmark (lua_State *L) {
+  dq_park_mark(L);
 }
 
 
@@ -720,6 +726,9 @@ static int dq_wait (lua_State *L) {
   lua_pushinteger(L, timeout);
   for (i = 1; i <= n; i++)
     lua_rawgeti(L, 1, i);
+  /* Named where it is installed, so a snapshot of an agent parked on 'wait' can
+     write down which continuation it is waiting in. See diluvium_shim_addcont. */
+  diluvium_shim_addcont("dqueue.wait", dq_wait_k);
   return lua_yieldk(L, 3 + n, 0, dq_wait_k);
 }
 

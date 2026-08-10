@@ -13,6 +13,7 @@
 #include "lua.h"
 
 #include "lauxlib.h"
+#include "dshim.h"
 #include "dtask.h"
 #include "dqueue.h"
 
@@ -88,6 +89,15 @@ static int taskcont (lua_State *co, int status, lua_KContext ctx) {
 static int taskbody (lua_State *co) {
   int nargs = lua_gettop(co) - 2;  /* [1] handler, [2] function, [3..] args */
   int ef = lua_isfunction(co, 1) ? 1 : 0;
+  /*
+  ** Name the continuation before installing it. A snapshot of a parked agent has
+  ** this frame in its chain, and a continuation is a bare pointer with nowhere to
+  ** be written down -- so hibernation needs a name for it. Registered here rather
+  ** than at some init step because this is where the pointer is installed, and
+  ** the two cannot then drift apart. Idempotent and off the hot path: the next
+  ** thing this function does is a call that may park.
+  */
+  diluvium_shim_addcont("dtask.driver", taskcont);
   lua_pcallk(co, nargs, LUA_MULTRET, ef, 0, taskcont);
   return taskcont(co, LUA_OK, 0);
 }

@@ -123,7 +123,7 @@ said would happen:
 | msgpack codec | under 25 KB | 16.0 KB, snapshot mode included |
 | queue subsystem | under **20 KB** | 17.6 KB — `dqueue.c` 15.0 + `dendpoint.c` 2.6 |
 | instance C ABI | under 10 KB | 6.1 KB |
-| hibernate | under 30 KB | 10.8 KB so far — `dshim.c` 1.5 + `dhash.c`/`dsnap.c` 9.3 |
+| hibernate | under 30 KB | 20.1 KB so far — `dshim.c`, `dhash.c`, `dsnap.c` |
 | swarm layer | separate library, not counted | not built |
 
 The queue target moved from 15 KB, and the reason is worth recording rather than
@@ -310,7 +310,8 @@ not understand it.
 | 0x05 | Persisted userdata | Implemented in Part 6. |
 | 0x06 | Closure | Implemented in Part 6. |
 | 0x07 | C function by permanent name | Implemented in Part 6. |
-| 0x08 - 0x0F | Diluvium core, unassigned | Reserved. |
+| 0x08 | Suspended thread | Implemented in Part 6. The draft's registry had no code for a thread; 10.3 requires one. |
+| 0x09 - 0x0F | Diluvium core, unassigned | Reserved. |
 | 0x10 - 0x7F | Application-defined | Free for host and program use. |
 
 Decoding an unknown ext code in 0x00-0x0F must be a clean error naming the code.
@@ -1003,6 +1004,34 @@ check red, and it is that one.
 Restrict v1 to a **single thread**. An agent driving nested coroutines is out of
 scope; refuse with a clear message.
 
+**How a thread is written.** Ext 0x08, which 5.5's registry had no code for -- an
+omission rather than a decision, since 10.3 requires a thread to be captured. The
+payload is the frame metadata only: sizes, one fixed record per frame, the
+to-be-closed slots, and the names of any continuations. The stack *values* are not
+in it, because a slot can hold a table that holds the thread; they arrive as SLOT
+fixups, and a final BUILD fixup validates the frames against the filled stack and
+constructs the chain. That order is forced -- a frame claims its function is at
+slot N, and nothing can check that until slot N holds something.
+
+**Live slots and reserved capacity are different numbers, and both travel.** A
+frame's `ci->top` is `func + 1 + maxstacksize`, which sits *above* the live top by
+however many registers the frame is not currently using. Validating a frame's top
+against the live count instead of the capacity refused every real thread, which is
+how this was found.
+
+**`nextraargs` is only meaningful for a vararg prototype.** `luaT_adjustvarargs`
+writes that field and nothing else does, so on a non-vararg frame it holds whatever
+the last user of that recycled `CallInfo` left there. Capturing it unconditionally
+meant capturing garbage, and the restore then failed its own range check on it.
+
+**To-be-closed slots are marked after the whole graph is finished**, not with the
+thread. Marking a slot requires its value to have a `__close` metamethod, and a
+metatable arrives as a fixup of its own -- which for a `defer` object, a
+self-referential `setmetatable(t, t)`, is queued *later* than the thread holding
+it. So marking during the thread's own fixup found a table with no metatable and
+refused it. Anything whose precondition is "the graph is complete" belongs in the
+finish pass rather than in an ordering assumption.
+
 **How metatables and upvalues travel, and why not inline.** Neither is part of its
 owner's contents, and writing either inline would put it in the position numbering
 at a place the decoder cannot predict — the decoder has to create the owner before
@@ -1062,6 +1091,27 @@ all C closures and traversal hits them immediately.
 Build it by walking the base libraries at init. The result must be identical on
 save and restore, which means the same runtime build and module set. Include a
 fingerprint of it in the snapshot header.
+
+**Continuations need naming too, and the draft did not say so.** A suspended
+agent's chain has C frames in it -- dtask.c's driver and `queue.wait` both yield
+with a continuation saved -- and a continuation is a bare function pointer with
+nowhere to be written down. So it is named exactly as a C function is, in a fixed
+array rather than a table keyed by the pointer, because casting a function pointer
+to `void *` is not something C promises. Registered next to the `lua_yieldk` call
+that installs it, which is an ordering that cannot be got wrong.
+
+`pcall`'s continuation is the awkward one: `finishpcall` is static in `lbaselib.c`,
+which is not on the patch-series allowlist, and its address is unreachable any
+other way. So it is *discovered* -- park a canary thread inside a `pcall` and read
+the continuation off the frame the shim reports. The same trick as the fingerprint
+canary, and honest for the same reason: it names what this build actually uses
+rather than what a list assumes.
+
+**Two things the permanents table must name that no guest can reach.** dtask.c's
+driver body, which is the outermost frame's function on every parked agent, and
+`queue.wait`'s light-userdata park marker. Neither is exposed to the guest, so
+neither is found by walking the libraries; both are reached explicitly. Without
+them, the one shape hibernation is built for cannot be captured at all.
 
 **`_G` and the library tables are in it too**, and that is the part the draft did
 not say. They are *tables*, so an encoder will happily serialize them — and then a
@@ -1219,7 +1269,14 @@ Checked at hibernate time, refused if violated:
 2. No live host resources in the reachable graph. No open sockets, file handles, or
    sessions. Because hibernation is self-initiated, the program is in a position to
    release them first. Verify by rejecting any userdata lacking a `__persist` hook.
-3. No light userdata anywhere reachable.
+3. No light userdata **that the runtime has not named**. The blanket version of
+   this was too absolute, and the runtime's own wait protocol proved it:
+   `queue.wait` pushes a light-userdata sentinel onto a thread's stack before
+   yielding, so a parked agent -- the thing hibernation exists for -- always has
+   one. A light userdata the runtime owns can be a permanent like anything else,
+   and the name resolves to the same sentinel in the new process. Only an unnamed
+   one is impossible, which is why the permanents check runs before this refusal
+   rather than after it.
 4. Single thread.
 
 Two more the draft did not list, both found by writing the check:
@@ -1738,9 +1795,8 @@ lazily. Registered references are consulted first, so the two compose.
 Not done: `"gone"` for a non-resident instance with `wake_on_message`, which is
 9.5 and belongs to the swarm layer.
 
-**M6: hibernate** — accessor shim, preconditions, value graph, header, permanents,
-prototypes and closures done; userdata, thread capture, the validation fuzzer and
-the ABI not started.
+**M6: hibernate** — everything but userdata `__persist`, the structure-aware
+fuzzer, and `dv_snapshot`/`dv_restore`.
 Accessor shim, precondition checks, value graph with backreferences, closures and
 upvalue identity, permanents table, content-addressed Protos through the real dump
 path, snapshot header, validation pass and structure-aware fuzzer, host-identity
@@ -1863,9 +1919,51 @@ test had registered the same prototype — one of them passing on a "not present
 this runtime" refusal unrelated to its own claim. Both now use distinct function
 bodies and assert the record inlines its prototype before tampering with it.
 
-Not done: userdata `__persist` (ext 0x05), thread capture, the structure-aware
-fuzzer, and `dv_snapshot`/`dv_restore`. The header's capability field is still
-compared against an empty set until M7.
+*Then thread capture, which is the milestone's point.* `dsnap_check.c` is 140
+checks and the acceptance criterion 14 names now passes: an agent parked on
+`queue.wait`, through dtask.c's real driver, round-trips, wakes with a message
+pushed into its queue *by name*, and finishes. So does the `defer` case 14 calls
+the highest-coverage single test available. 20.1 KB of the 30 KB budget.
+
+Four assumptions were probed against the tree first and all held; see the closure
+entry above. What did not hold were four things about the *design*, each corrected
+in 10.3, 10.4 or 10.7 and each found by a failing test rather than by reading:
+
+Live slots and reserved capacity are different numbers. A frame's `ci->top` sits
+above the live top by its unused registers, so validating against the live count
+refused every real thread.
+
+`nextraargs` is uninitialised on a non-vararg frame — `luaT_adjustvarargs` is the
+only writer — so capturing it unconditionally captured garbage from a recycled
+`CallInfo`.
+
+To-be-closed slots cannot be marked with their thread. A `defer` object's
+`__close` lives on a metatable that arrives as a later fixup, so marking during
+the thread's own fixup found a table with no metatable. That is what the finish
+pass is for.
+
+Light userdata cannot be refused outright. `queue.wait` puts a sentinel on the
+stack of every parked agent, so 10.7's blanket refusal would have refused exactly
+the shape hibernation exists for. Named light userdata is now allowed and the
+permanents check runs first.
+
+Verified by mutation, five breakages. `nyield` initially broke nothing: every
+thread case resumed to completion, and none asked a *restored* thread what it was
+waiting for — which is the first thing a host does.
+`a_restored_agent_reports_its_waitset` is that case, and it is the real host
+workflow rather than a contrivance. Two mutations (a wrong pc, a dropped
+continuation) abort rather than reporting a named failure; the property is covered
+in that nothing passes, but the diagnostic is a crash, and validation cannot
+distinguish "pc in range but wrong" from a correct one.
+
+Two bugs the amalgamation hid, both caught by `make build_platform` and not by the
+suite: `LUAI_MAXSTACK` is defined in `ldo.c` rather than any header (the debug
+build sees it only because `ltests.h` redefines it), and `luaC_objbarrier` needed
+`lgc.h`. The platform build belongs in the sweep for that reason.
+
+Not done: userdata `__persist` (ext 0x05), the structure-aware fuzzer, and
+`dv_snapshot`/`dv_restore`. The header's capability field is still compared against
+an empty set until M7.
 
 **M7: swarm layer**
 Instance table, `system/lifecycle` and `system/events`, attenuation, budgets,
@@ -1945,12 +2043,20 @@ Lean. Cover semantics and boundaries, not permutations.
   out not to need the innermost-frame exemption at all — `dq_wait` yields with
   `dq_wait_k` saved, so it would be capturable under the strictest reading of the
   rule.
-- **Hibernate round-trip.** Parked agent, shared upvalues, queue contents, handle
-  re-resolution, refusal cases from 10.7, and a live `defer` in scope. The `defer`
-  case is the highest-coverage single test available here: `defer` desugars to a
-  to-be-closed local holding a self-referential `setmetatable(t, t)`, so one test
-  exercises `tbclist` capture, closure serialization, and ext 0x04 backreferences
-  at once.
+- **Hibernate round-trip** (`test/dsnap_check.c`). Parked agent, shared upvalues,
+  queue contents, handle re-resolution, refusal cases from 10.7, and a live
+  `defer` in scope. The `defer` case is the highest-coverage single test available
+  here: `defer` desugars to a to-be-closed local holding a self-referential
+  `setmetatable(t, t)`, so one test exercises `tbclist` capture, closure
+  serialization, and ext 0x04 backreferences at once. Both pass.
+
+  Two more earned their place by catching something nothing else did.
+  `an_open_upvalue_stays_open` resumes the restored coroutine so that it *writes*
+  to a captured local and then asks the closure what it sees — a test that only
+  reads passes even when each side got a private copy.
+  `a_restored_agent_reports_its_waitset` asks the restored agent what it is waiting
+  for before resuming it, which is the first thing a real host does and the only
+  thing that depends on `u2.nyield` being carried.
 - **Dump determinism.** Identical source produces byte-identical stripped dumps
   across processes. Precondition for 10.5.
 - **Snapshot validation.** Structure-aware mutation of a snapshot; assert refusal,
@@ -2085,6 +2191,19 @@ artifact between sessions that do not share context.
   — the innermost-frame exemption, ext 0x07's position, and this — which is enough
   to say the rule plainly: a green test is evidence only after its mitigation has
   been removed once.
+- **§10.7 refused all light userdata; the runtime's own wait protocol contains
+  one.** `queue.wait` pushes a light-userdata sentinel onto a parked thread's
+  stack, so the blanket refusal would have refused exactly the shape hibernation
+  exists for. Named light userdata is fine; the permanents check runs first.
+- **§10.4 did not mention continuations.** A suspended agent's chain has C frames
+  with continuations saved, and a continuation is a bare pointer. `pcall`'s is
+  static in a core file that is not on the allowlist, so it is discovered by
+  watching a canary rather than named from a list.
+- **§5.5 had no ext code for a thread**, which 10.3 requires. 0x08.
+- **The amalgamation hides missing includes.** `LUAI_MAXSTACK` lives in `ldo.c`,
+  not a header, and the debug build compiles anyway because `ltests.h` redefines
+  it; `luaC_objbarrier` needed `lgc.h`. Both failed only in `make build_platform`,
+  which is now part of the sweep.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

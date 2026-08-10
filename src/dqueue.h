@@ -205,4 +205,16 @@ LUA_API void diluvium_queue_setnotify (lua_State *L, diluvium_queue_notify fn,
 LUA_API lua_Integer diluvium_queue_next (lua_State *L, lua_Integer after,
                                          const char **name);
 
+
+/*
+** Push the park marker 'wait' leaves on a suspended thread's stack.
+**
+** Exposed for one reason: a snapshot of an agent parked on 'wait' contains it,
+** and a light userdata can only be restored if the runtime has a name for it. So
+** the permanents table needs to be able to reach this address. Nothing else
+** should use it -- the marker is how a host tells this yield from an ordinary
+** one, and a caller that pushed it elsewhere would forge that signal.
+*/
+LUA_API void diluvium_queue_pushmark (lua_State *L);
+
 #endif

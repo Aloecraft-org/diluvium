@@ -18,10 +18,18 @@
 #include "dhash.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
+#include "dshim.h"
+#include "dtask.h"
 #include "dsnap.h"
 
 
 int ds_decodeheader_trampoline (lua_State *L);
+
+/* Threads live at the foot of this file, but the hooks in the middle need them. */
+static int ds_encodethread (lua_State *L, int abs);
+static int ds_decodethread (lua_State *L, const unsigned char *data, size_t len);
+static int ds_buildthread (lua_State *L, int thidx);
+static int ds_hook_finish (lua_State *L, void *ud);
 
 
 /* Registry key for the cached fingerprint. Its address is the key. */
@@ -148,7 +156,7 @@ static void ds_perm_put (lua_State *L, int nameidx, int validx,
                          const char *name) {
   /* stack: ... value */
   int t = lua_type(L, -1);
-  if (t != LUA_TFUNCTION && t != LUA_TTABLE) {
+  if (t != LUA_TFUNCTION && t != LUA_TTABLE && t != LUA_TLIGHTUSERDATA) {
     lua_pop(L, 1);
     return;
   }
@@ -222,6 +230,26 @@ LUA_API void diluvium_snap_permanents (lua_State *L) {
     ds_perm_walk(L, nameidx, validx, lua_gettop(L), DS_MODULES[i]);
     lua_pop(L, 1);
   }
+
+  /*
+  ** dtask.c's driver body. It is a C function that appears on the *stack* of every
+  ** parked agent -- it is the outermost frame's function -- so a snapshot of one
+  ** cannot be taken without a name for it. Unlike 'queue.wait', which the module
+  ** walk above already found under that name, the driver is deliberately not
+  ** exposed to the guest, so nothing reaches it except this.
+  */
+  diluvium_task_pushbody(L);
+  ds_perm_put(L, nameidx, validx, "dtask.body");
+
+  /*
+  ** 'queue.wait''s park marker: a light userdata whose address is a static in
+  ** dqueue.c, pushed onto a parked thread's stack so a host can tell this yield
+  ** from an ordinary 'coroutine.yield'. Naming it is what makes an agent parked
+  ** on 'wait' capturable at all -- 10.7's blanket refusal of light userdata would
+  ** otherwise refuse the one shape hibernation is built for.
+  */
+  diluvium_queue_pushmark(L);
+  ds_perm_put(L, nameidx, validx, "dqueue.parkmark");
 
   /* The string metatable. Reachable from any string through '__index', so a
      program that keeps 'getmetatable("")' would otherwise serialize a table full
@@ -799,6 +827,60 @@ static int ds_decodeclosure (lua_State *L, const unsigned char *data,
 ** The hooks
 ** ====================================================================== */
 
+/*
+** Learn the continuations this runtime's own libraries use, by watching them.
+**
+** 'pcall' yields with a continuation, and that continuation is 'finishpcall' --
+** a static function in lbaselib.c. Naming it from there would mean editing a
+** core file that is not on the patch-series allowlist, and its address is not
+** reachable any other way. So it is discovered instead: park a canary thread
+** inside a 'pcall' and read the continuation off the frame the shim reports.
+**
+** The same trick as the fingerprint canary, and honest for the same reason. It
+** names whatever this build actually uses rather than what a list of names
+** assumes, so a change to which continuation 'pcall' installs is picked up
+** rather than mis-restored.
+**
+** Nothing here can fail usefully: a build where the canary does not park simply
+** learns nothing, and a snapshot that needs the name is then refused by name
+** later, which is the correct outcome and not a crash.
+*/
+static void ds_learncont (lua_State *L, const char *src, const char *name) {
+  int base = lua_gettop(L);
+  lua_State *co = lua_newthread(L);
+  int nres, n, i;
+  if (luaL_loadstring(co, src) != LUA_OK) {
+    lua_settop(L, base);
+    return;
+  }
+  lua_resume(co, L, 0, &nres);
+  if (diluvium_shim_status(co) != LUA_YIELD) {
+    lua_settop(L, base);
+    return;
+  }
+  n = diluvium_shim_framecount(co);
+  for (i = 0; i < n; i++) {
+    diluvium_frame f;
+    if (diluvium_shim_frame(co, i, &f) && f.is_c && f.has_k && f.k != NULL) {
+      diluvium_shim_addcont(name, f.k);
+      break;                          /* the outermost such frame is the one */
+    }
+  }
+  lua_settop(L, base);
+}
+
+
+static void ds_learnconts (lua_State *L) {
+  static int done = 0;
+  if (done)
+    return;
+  done = 1;
+  ds_learncont(L, "pcall(function() coroutine.yield() end)", "baselib.pcall");
+  ds_learncont(L, "xpcall(function() coroutine.yield() end, function(e) "
+                  "return e end)", "baselib.xpcall");
+}
+
+
 static int ds_hook_permanent (lua_State *L, int idx, void *ud) {
   int abs = lua_absindex(L, idx);
   int base = lua_gettop(L);
@@ -843,8 +925,10 @@ static int ds_hook_encode (lua_State *L, int idx, void *ud) {
                              "C functions must name them");
       }
       return ds_encodeclosure(L, abs);
+    case LUA_TTHREAD:
+      return ds_encodethread(L, abs);
     default:
-      return 0;                        /* userdata and threads: not yet */
+      return 0;                        /* userdata: not yet */
   }
 }
 
@@ -855,6 +939,8 @@ static int ds_hook_decode (lua_State *L, int code, const unsigned char *data,
   switch (code) {
     case 0x06:
       return ds_decodeclosure(L, data, len);
+    case 0x08:
+      return ds_decodethread(L, data, len);
     case 0x07: {
       int base = lua_gettop(L);
       diluvium_snap_permanents(L);
@@ -883,10 +969,554 @@ static int ds_hook_decode (lua_State *L, int code, const unsigned char *data,
 }
 
 
+static int ds_hook_slot (lua_State *L, int idx, int i, void *ud) {
+  lua_State *co = lua_tothread(L, idx);
+  (void)ud;
+  if (co == NULL || i < 1 || i > diluvium_shim_stacksize(co))
+    return 0;
+  return diluvium_shim_pushslot(co, i, L);
+}
+
+
+/*
+** Is this upvalue open against a thread in the graph?
+**
+** If it is, the upvalue is an alias for one of that thread's stack slots, and a
+** UPOPEN says so. The codec's ordinary UPVAL would write the slot's *value*
+** instead, severing the alias -- so the parked coroutine could later assign to
+** that local and the closure would not see it.
+**
+** 'DS_CAPTURED' is the set of threads this runtime has encoded, weak-keyed so a
+** thread that dies is not held alive by it. Membership alone is not enough,
+** though: what matters is whether the thread has a position in *this* graph, and
+** 'diluvium_msgpack_position' is what answers that -- it returns 0 for a thread
+** the current encode has not reached.
+**
+** One case this does not catch, stated rather than left to be found: a thread
+** reachable only through the upvalue of some *other* closure that was drained
+** first. The thread has no position yet at that moment, so the earlier closure
+** falls back to writing a value. It needs a graph where a closure's upvalue holds
+** a coroutine which another, earlier-drained closure also closes over -- narrow,
+** but not impossible, and the failure is a severed alias rather than an error.
+*/
+static const char DS_CAPTURED = 0;      /* weak set of threads encoded so far */
+
+static void ds_captured (lua_State *L) {
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_CAPTURED) != LUA_TTABLE) {
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_newtable(L);
+    lua_pushliteral(L, "k");
+    lua_setfield(L, -2, "__mode");
+    lua_setmetatable(L, -2);
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_CAPTURED);
+  }
+}
+
+
+static int ds_hook_openupval (lua_State *L, int idx, int n, void *ud) {
+  int base = lua_gettop(L);
+  (void)ud;
+  if (!diluvium_shim_upisopen(L, idx, n))
+    return 0;
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_CAPTURED) != LUA_TTABLE) {
+    lua_settop(L, base);
+    return 0;                          /* no thread in this graph */
+  }
+  lua_pushnil(L);
+  while (lua_next(L, -2) != 0) {
+    lua_State *co = lua_tothread(L, -2);
+    int slot = (co == NULL) ? 0 : diluvium_shim_upslot(L, idx, n, co);
+    if (slot > 0) {
+      lua_Integer clpos = diluvium_msgpack_position(L, idx);
+      lua_Integer thpos = diluvium_msgpack_position(L, -2);
+      if (clpos > 0 && thpos > 0) {
+        lua_Integer ops[4];
+        ops[0] = clpos;
+        ops[1] = n;
+        ops[2] = thpos;
+        ops[3] = slot;
+        diluvium_msgpack_appendfixup(L, DILUVIUM_FIX_UPOPEN, ops, 4);
+        lua_settop(L, base);
+        return 1;
+      }
+    }
+    lua_pop(L, 1);                     /* the value; the key drives the walk */
+  }
+  lua_settop(L, base);
+  return 0;
+}
+
+
+static int ds_hook_fixup (lua_State *L, int tag, const lua_Integer *ops,
+                          int nops, void *ud) {
+  (void)ud;
+  (void)nops;
+  switch (tag) {
+    case DILUVIUM_FIX_SLOT: {
+      /* stack: ... objs-resolved thread is not here; the codec gives positions,
+         so the layer resolves them through the graph it is building. */
+      lua_State *co;
+      int base = lua_gettop(L);
+      diluvium_msgpack_pushobject(L, ops[0]);
+      co = lua_tothread(L, -1);
+      if (co == NULL)
+        return luaL_error(L, "snapshot: a slot fixup names something that is not "
+                             "a thread");
+      lua_pushvalue(L, base);          /* the value, above the thread */
+      if (!diluvium_shim_setslot(co, (int)ops[1], L))
+        return luaL_error(L, "snapshot: slot %d is outside the thread's stack",
+                          (int)ops[1]);
+      lua_settop(L, base);
+      return 1;
+    }
+    case DILUVIUM_FIX_BUILD: {
+      int base = lua_gettop(L);
+      int r;
+      diluvium_msgpack_pushobject(L, ops[0]);
+      r = ds_buildthread(L, lua_gettop(L));
+      lua_settop(L, base);
+      return r;
+    }
+    case DILUVIUM_FIX_UPOPEN: {
+      int base = lua_gettop(L);
+      lua_State *co;
+      diluvium_msgpack_pushobject(L, ops[0]);    /* the closure */
+      diluvium_msgpack_pushobject(L, ops[2]);    /* the thread */
+      co = lua_tothread(L, -1);
+      if (co == NULL)
+        return luaL_error(L, "snapshot: an upvalue fixup names something that is "
+                             "not a thread");
+      if (!diluvium_shim_reopenupval(L, -2, (int)ops[1], co, (int)ops[3]))
+        return luaL_error(L, "snapshot: upvalue %d cannot be re-opened against "
+                             "slot %d", (int)ops[1], (int)ops[3]);
+      lua_settop(L, base);
+      return 1;
+    }
+    default:
+      return 0;
+  }
+}
+
+
 LUA_API const diluvium_snap_hooks *diluvium_snap_hooks_for (lua_State *L) {
   static const diluvium_snap_hooks hooks = {
-    ds_hook_permanent, ds_hook_encode, ds_hook_decode, NULL
+    ds_hook_permanent,      /* permanent */
+    ds_hook_encode,         /* encode */
+    ds_hook_slot,           /* slot */
+    ds_hook_openupval,      /* openupval */
+    ds_hook_fixup,          /* fixup */
+    ds_hook_finish,         /* finish */
+    ds_hook_decode,         /* decode */
+    NULL                    /* ud */
   };
   diluvium_snap_permanents(L);
+  ds_learnconts(L);
   return &hooks;
+}
+
+
+/* ======================================================================
+** Threads (10.3): capture and rebuild a suspended coroutine
+** ====================================================================== */
+
+/*
+** Named C continuations. See dsnap.h for why this is an array and not a table.
+*/
+#define DS_MAXCONT	64
+
+typedef struct ds_cont { const char *name; lua_KFunction k; } ds_cont;
+static ds_cont ds_conts[DS_MAXCONT];
+static int ds_ncont = 0;
+
+LUA_API int diluvium_snap_addcont (const char *name, lua_KFunction k) {
+  int i;
+  if (name == NULL || k == NULL || ds_ncont >= DS_MAXCONT)
+    return 0;
+  for (i = 0; i < ds_ncont; i++) {
+    if (strcmp(ds_conts[i].name, name) == 0)
+      return (ds_conts[i].k == k);   /* idempotent, but not a silent rebind */
+  }
+  ds_conts[ds_ncont].name = name;
+  ds_conts[ds_ncont].k = k;
+  ds_ncont++;
+  return 1;
+}
+
+static const char *ds_contname (lua_KFunction k) {
+  int i;
+  for (i = 0; i < ds_ncont; i++)
+    if (ds_conts[i].k == k) return ds_conts[i].name;
+  return NULL;
+}
+
+static lua_KFunction ds_contfunc (const char *name, size_t len) {
+  int i;
+  for (i = 0; i < ds_ncont; i++) {
+    if (strlen(ds_conts[i].name) == len &&
+        memcmp(ds_conts[i].name, name, len) == 0)
+      return ds_conts[i].k;
+  }
+  return NULL;
+}
+
+
+/*
+** Ext 0x08: a suspended thread.
+**
+** 0x08 comes from 5.5's "Diluvium core, unassigned" range; the draft's registry
+** had no code for a thread, which is an omission rather than a decision -- 10.3
+** requires one thread to be captured.
+**
+** The payload is the frame metadata and nothing else: sizes, then one record per
+** frame, then the to-be-closed slots, then the continuation names. The stack
+** *values* are not here. They are graph values -- a slot can hold a table that
+** holds the thread -- so they arrive as SLOT fixups, and a final BUILD fixup
+** validates the frames against the filled stack and constructs the chain. That
+** ordering is forced: a frame claims its function is at slot N, and nothing can
+** check that until slot N holds something.
+**
+** Fixed 32-bit big-endian fields rather than msgpack, because this is a blob
+** inside an ext payload and a self-describing encoding would buy nothing: the
+** reader is this same runtime, guarded by the header's fingerprint.
+*/
+#define DS_THREAD_VERSION	1
+#define DS_THREAD_WORDS		5        /* 32-bit words in the record header */
+#define DS_FRAME_WORDS		10       /* 32-bit words per frame record */
+
+static void ds_put32 (luaL_Buffer *b, unsigned long v) {
+  char four[4];
+  four[0] = (char)((v >> 24) & 0xff);
+  four[1] = (char)((v >> 16) & 0xff);
+  four[2] = (char)((v >> 8) & 0xff);
+  four[3] = (char)(v & 0xff);
+  luaL_addlstring(b, four, 4);
+}
+
+static unsigned long ds_get32 (const unsigned char *p) {
+  return ((unsigned long)p[0] << 24) | ((unsigned long)p[1] << 16) |
+         ((unsigned long)p[2] << 8) | (unsigned long)p[3];
+}
+
+/* Signed fields go through a two's-complement round trip rather than a cast. */
+static long ds_ssigned (unsigned long v) {
+  return (v & 0x80000000UL) ? -(long)(~v & 0xffffffffUL) - 1 : (long)v;
+}
+
+
+static int ds_encodethread (lua_State *L, int abs) {
+  lua_State *co = lua_tothread(L, abs);
+  int base = lua_gettop(L);
+  luaL_Buffer b;
+  int n, i, ntbc = 0, slot, capacity;
+  int code;
+  if (co == NULL)
+    return 0;
+  if (co == L)
+    return luaL_error(L, "snapshot: a thread cannot capture itself");
+  /*
+  ** 10.7's preconditions, applied here rather than only at the top level,
+  ** because a thread can be reached from anywhere in the graph -- a supervisor's
+  ** table of children, for instance -- and each one has to be capturable in its
+  ** own right.
+  */
+  code = diluvium_shim_capturable(co, &i);
+  if (code != DILUVIUM_SNAP_OK)
+    return luaL_error(L, "snapshot: this thread cannot be captured: %s",
+                      diluvium_shim_reason(code));
+  n = diluvium_shim_framecount(co);
+  if (n < 1)
+    return luaL_error(L, "snapshot: a thread with no frames has nothing to "
+                         "resume");
+  for (slot = diluvium_shim_tbcnext(co, 0); slot != 0;
+       slot = diluvium_shim_tbcnext(co, slot))
+    ntbc++;
+  /*
+  ** How much stack the restore has to reserve, which is not the same as how many
+  ** slots are live. A frame's top is 'func + 1 + maxstacksize' and sits above the
+  ** live top by however many registers the frame is not currently using, so
+  ** allocating only the live count leaves 'luaV_execute' reading past the end on
+  ** its first instruction. Carried explicitly rather than recomputed, since the
+  ** restore validates frames against it and must not derive it from them.
+  */
+  capacity = diluvium_shim_stacksize(co);
+  for (i = 0; i < n; i++) {
+    diluvium_frame f;
+    if (diluvium_shim_frame(co, i, &f) && f.top_index > capacity)
+      capacity = f.top_index;
+  }
+  luaL_buffinit(L, &b);
+  {
+    char head[1];
+    head[0] = (char)DS_THREAD_VERSION;
+    luaL_addlstring(&b, head, 1);
+  }
+  ds_put32(&b, (unsigned long)diluvium_shim_stacksize(co));
+  ds_put32(&b, (unsigned long)diluvium_shim_nyield(co));
+  ds_put32(&b, (unsigned long)n);
+  ds_put32(&b, (unsigned long)ntbc);
+  ds_put32(&b, (unsigned long)capacity);
+  for (i = 0; i < n; i++) {
+    diluvium_frame f;
+    if (!diluvium_shim_frame(co, i, &f))
+      return luaL_error(L, "snapshot: frame %d of a thread vanished mid-capture",
+                        i);
+    ds_put32(&b, (unsigned long)(f.is_c ? 1 : 0));
+    ds_put32(&b, (unsigned long)(f.has_k ? 1 : 0));
+    ds_put32(&b, (unsigned long)f.func_index);
+    ds_put32(&b, (unsigned long)f.top_index);
+    ds_put32(&b, (unsigned long)(long)f.pc);
+    ds_put32(&b, (unsigned long)f.nextraargs);
+    ds_put32(&b, (unsigned long)(long)f.nresults);
+    ds_put32(&b, f.callstatus);
+    ds_put32(&b, (unsigned long)f.ctx);
+    ds_put32(&b, (unsigned long)(f.is_vararg ? 1 : 0));
+  }
+  /* Innermost first, which is the order 'tbcnext' walks and the reverse of the
+     order a restore must apply them -- the restore reverses, because
+     'luaF_newtbcupval' asserts each new slot is above the last. */
+  for (slot = diluvium_shim_tbcnext(co, 0); slot != 0;
+       slot = diluvium_shim_tbcnext(co, slot))
+    ds_put32(&b, (unsigned long)slot);
+  /* Continuation names, one per C frame that has one. */
+  for (i = 0; i < n; i++) {
+    diluvium_frame f;
+    const char *name;
+    if (!diluvium_shim_frame(co, i, &f) || !f.is_c || !f.has_k)
+      continue;
+    name = diluvium_shim_contname(f.k);
+    if (name == NULL)
+      return luaL_error(L, "snapshot: frame %d of this thread is a C function "
+                           "waiting on a continuation that has no name; a host "
+                           "whose call yields must name its continuation "
+                           "(diluvium_snap_addcont)", i);
+    ds_put32(&b, (unsigned long)strlen(name));
+    luaL_addstring(&b, name);
+  }
+  luaL_pushresult(&b);
+  {
+    size_t plen;
+    const char *p = lua_tolstring(L, -1, &plen);
+    diluvium_msgpack_appendext(L, 0x08, p, plen);
+  }
+  /* Remember it, so an upvalue open against its stack is written as an alias
+     rather than as a value. See ds_hook_openupval. */
+  ds_captured(L);
+  lua_pushvalue(L, abs);
+  lua_pushboolean(L, 1);
+  lua_rawset(L, -3);
+  lua_settop(L, base);
+  return 3;                             /* 3: queue this thread's slots */
+}
+
+
+/*
+** A thread being rebuilt keeps its metadata here until its BUILD fixup arrives,
+** keyed by the thread itself. A registry table rather than C state, because
+** several threads can be part way through one restore.
+*/
+static const char DS_PENDING = 0;
+static const char DS_BUILT = 0;
+
+static void ds_built (lua_State *L) {
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_BUILT) != LUA_TTABLE) {
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_BUILT);
+  }
+}
+
+
+static void ds_pending (lua_State *L) {
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PENDING) != LUA_TTABLE) {
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_PENDING);
+  }
+}
+
+
+static int ds_decodethread (lua_State *L, const unsigned char *data,
+                            size_t len) {
+  lua_State *co;
+  unsigned long nslots, nframes;
+  unsigned long capacity;
+  if (len < 1 + DS_THREAD_WORDS * 4 || data[0] != DS_THREAD_VERSION)
+    return luaL_error(L, "snapshot: a thread record is malformed or of a "
+                         "version this runtime does not write");
+  nslots = ds_get32(data + 1);
+  nframes = ds_get32(data + 9);
+  capacity = ds_get32(data + 17);
+  if (nslots < 1 || nslots > 1000000UL || nframes < 1 || nframes > 100000UL ||
+      capacity < nslots || capacity > 1000000UL)
+    return luaL_error(L, "snapshot: a thread record claims %d slots and %d "
+                         "frames, which is not credible",
+                      (int)nslots, (int)nframes);
+  /*
+  ** The metadata is checked for *self*-consistency here and against the thread
+  ** later, in the BUILD fixup, once the stack has values in it. Splitting it that
+  ** way is what lets the length check happen before anything is allocated.
+  */
+  if (len < 1 + DS_THREAD_WORDS * 4 + nframes * DS_FRAME_WORDS * 4)
+    return luaL_error(L, "snapshot: a thread record is shorter than the %d "
+                         "frames it claims", (int)nframes);
+  co = lua_newthread(L);
+  if (!diluvium_shim_prepstack(co, (int)nslots, (int)capacity))
+    return luaL_error(L, "snapshot: could not make room for a thread's %d "
+                         "stack slots", (int)nslots);
+  /* Stash the metadata against the thread until BUILD. */
+  ds_pending(L);
+  lua_pushvalue(L, -2);                 /* the thread */
+  lua_pushlstring(L, (const char *)data, len);
+  lua_rawset(L, -3);
+  lua_pop(L, 1);                        /* the pending table */
+  return 1;
+}
+
+
+/*
+** BUILD: the stack is populated, so now the frames can be checked against it and
+** the chain constructed. Everything that can refuse does so before
+** 'diluvium_shim_restore' is reached, per 10.10.
+*/
+static int ds_buildthread (lua_State *L, int thidx) {
+  lua_State *co = lua_tothread(L, thidx);
+  const unsigned char *data;
+  size_t len;
+  unsigned long nslots, nyield, nframes, ntbc;
+  diluvium_frame *frames;
+  lua_KFunction *ks;
+  size_t namepos;
+  int rc, bad = -1;
+  unsigned long i;
+  if (co == NULL)
+    return luaL_error(L, "snapshot: a build fixup names something that is not a "
+                         "thread");
+  ds_pending(L);
+  lua_pushvalue(L, thidx);
+  if (lua_rawget(L, -2) != LUA_TSTRING)
+    return luaL_error(L, "snapshot: a build fixup names a thread that has no "
+                         "record, so it was built twice or never created");
+  data = (const unsigned char *)lua_tolstring(L, -1, &len);
+  nslots = ds_get32(data + 1);
+  nyield = ds_get32(data + 5);
+  nframes = ds_get32(data + 9);
+  ntbc = ds_get32(data + 13);
+  /* Sized from the record, which was length-checked when the thread was made. */
+  frames = (diluvium_frame *)lua_newuserdatauv(
+             L, nframes * sizeof(diluvium_frame), 0);
+  ks = (lua_KFunction *)lua_newuserdatauv(L, nframes * sizeof(lua_KFunction), 0);
+  namepos = 1 + DS_THREAD_WORDS * 4 + nframes * DS_FRAME_WORDS * 4 + ntbc * 4;
+  if (namepos > len)
+    return luaL_error(L, "snapshot: a thread record is shorter than its frame "
+                         "and to-be-closed tables require");
+  for (i = 0; i < nframes; i++) {
+    const unsigned char *f = data + 1 + DS_THREAD_WORDS * 4 +
+                             i * DS_FRAME_WORDS * 4;
+    diluvium_frame *out = &frames[i];
+    memset(out, 0, sizeof(*out));
+    out->is_c = (ds_get32(f) != 0);
+    out->has_k = (ds_get32(f + 4) != 0);
+    out->func_index = (int)ds_get32(f + 8);
+    out->top_index = (int)ds_get32(f + 12);
+    out->pc = (int)ds_ssigned(ds_get32(f + 16));
+    out->nextraargs = (int)ds_get32(f + 20);
+    out->is_vararg = (ds_get32(f + 36) != 0);
+    out->nresults = (int)ds_ssigned(ds_get32(f + 24));
+    out->callstatus = ds_get32(f + 28);
+    out->ctx = ds_ssigned(ds_get32(f + 32));
+    ks[i] = NULL;
+    if (out->is_c && out->has_k) {
+      unsigned long nlen;
+      if (namepos + 4 > len)
+        return luaL_error(L, "snapshot: a thread record ends before its "
+                             "continuation names");
+      nlen = ds_get32(data + namepos);
+      namepos += 4;
+      if (nlen > len - namepos)
+        return luaL_error(L, "snapshot: a continuation name runs past the end "
+                             "of a thread record");
+      ks[i] = diluvium_shim_contfunc((const char *)(data + namepos),
+                                     (size_t)nlen);
+      if (ks[i] == NULL) {
+        lua_pushlstring(L, (const char *)(data + namepos), (size_t)nlen);
+        return luaL_error(L, "snapshot: continuation '%s' is named by this "
+                             "snapshot but not registered in this runtime",
+                          lua_tostring(L, -1));
+      }
+      namepos += nlen;
+    }
+  }
+  rc = diluvium_shim_checkframes(co, frames, (int)nframes, (int)nslots, &bad);
+  if (rc != DILUVIUM_RES_OK)
+    return luaL_error(L, "snapshot: frame %d of a thread cannot be restored: %s",
+                      bad, diluvium_shim_resreason(rc));
+  if (!diluvium_shim_restore(co, frames, (int)nframes, ks, (int)nyield))
+    return luaL_error(L, "snapshot: a thread's frames would not build");
+  /*
+  ** The to-be-closed slots are *not* marked here, and that is the one ordering
+  ** subtlety in the whole restore. Marking a slot requires its value to have a
+  ** '__close' metamethod, and a metatable arrives as its own fixup -- which for a
+  ** 'defer' object, a self-referential 'setmetatable(t, t)', is queued after the
+  ** thread that holds it. So marking here found a table with no metatable and
+  ** refused it. They are applied in 'ds_hook_finish', once the graph is whole.
+  **
+  ** The record therefore stays; 'DS_BUILT' records that the frames are done, so
+  ** the finisher can tell a thread that was never built from one that was.
+  */
+  ds_built(L);
+  lua_pushvalue(L, thidx);
+  lua_pushboolean(L, 1);
+  lua_rawset(L, -3);
+  return 1;
+}
+
+
+static int ds_hook_finish (lua_State *L, void *ud) {
+  int base = lua_gettop(L);
+  (void)ud;
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_PENDING) != LUA_TTABLE) {
+    lua_settop(L, base);
+    return 1;                          /* no thread in this restore */
+  }
+  ds_built(L);                         /* base+2 */
+  lua_pushnil(L);
+  while (lua_next(L, base + 1) != 0) {
+    /* stack: pending, built, thread, record */
+    lua_State *co = lua_tothread(L, -2);
+    size_t len;
+    const unsigned char *data =
+      (const unsigned char *)lua_tolstring(L, -1, &len);
+    unsigned long nframes, ntbc, i;
+    lua_pushvalue(L, -2);
+    if (lua_rawget(L, base + 2) == LUA_TNIL)
+      return luaL_error(L, "snapshot: a thread was created but its frames were "
+                           "never built, so it would restore unrunnable");
+    lua_pop(L, 1);
+    if (co == NULL || data == NULL)
+      return luaL_error(L, "snapshot: a pending thread entry is malformed");
+    nframes = ds_get32(data + 9);
+    ntbc = ds_get32(data + 13);
+    /* Bottom-up: the record holds them innermost first, and
+       'luaF_newtbcupval' requires each new slot to sit above the last. */
+    for (i = ntbc; i > 0; i--) {
+      unsigned long slot =
+        ds_get32(data + 1 + DS_THREAD_WORDS * 4 +
+                 nframes * DS_FRAME_WORDS * 4 + (i - 1) * 4);
+      if (!diluvium_shim_settbc(co, (int)slot))
+        return luaL_error(L, "snapshot: %s (slot %d)",
+                          diluvium_shim_resreason(DILUVIUM_RES_TBC), (int)slot);
+    }
+    lua_pop(L, 1);                     /* the record; the thread drives on */
+  }
+  /* Clear both tables, so a second restore starts clean. */
+  lua_settop(L, base);
+  lua_pushnil(L);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_PENDING);
+  lua_pushnil(L);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_BUILT);
+  return 1;
 }

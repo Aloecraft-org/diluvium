@@ -126,10 +126,29 @@ LUA_API void diluvium_msgpack_setresolver (lua_State *L,
 ** Both directions raise on failure. Encode leaves one string; decode leaves one
 ** value.
 */
-/* Fixup tags. See the section comment above. */
+/*
+** Fixup tags, and the shape of each one's operands.
+**
+** The codec owns the *shape* -- how many integers a tag takes and whether a
+** graph value follows -- because that is the format, and a reader has to be able
+** to parse the section without knowing what any tag means. The snapshot layer
+** owns the *meaning* of 4 through 6, which touch thread internals the codec
+** cannot reach.
+**
+**   1 META    pos                      + value (the metatable)
+**   2 UPVAL   pos, index               + value
+**   3 UPJOIN  pos, index, pos, index
+**   4 SLOT    pos, slot                + value (a thread's stack slot)
+**   5 BUILD   pos                            (build a thread's frames)
+**   6 UPOPEN  pos, index, pos, slot          (re-open against a thread's slot)
+*/
 #define DILUVIUM_FIX_META	1
 #define DILUVIUM_FIX_UPVAL	2
 #define DILUVIUM_FIX_UPJOIN	3
+#define DILUVIUM_FIX_SLOT	4
+#define DILUVIUM_FIX_BUILD	5
+#define DILUVIUM_FIX_UPOPEN	6
+#define DILUVIUM_FIX_LAST	6
 
 typedef struct diluvium_snap_hooks {
   /*
@@ -164,6 +183,52 @@ typedef struct diluvium_snap_hooks {
   */
   int (*encode) (lua_State *L, int idx, void *ud);
   /*
+  ** Push slot 'i' (1-based) of the thread at 'idx' and return 1, or return 0
+  ** when 'i' is past the end or the value is not a thread.
+  **
+  ** A thread's value stack is raw stack memory, which the codec has no way to
+  ** reach -- so a thread is the one graph object whose contents the codec has to
+  ** be handed. It queues one SLOT fixup per slot and fetches each value at drain
+  ** time through this, exactly as it fetches an upvalue through
+  ** 'lua_getupvalue'. Return 0 for a non-thread and this is never consulted.
+  */
+  int (*slot) (lua_State *L, int idx, int i, void *ud);
+  /*
+  ** Offered each upvalue of a closure before the codec writes a UPVAL or UPJOIN
+  ** for it. Return 1 having appended a complete fixup of your own -- through
+  ** 'diluvium_msgpack_appendfixup' -- or 0 to let the codec write the ordinary
+  ** one.
+  **
+  ** This exists for one case: an upvalue that is *open* against the stack of a
+  ** thread that is also in this graph. Such an upvalue is not a value, it is an
+  ** alias for a stack slot, and writing its value would quietly sever the alias
+  ** -- so the parked coroutine could later assign to that local and the closure
+  ** would not see it. Only the snapshot layer can tell, because only it knows
+  ** which threads are being captured.
+  */
+  int (*openupval) (lua_State *L, int idx, int n, void *ud);
+  /*
+  ** Handle a fixup the codec parsed but does not own: SLOT, BUILD or UPOPEN.
+  ** 'ops' holds the integer operands and any graph value is on top of the stack
+  ** (and must be left there; the codec pops it). Return 1 if handled.
+  */
+  int (*fixup) (lua_State *L, int tag, const lua_Integer *ops, int nops,
+                void *ud);
+  /*
+  ** Called once, after the whole fixup section has been replayed, so a layer can
+  ** do work that depends on the graph being complete. Return 1, or 0 to have the
+  ** codec raise.
+  **
+  ** It exists because of one case, and the case is instructive: a to-be-closed
+  ** slot can only be marked once its value has a '__close' metamethod, and a
+  ** metatable arrives as a fixup of its own -- which for a 'defer' object (a
+  ** self-referential 'setmetatable(t, t)') is queued *later* than the thread that
+  ** holds it. Marking during the thread's own fixup therefore found a table with
+  ** no metatable and refused it. Anything whose precondition is "the graph is
+  ** finished" belongs here rather than in an ordering assumption.
+  */
+  int (*finish) (lua_State *L, void *ud);
+  /*
   ** The other direction, for ext codes 0x03, 0x05, 0x06 and 0x07. Push one
   ** value and return 1, or return 0 to have the codec raise. Ext 0x04 is the
   ** codec's own and is never offered.
@@ -192,6 +257,33 @@ typedef struct diluvium_snap_hooks {
 */
 LUA_API void diluvium_msgpack_appendext (lua_State *L, int code,
                                          const char *data, size_t len);
+
+/*
+** Append a fixup to the snapshot encode in progress: the tag, then 'nops'
+** integer operands. A tag whose shape includes a graph value cannot be written
+** this way, because encoding a value is the codec's own recursion.
+*/
+LUA_API void diluvium_msgpack_appendfixup (lua_State *L, int tag,
+                                           const lua_Integer *ops, int nops);
+
+/*
+** The position the object at 'idx' has in the encode in progress, or 0 if it has
+** none. A hook writing its own fixup needs this: positions are the codec's, and
+** the hook has no other way to name an object.
+*/
+LUA_API lua_Integer diluvium_msgpack_position (lua_State *L, int idx);
+
+/*
+** Push the object at 'pos' in the *decode* in progress. Raises if there is no
+** decode running or the position is out of range.
+**
+** The mirror of 'position': a hook handling a fixup is handed positions, and
+** positions are the codec's -- so this is the only way to turn one back into an
+** object. Range-checked here rather than by the caller, because 10.10 says a
+** snapshot is untrusted input and a position is exactly the sort of field a
+** malformed one gets wrong.
+*/
+LUA_API void diluvium_msgpack_pushobject (lua_State *L, lua_Integer pos);
 
 LUA_API void diluvium_msgpack_encode_graph (lua_State *L, int idx,
                                     const diluvium_snap_hooks *h);

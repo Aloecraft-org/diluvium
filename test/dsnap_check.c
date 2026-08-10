@@ -71,11 +71,24 @@
 #include "dlibs.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
+#include "dshim.h"
+#include "dtask.h"
 #include "dsnap.h"
 
 
 static int failures = 0;
 static int checks = 0;
+
+static void okf (int cond, const char *what, long got, long want) {
+  checks++;
+  if (cond)
+    printf("[PASS] %s\n", what);
+  else {
+    printf("[FAIL] %s (got %ld, wanted %ld)\n", what, got, want);
+    failures++;
+  }
+}
+
 
 static void ok (int cond, const char *what) {
   checks++;
@@ -1721,6 +1734,461 @@ static void the_permanents_fingerprint_is_not_empty (lua_State *L) {
 }
 
 
+/* ======================================================================
+** Suspended threads (10.3, 10.7)
+** ====================================================================== */
+
+/* Build a coroutine, run it to its first yield, leave it on the stack. */
+static lua_State *parked (lua_State *L, const char *src) {
+  lua_State *co = lua_newthread(L);
+  int nres;
+  if (luaL_loadstring(co, src) != LUA_OK) {
+    printf("[FAIL] parked chunk does not load: %s\n", lua_tostring(co, -1));
+    failures++; checks++;
+    return NULL;
+  }
+  lua_resume(co, L, 0, &nres);
+  if (diluvium_shim_status(co) != LUA_YIELD) {
+    printf("[FAIL] parked chunk did not park (status %d: %s)\n",
+           diluvium_shim_status(co),
+           (lua_gettop(co) > 0) ? lua_tostring(co, -1) : "no message");
+    failures++; checks++;
+    return NULL;
+  }
+  return co;
+}
+
+
+/* Resume the thread at 'idx' with 'nargs' already pushed onto it. */
+static int resume_with (lua_State *L, int idx, int nargs, const char *what) {
+  lua_State *co = lua_tothread(L, idx);
+  int nres = 0, st;
+  if (co == NULL) {
+    printf("[FAIL] %s: not a thread\n", what);
+    failures++; checks++;
+    return 0;
+  }
+  st = lua_resume(co, L, nargs, &nres);
+  if (st != LUA_OK && st != LUA_YIELD) {
+    printf("[FAIL] %s: resume failed: %s\n", what,
+           (lua_gettop(co) > 0) ? lua_tostring(co, -1) : "no message");
+    failures++; checks++;
+    return 0;
+  }
+  if (nres < 1) {
+    lua_pushnil(L);
+    return 1;
+  }
+  lua_xmove(co, L, nres);
+  if (nres > 1) lua_pop(L, nres - 1);
+  return 1;
+}
+
+
+static int resume_one (lua_State *L, int idx, const char *what) {
+  return resume_with(L, idx, 0, what);
+}
+
+
+static void a_parked_thread_round_trips (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /*
+  ** The simplest real case: a coroutine parked in 'coroutine.yield', two Lua
+  ** frames deep, with locals live in both. Everything about it is written down --
+  ** the stack, the frame chain, each pc -- and nothing about it is on the C
+  ** stack, which is what 10.2 says makes hibernation possible at all.
+  */
+  if (parked(L, "local function inner(a, b)\n"
+                "  local sum = a + b\n"
+                "  coroutine.yield('parked')\n"
+                "  return sum * 2\n"
+                "end\n"
+                "local function outer()\n"
+                "  local tag = 'outer'\n"
+                "  return tag .. ':' .. inner(20, 1)\n"
+                "end\n"
+                "return outer()\n") == NULL) { lua_settop(L, base); return; }
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  ok(lua_type(L, copy) == LUA_TTHREAD, "a suspended coroutine comes back as one");
+  ok(lua_type(L, copy) == LUA_TTHREAD &&
+     diluvium_shim_status(lua_tothread(L, copy)) == LUA_YIELD,
+     "and it is still suspended");
+  ok(lua_type(L, copy) == LUA_TTHREAD &&
+     diluvium_shim_framecount(lua_tothread(L, copy)) ==
+     diluvium_shim_framecount(lua_tothread(L, base + 1)),
+     "with the same number of frames as the original");
+  /* The assertion that matters: it runs on from where it was parked, through the
+     rest of both functions, using locals that were live at the yield. */
+  if (resume_one(L, copy, "resuming the restored thread")) {
+    const char *got = lua_tostring(L, -1);
+    ok(got != NULL && strcmp(got, "outer:42") == 0,
+       "and resuming it finishes both frames using the locals it parked with");
+    if (got != NULL && strcmp(got, "outer:42") != 0)
+      printf("      (got %s, wanted outer:42)\n", got);
+  }
+  lua_settop(L, base);
+}
+
+
+static void the_original_thread_still_works (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* Capturing must be a read. If it disturbed the thread it walked, an agent
+     would break by being snapshotted -- and the obvious way to write a capture
+     is to consume the stack it is reading. */
+  if (parked(L, "local n = 7 coroutine.yield() return n * 6") == NULL) {
+    lua_settop(L, base);
+    return;
+  }
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  if (resume_one(L, base + 1, "resuming the original")) {
+    ok(lua_tointeger(L, -1) == 42, "the captured thread still runs afterwards");
+    lua_pop(L, 1);
+  }
+  if (resume_one(L, copy, "resuming the copy"))
+    ok(lua_tointeger(L, -1) == 42, "and so does the copy, independently");
+  lua_settop(L, base);
+}
+
+
+static void a_thread_and_its_data_stay_connected (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* The thread and a table are both in the graph, and the thread holds the table
+     in a local. After a round trip the restored thread must be writing to the
+     restored table, not to a private copy of it. */
+  if (!build(L, "local shared = {count = 0}\n"
+                "local co = coroutine.create(function()\n"
+                "  coroutine.yield()\n"
+                "  shared.count = shared.count + 1\n"
+                "end)\n"
+                "coroutine.resume(co)\n"
+                "return {co = co, data = shared}\n")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "co");
+  if (resume_one(L, lua_gettop(L), "resuming the restored thread")) {
+    lua_pop(L, 1);
+    at(L, copy, "data.count");
+    ok(lua_tointeger(L, -1) == 1,
+       "a restored thread writes to the restored table, not a copy of it");
+    if (lua_tointeger(L, -1) != 1)
+      printf("      (count is %d)\n", (int)lua_tointeger(L, -1));
+  }
+  lua_settop(L, base);
+}
+
+
+static void an_open_upvalue_stays_open (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /*
+  ** The case UPOPEN exists for. The coroutine has a local 'n' and hands out a
+  ** closure over it, so that closure's upvalue is *open* against the coroutine's
+  ** stack. Writing its value instead of its alias passes a naive test -- the
+  ** closure reads the right number -- and fails this one, which resumes the
+  ** coroutine so it writes to 'n' and then asks the closure what it sees.
+  */
+  if (!build(L, "local co, get\n"
+                "co = coroutine.create(function()\n"
+                "  local n = 1\n"
+                "  get = function() return n end\n"
+                "  coroutine.yield()\n"
+                "  n = 99\n"
+                "  coroutine.yield()\n"
+                "end)\n"
+                "coroutine.resume(co)\n"
+                "return {co = co, get = get}\n")) return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "get");
+  if (call0(L, -1, 1)) {
+    ok(lua_tointeger(L, -1) == 1, "the closure sees the value it was parked with");
+    lua_pop(L, 2);
+  }
+  else { ok(0, "the closure sees the value it was parked with"); lua_pop(L, 1); }
+  at(L, copy, "co");
+  if (resume_one(L, lua_gettop(L), "resuming so it writes to the local")) {
+    lua_pop(L, 2);
+    at(L, copy, "get");
+    if (call0(L, -1, 1))
+      ok(lua_tointeger(L, -1) == 99,
+         "and after the coroutine writes to that local the closure sees it, so "
+         "the upvalue is still open");
+    else
+      ok(0, "and after the coroutine writes to that local the closure sees it");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_pending_close_round_trips (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /*
+  ** 14 calls this the highest-coverage single test available, and the reason is
+  ** that 'defer' desugars to a to-be-closed local holding a self-referential
+  ** 'setmetatable(t, t)' -- so one case exercises 'tbclist' capture, closure
+  ** serialization and ext 0x04 backreferences at once. Written with 'defer'
+  ** itself, so it is the real desugaring rather than an imitation.
+  */
+  if (parked(L, "CLOSED = false\n"
+                "local function work()\n"
+                "  defer CLOSED = true\n"
+                "  coroutine.yield('mid')\n"
+                "  return 'done'\n"
+                "end\n"
+                "return work()\n") == NULL) { lua_settop(L, base); return; }
+  {
+    lua_State *orig = lua_tothread(L, base + 1);
+    int idx = 0;
+    ok(diluvium_shim_tbclist(orig, &idx) && idx > 0,
+       "the parked thread has a pending close");
+  }
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  {
+    lua_State *co = lua_tothread(L, copy);
+    int idx = 0;
+    ok(co != NULL && diluvium_shim_tbclist(co, &idx) && idx > 0,
+       "and so does the restored one");
+  }
+  lua_pushboolean(L, 0);
+  lua_setglobal(L, "CLOSED");
+  if (resume_one(L, copy, "resuming to the end")) {
+    const char *got = lua_tostring(L, -1);
+    ok(got != NULL && strcmp(got, "done") == 0,
+       "the restored thread runs to its end");
+    lua_pop(L, 1);
+    lua_getglobal(L, "CLOSED");
+    ok(lua_toboolean(L, -1),
+       "and its deferred block ran, so the to-be-closed slot was restored");
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_thread_inside_pcall_round_trips (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* 'pcall' puts a C frame *below* the yield, with a continuation -- so this is
+     the first case that needs the named-continuation table rather than the
+     NULL-continuation shortcut 'coroutine.yield' takes. The name is learned by
+     watching a canary, since 'finishpcall' is static in lbaselib.c and that file
+     is not on the patch-series allowlist. */
+  if (parked(L, "local ok, v = pcall(function()\n"
+                "  coroutine.yield('inside')\n"
+                "  return 'returned'\n"
+                "end)\n"
+                "return tostring(ok) .. ':' .. tostring(v)\n") == NULL) {
+    lua_settop(L, base);
+    return;
+  }
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  if (resume_one(L, copy, "resuming a thread parked inside pcall")) {
+    const char *got = lua_tostring(L, -1);
+    ok(got != NULL && strcmp(got, "true:returned") == 0,
+       "a thread parked inside 'pcall' resumes and the pcall still returns true");
+    if (got != NULL && strcmp(got, "true:returned") != 0)
+      printf("      (got %s)\n", got);
+  }
+  lua_settop(L, base);
+}
+
+
+static void an_agent_parked_on_wait_round_trips (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  lua_State *co;
+  int nres;
+  /*
+  ** The acceptance criterion 14 states for this milestone: an agent parked on
+  ** 'queue.wait' round-trips and resumes. It goes through dtask.c's driver,
+  ** because that is how a host parks a program, so the captured chain is the real
+  ** one -- the driver's C frame with its continuation, the guest's Lua frames, and
+  ** 'dq_wait' suspended on 'lua_yieldk' with 'dq_wait_k' saved.
+  **
+  ** Two C frames with continuations, which is what the named-continuation table
+  ** exists for, plus two things the permanents table has to name that no guest can
+  ** reach: the driver body itself, and 'wait''s light-userdata park marker.
+  */
+  co = lua_newthread(L);
+  diluvium_task_pushbody(co);
+  lua_pushnil(co);                        /* no message handler */
+  if (luaL_loadstring(co,
+        "local q = queue.declare('agent/inbox', {cap = 4})\n"
+        "local id, v = queue.wait({q})\n"
+        "return 'woke:' .. tostring(v)\n") != LUA_OK) {
+    printf("[FAIL] agent chunk does not load: %s\n", lua_tostring(co, -1));
+    failures++; checks++;
+    lua_settop(L, base);
+    return;
+  }
+  lua_resume(co, L, 2, &nres);
+  if (diluvium_shim_status(co) != LUA_YIELD) {
+    printf("[FAIL] the agent did not park (status %d: %s)\n",
+           diluvium_shim_status(co),
+           (lua_gettop(co) > 0) ? lua_tostring(co, -1) : "no message");
+    failures++; checks++;
+    lua_settop(L, base);
+    return;
+  }
+  ok(1, "an agent parks on 'queue.wait' through the driver");
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  ok(lua_type(L, copy) == LUA_TTHREAD &&
+     diluvium_shim_status(lua_tothread(L, copy)) == LUA_YIELD,
+     "and the restored agent is still parked");
+  {
+    lua_State *rc = lua_tothread(L, copy);
+    int n = (rc == NULL) ? 0 : diluvium_shim_framecount(rc);
+    int i, withk = 0;
+    for (i = 0; i < n; i++) {
+      diluvium_frame f;
+      if (diluvium_shim_frame(rc, i, &f) && f.is_c && f.has_k)
+        withk++;
+    }
+    okf(withk >= 2, "with both of its C continuations restored", withk, 2);
+  }
+  /*
+  ** And it wakes. The message goes into the queue by *name*, since 10.8 says
+  ** handles do not survive a restore -- and the host has to answer the wait
+  ** through 'diluvium_queue_fire' before resuming, which is 8.3's protocol and
+  ** not something the restore can invent. Getting that wrong is what made the
+  ** first version of this test look like a restore bug.
+  */
+  {
+    lua_Integer id = diluvium_queue_find(L, "agent/inbox");
+    ok(id > 0, "the queue is still there to be found by name");
+    if (id > 0) {
+      lua_State *rc = lua_tothread(L, copy);
+      lua_pushliteral(L, "hello");
+      diluvium_msgpack_encode(L, -1);
+      {
+        size_t mlen;
+        const char *m = lua_tolstring(L, -1, &mlen);
+        diluvium_queue_push_bytes(L, id, m, mlen);
+      }
+      lua_pop(L, 2);
+      diluvium_queue_fire(rc, id, DILUVIUM_FIRED_READY);
+      if (resume_with(L, copy, 2, "waking the restored agent")) {
+        const char *got = lua_tostring(L, -1);
+        ok(got != NULL && strcmp(got, "woke:hello") == 0,
+           "and the restored agent wakes with the message and finishes");
+        if (got != NULL && strcmp(got, "woke:hello") != 0)
+          printf("      (got %s, wanted woke:hello)\n", got);
+      }
+    }
+  }
+  lua_settop(L, base);
+}
+
+
+static void a_restored_agent_reports_its_waitset (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  lua_State *co, *rc;
+  int nres;
+  /*
+  ** What a host actually does with a restored agent, and the property that closes
+  ** a real gap: before resuming, it has to read the wait-set to know what the
+  ** agent is waiting for. 8.3's protocol gets that from the value count
+  ** 'lua_resume' reported when the thread yielded -- which after a restore comes
+  ** from 'u2.nyield', a field the capture has to carry deliberately.
+  **
+  ** Written because zeroing 'nyield' in the restore broke nothing: every other
+  ** thread case resumes to completion, and none of them ever asks the restored
+  ** thread what it was waiting for.
+  */
+  co = lua_newthread(L);
+  diluvium_task_pushbody(co);
+  lua_pushnil(co);
+  if (luaL_loadstring(co,
+        "local q = queue.declare('agent/waitset', {cap = 2})\n"
+        "local id, v = queue.wait({q}, 500)\n"
+        "return tostring(v)\n") != LUA_OK) {
+    ok(0, "waitset agent loads");
+    lua_settop(L, base);
+    return;
+  }
+  lua_resume(co, L, 2, &nres);
+  if (diluvium_shim_status(co) != LUA_YIELD) {
+    ok(0, "the waitset agent parks");
+    lua_settop(L, base);
+    return;
+  }
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  rc = lua_tothread(L, copy);
+  ok(rc != NULL, "the agent restored");
+  if (rc == NULL) { lua_settop(L, base); return; }
+  {
+    diluvium_waitset ws;
+    int n = diluvium_shim_nyield(rc);
+    memset(&ws, 0, sizeof(ws));
+    okf(n > 0, "the restored thread reports how many values it yielded", n, 1);
+    ok(diluvium_queue_waitset(rc, n, &ws),
+       "and the host can read its wait-set back out of it");
+    okf(ws.n == 1, "naming one queue", ws.n, 1);
+    okf(ws.timeout_ms == 500, "with the timeout it parked with",
+        (long)ws.timeout_ms, 500);
+    okf(ws.mode == DILUVIUM_WAIT_READ, "waiting to read", ws.mode,
+        DILUVIUM_WAIT_READ);
+    if (ws.n == 1) {
+      /* And the handle it names must be the one that queue now has, since 10.8
+         re-resolves by name rather than trusting the stored handle. */
+      okf(ws.ids[0] == diluvium_queue_find(L, "agent/waitset"),
+          "and the handle it names resolves to that queue",
+          (long)ws.ids[0], (long)diluvium_queue_find(L, "agent/waitset"));
+    }
+  }
+  lua_settop(L, base);
+}
+
+
+static void an_uncapturable_thread_is_refused (lua_State *L) {
+  int base = lua_gettop(L);
+  /* 10.7 applies to every thread in the graph, not only a top-level one. A dead
+     coroutine has no frames, so there is nothing to resume; refusing beats
+     restoring something that cannot run. */
+  if (!build(L, "local co = coroutine.create(function() return 1 end)\n"
+                "coroutine.resume(co)\n"
+                "return {child = co}\n")) return;
+  lua_pushcfunction(L, protected_encode);
+  lua_insert(L, -2);
+  if (lua_pcall(L, 1, 1, 0) == LUA_OK)
+    ok(0, "a dead thread in the graph is refused");
+  else {
+    const char *msg = lua_tostring(L, -1);
+    ok(msg != NULL && strstr(msg, "thread") != NULL,
+       "a dead thread in the graph is refused");
+    if (msg != NULL && strstr(msg, "thread") == NULL)
+      printf("      (%s)\n", msg);
+  }
+  lua_settop(L, base);
+}
+
+
+static void the_running_thread_cannot_capture_itself (lua_State *L) {
+  int base = lua_gettop(L);
+  if (!build(L, "return {me = coroutine.running()}")) return;
+  lua_pushcfunction(L, protected_encode);
+  lua_insert(L, -2);
+  if (lua_pcall(L, 1, 1, 0) == LUA_OK)
+    ok(0, "a thread cannot capture itself");
+  else {
+    const char *msg = lua_tostring(L, -1);
+    ok(msg != NULL, "a thread cannot capture itself");
+    if (msg != NULL) printf("      (%s)\n", msg);
+  }
+  lua_settop(L, base);
+}
+
+
 int main (void) {
   lua_State *L = luaL_newstate();
   if (L == NULL) {
@@ -1778,6 +2246,18 @@ int main (void) {
   a_c_function_is_named_not_copied(L);
   a_library_table_is_named_not_copied(L);
   a_snapshot_of_a_global_closure_is_small(L);
+
+  printf("\n=== suspended threads (10.3, 10.7) ===\n");
+  a_parked_thread_round_trips(L);
+  the_original_thread_still_works(L);
+  a_thread_and_its_data_stay_connected(L);
+  an_open_upvalue_stays_open(L);
+  a_pending_close_round_trips(L);
+  a_thread_inside_pcall_round_trips(L);
+  an_agent_parked_on_wait_round_trips(L);
+  a_restored_agent_reports_its_waitset(L);
+  an_uncapturable_thread_is_refused(L);
+  the_running_thread_cannot_capture_itself(L);
 
   printf("\n=== content-addressed prototypes (10.5) and secure code (10.9) ===\n");
   a_shared_prototype_is_carried_once(L);
