@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <errno.h>
 #include <signal.h>
 
 #include "lua.h"
@@ -199,6 +200,38 @@ static lua_State *mainL = NULL;
 static void task_running (lua_State *co, void *ud) {
   (void)ud;
   globalL = (co != NULL) ? co : mainL;
+}
+
+
+/*
+** Diluvium: the clock, which 8.3 puts on the host side rather than in the
+** runtime. This is the whole of what makes '--task' a reference host: a
+** program parks, the driver hands over a duration, and this decides.
+**
+** For a single-threaded CLI over local queues the honest answer to an
+** indefinite wait is that it can never be satisfied -- nothing else can write
+** while the program is parked -- so it reports a deadlock rather than hanging
+** forever. A finite wait really does let the time pass, because a program that
+** measures its own timeouts should see them.
+*/
+#if defined(LUA_USE_POSIX)
+#include <time.h>
+#endif
+
+static int task_waiting (lua_Integer ms, void *ud) {
+  (void)ud;
+  if (ms < 0)
+    return -1;  /* nothing here can write to a local queue while we are parked */
+#if defined(LUA_USE_POSIX)
+  {
+    struct timespec ts;
+    ts.tv_sec = (time_t)(ms / 1000);
+    ts.tv_nsec = (long)((ms % 1000) * 1000000L);
+    while (nanosleep(&ts, &ts) != 0 && errno == EINTR)
+      ;  /* a signal is not the end of the wait; SIGINT is handled by the hook */
+  }
+#endif
+  return 0;  /* the time passed and nothing arrived */
 }
 
 
@@ -753,6 +786,7 @@ static int pmain (lua_State *L) {
   if (args & has_task) {  /* Diluvium: run chunks coroutine-hosted */
     task_mode = 1;
     diluvium_task_sethook(task_running, NULL);
+    diluvium_task_setwait(task_waiting, NULL);
   }
   if (args & has_v)  /* option '-v'? */
     print_version();

@@ -55,6 +55,7 @@ static const char DQ_STATE = 0;
 #define DQ_REJECT	0
 #define DQ_DROP_OLDEST	1
 #define DQ_DROP_NEWEST	2
+#define DQ_BLOCK	3
 
 static const char *const dq_full_names[] = {
   "reject", "drop_oldest", "drop_newest", "block", NULL
@@ -107,6 +108,29 @@ static void dq_get (lua_State *L, lua_Integer id) {
       luaL_error(L, "queue: %I is not a queue handle", id);
   }
   lua_remove(L, -2);  /* drop the state table, leave the queue */
+}
+
+
+/*
+** Classify a handle without raising: 0 never issued, 1 live, 2 destroyed.
+**
+** 'push' and 'pop' raise on either, and should: they are operations *on* a
+** queue and have no way to express "it is gone". 'wait' is different -- it
+** waits *for* queues, 6.3 says it resumes when a listed one is disabled or
+** destroyed, and 6.4 gives that its own status. So a destroyed handle in a
+** wait-set is a lifecycle event and fires "closed", while a handle that was
+** never issued stays an error, because that is a typo rather than a lifecycle.
+** Without the distinction, a destroyed sibling would abort a wait that another
+** listed queue could have satisfied.
+*/
+static int dq_classify (lua_State *L, lua_Integer id) {
+  int t;
+  dq_state(L);
+  t = lua_rawgeti(L, -1, id);
+  lua_pop(L, 2);
+  if (t == LUA_TTABLE) return 1;
+  if (t == LUA_TBOOLEAN) return 2;
+  return 0;
 }
 
 
@@ -188,10 +212,6 @@ static int dq_declare (lua_State *L) {
     }
     lua_pop(L, 1);
     on_full = dq_opt_enum(L, 2, DQ_FULL, dq_full_names, DQ_REJECT);
-    if (on_full == 3)  /* "block" */
-      return luaL_error(L, "queue: on_full 'block' needs the wait-set "
-                           "protocol, which this build does not have yet; "
-                           "'reject' or a drop policy is available now");
     direction = dq_opt_enum(L, 2, DQ_DIRECTION, dirs, 0);
     lua_getfield(L, 2, DQ_EXPORTED);
     exported = lua_toboolean(L, -1);
@@ -262,6 +282,127 @@ static int dq_destroy (lua_State *L) {
 
 
 /* ======================================================================
+** Parking: the wait-set protocol (8.3)
+** ====================================================================== */
+
+/*
+** The first value a parked program yields, so a host can tell this yield from
+** an ordinary 'coroutine.yield' it has no business interpreting. A light
+** userdata whose address is a static here, which no guest can forge.
+*/
+static const char DQ_PARK_MARK = 0;
+
+static void dq_park_mark (lua_State *L) {
+  lua_pushlightuserdata(L, (void *)&DQ_PARK_MARK);
+}
+
+
+/* Is this queue ready in the sense the wait-set asked for? */
+static int dq_is_ready (lua_State *L, int qidx, int mode) {
+  lua_Integer count = dq_field_int(L, qidx, DQ_COUNT);
+  if (mode == DILUVIUM_WAIT_WRITE)
+    return count < dq_field_int(L, qidx, DQ_CAP);
+  return count > 0;
+}
+
+
+/*
+** A queue that cannot ever satisfy the wait: a read that will never see a
+** message, or a write that will never see space. 6.3 says a wait resumes when
+** a listed queue is disabled or destroyed, and 6.4 calls that "closed".
+**
+** Disabled is only closed for a reader with nothing left to hand over --
+** disabling stops a queue accepting, not delivering, so a disabled queue with
+** messages in it still fires ready.
+*/
+static int dq_is_closed (lua_State *L, int qidx, int mode) {
+  if (dq_field_bool(L, qidx, DQ_ENABLED))
+    return 0;
+  if (mode == DILUVIUM_WAIT_WRITE)
+    return 1;  /* it will never accept again */
+  return dq_field_int(L, qidx, DQ_COUNT) == 0;
+}
+
+
+LUA_API int diluvium_queue_waitset (lua_State *co, int nres,
+                                    diluvium_waitset *ws) {
+  int base, i;
+  if (nres < 3)
+    return 0;  /* marker, mode, timeout at minimum */
+  base = lua_gettop(co) - nres + 1;
+  if (lua_touserdata(co, base) != (void *)&DQ_PARK_MARK)
+    return 0;  /* somebody else's yield */
+  ws->mode = (int)lua_tointeger(co, base + 1);
+  ws->timeout_ms = lua_tointeger(co, base + 2);
+  ws->n = nres - 3;
+  if (ws->n > DILUVIUM_WAIT_MAX)
+    ws->n = DILUVIUM_WAIT_MAX;
+  for (i = 0; i < ws->n; i++)
+    ws->ids[i] = lua_tointeger(co, base + 3 + i);
+  return 1;
+}
+
+
+LUA_API lua_Integer diluvium_queue_ready (lua_State *co,
+                                          const diluvium_waitset *ws,
+                                          int *why) {
+  int i;
+  /* Readiness first, across the whole set, before reporting any queue closed:
+     a message already waiting beats a sibling that has gone away, since the
+     program can still do something with it. */
+  for (i = 0; i < ws->n; i++) {
+    dq_state(co);
+    if (lua_rawgeti(co, -1, ws->ids[i]) == LUA_TTABLE &&
+        dq_is_ready(co, lua_gettop(co), ws->mode)) {
+      lua_pop(co, 2);
+      *why = DILUVIUM_FIRED_READY;
+      return ws->ids[i];
+    }
+    lua_pop(co, 2);
+  }
+  for (i = 0; i < ws->n; i++) {
+    int gone;
+    dq_state(co);
+    if (lua_rawgeti(co, -1, ws->ids[i]) != LUA_TTABLE)
+      gone = 1;  /* destroyed under the waiter */
+    else
+      gone = dq_is_closed(co, lua_gettop(co), ws->mode);
+    lua_pop(co, 2);
+    if (gone) {
+      *why = DILUVIUM_FIRED_CLOSED;
+      return ws->ids[i];
+    }
+  }
+  *why = DILUVIUM_FIRED_TIMEOUT;
+  return 0;
+}
+
+
+LUA_API void diluvium_queue_fire (lua_State *co, lua_Integer id, int why) {
+  lua_pushinteger(co, (why == DILUVIUM_FIRED_TIMEOUT) ? 0 : id);
+  lua_pushinteger(co, why);
+}
+
+
+/*
+** Refuse to park, with a message specific enough to act on (8.4).
+**
+** Note what is NOT here: 'pcall'. Yielding across a protected call has been
+** legal since Lua 5.2 and works in this tree, so a wait inside one must
+** succeed. The first draft of the design listed it, which would have removed
+** capability standard Lua has.
+*/
+static int dq_cannot_park (lua_State *L, const char *what) {
+  return luaL_error(L,
+    "queue: cannot %s here -- this code is not yieldable. That happens inside "
+    "a table.sort comparator, a string.gsub replacement, a __gc finaliser, a "
+    "metamethod called from C, or on the main thread when the program was not "
+    "started by a host that resumes it (try --task). Restructure so the wait "
+    "happens on the program's own thread.", what);
+}
+
+
+/* ======================================================================
 ** push / pop
 ** ====================================================================== */
 
@@ -272,6 +413,29 @@ static int dq_destroy (lua_State *L) {
 */
 static lua_Integer dq_slot (lua_Integer head, lua_Integer i, lua_Integer cap) {
   return ((head - 1 + i) % cap) + 1;
+}
+
+
+static int dq_push (lua_State *L);
+
+/*
+** Resumed after parking for space. The push is retried rather than assumed to
+** succeed: between the host firing and this running, nothing else in this
+** instance can have taken the slot -- but a host-managed queue is another
+** matter, and retrying costs one comparison and removes the assumption.
+*/
+static int dq_push_k (lua_State *L, int status, lua_KContext ctx) {
+  int why;
+  (void)status;
+  (void)ctx;
+  why = (int)lua_tointeger(L, -1);
+  lua_pop(L, 2);                  /* the handle and the reason */
+  if (why == DILUVIUM_FIRED_CLOSED) {
+    lua_pushboolean(L, 0);
+    lua_pushliteral(L, "disabled");
+    return 2;
+  }
+  return dq_push(L);              /* space appeared: try again */
 }
 
 
@@ -330,6 +494,18 @@ static int dq_push (lua_State *L) {
       lua_pushliteral(L, "dropped_oldest");
       return 2;
     }
+    else if (policy == DQ_BLOCK) {
+      /* 7.2: this is the only case in which a push waits at all, and it waits
+         on local capacity -- never on the destination's liveness. */
+      lua_pop(L, 2);              /* the encoded string and the items table */
+      if (!lua_isyieldable(L))
+        return dq_cannot_park(L, "push to a full 'block' queue");
+      dq_park_mark(L);
+      lua_pushinteger(L, DILUVIUM_WAIT_WRITE);
+      lua_pushinteger(L, -1);     /* no timeout: a blocking push has none */
+      lua_pushinteger(L, id);
+      return lua_yieldk(L, 4, (lua_KContext)id, dq_push_k);
+    }
     else {  /* "reject" */
       lua_pop(L, 2);
       lua_pushboolean(L, 0);
@@ -386,6 +562,140 @@ static int dq_pop (lua_State *L) {
   dq_set_int(L, q, DQ_COUNT, count - 1);
   lua_pushliteral(L, "ok");
   return 2;  /* value, "ok" -- the value is below the status on the stack */
+}
+
+
+/* ======================================================================
+** wait
+** ====================================================================== */
+
+/*
+** Take the message at the head of a queue and push it, the way 'pop' does.
+** Shared so that a wait which fires and a plain pop cannot drift apart.
+*/
+static void dq_take (lua_State *L, int q) {
+  lua_Integer cap = dq_field_int(L, q, DQ_CAP);
+  lua_Integer count = dq_field_int(L, q, DQ_COUNT);
+  lua_Integer head = dq_field_int(L, q, DQ_HEAD);
+  size_t len;
+  const char *s;
+  lua_getfield(L, q, DQ_ITEMS);
+  lua_rawgeti(L, -1, head);
+  s = lua_tolstring(L, -1, &len);
+  if (s == NULL)
+    luaL_error(L, "queue: slot %I is not a message", head);
+  diluvium_msgpack_decode(L, s, len);   /* items str value */
+  lua_pushnil(L);
+  lua_rawseti(L, -4, head);
+  dq_set_int(L, q, DQ_HEAD, (head % cap) + 1);
+  dq_set_int(L, q, DQ_COUNT, count - 1);
+  lua_remove(L, -2);                    /* drop the raw string */
+  lua_remove(L, -2);                    /* drop the items table */
+}
+
+
+static int dq_wait_k (lua_State *L, int status, lua_KContext ctx) {
+  lua_Integer id;
+  int why;
+  (void)status;
+  (void)ctx;
+  why = (int)lua_tointeger(L, -1);
+  id = lua_tointeger(L, -2);
+  lua_pop(L, 2);
+  if (why == DILUVIUM_FIRED_TIMEOUT) {
+    lua_pushnil(L);
+    lua_pushnil(L);
+    lua_pushliteral(L, "timeout");
+    return 3;
+  }
+  if (why == DILUVIUM_FIRED_CLOSED) {
+    lua_pushinteger(L, id);
+    lua_pushnil(L);
+    lua_pushliteral(L, "closed");
+    return 3;
+  }
+  /* Ready. Take the message, so a caller never has to pop separately and a
+     message can never be reported ready and then lost to another waiter. */
+  dq_get(L, id);
+  dq_take(L, lua_gettop(L));            /* q value */
+  lua_remove(L, -2);
+  lua_pushinteger(L, id);
+  lua_insert(L, -2);                    /* id value */
+  lua_pushliteral(L, "ok");
+  return 3;
+}
+
+
+/*
+** queue.wait(ids, timeout_ms) -> id, value, status
+**
+** Yields. It returns without yielding when the wait can be satisfied
+** immediately, which is not only an optimisation: it means a wait that has a
+** message ready works even where a yield would be illegal, so the 8.4
+** diagnostic fires only when the program would genuinely have had to park.
+*/
+static int dq_wait (lua_State *L) {
+  lua_Integer timeout;
+  int n, i, why;
+  lua_Integer id;
+  luaL_checktype(L, 1, LUA_TTABLE);
+  timeout = luaL_optinteger(L, 2, -1);
+  n = (int)luaL_len(L, 1);
+  if (n <= 0)
+    return luaL_error(L, "queue.wait needs at least one handle");
+  if (n > DILUVIUM_WAIT_MAX)
+    return luaL_error(L, "queue.wait takes at most %d handles; waiting on more "
+                         "than that is a routing problem, and 7.4 says routing "
+                         "belongs in a program", DILUVIUM_WAIT_MAX);
+  /* Validate before anything else, so a typo is an error at the call rather
+     than a queue silently missing from the set -- but a destroyed handle is
+     allowed through to fire "closed"; see 'dq_classify'. */
+  for (i = 1; i <= n; i++) {
+    lua_rawgeti(L, 1, i);
+    if (!lua_isinteger(L, -1))
+      return luaL_error(L, "queue.wait: entry %d of the list is not a handle", i);
+    if (dq_classify(L, lua_tointeger(L, -1)) == 0)
+      return luaL_error(L, "queue.wait: entry %d is %I, which is not a queue "
+                           "handle", i, lua_tointeger(L, -1));
+    lua_pop(L, 1);
+  }
+
+  {
+    diluvium_waitset ws;
+    ws.mode = DILUVIUM_WAIT_READ;
+    ws.timeout_ms = timeout;
+    ws.n = n;
+    for (i = 0; i < n; i++) {
+      lua_rawgeti(L, 1, i + 1);
+      ws.ids[i] = lua_tointeger(L, -1);
+      lua_pop(L, 1);
+    }
+    id = diluvium_queue_ready(L, &ws, &why);
+    if (why != DILUVIUM_FIRED_TIMEOUT) {
+      /* Satisfiable now: answer without parking. */
+      lua_pushinteger(L, id);
+      lua_pushinteger(L, why);
+      return dq_wait_k(L, LUA_OK, 0);
+    }
+  }
+
+  /* A zero timeout is a poll, and polling must never park. */
+  if (timeout == 0) {
+    lua_pushnil(L);
+    lua_pushnil(L);
+    lua_pushliteral(L, "timeout");
+    return 3;
+  }
+
+  if (!lua_isyieldable(L))
+    return dq_cannot_park(L, "wait on a queue");
+
+  dq_park_mark(L);
+  lua_pushinteger(L, DILUVIUM_WAIT_READ);
+  lua_pushinteger(L, timeout);
+  for (i = 1; i <= n; i++)
+    lua_rawgeti(L, 1, i);
+  return lua_yieldk(L, 3 + n, 0, dq_wait_k);
 }
 
 
@@ -463,6 +773,7 @@ static const luaL_Reg dq_lib[] = {
   {"destroy", dq_destroy},
   {"push", dq_push},
   {"pop", dq_pop},
+  {"wait", dq_wait},
   {"enable", dq_enable},
   {"disable", dq_disable},
   {"len", dq_len},

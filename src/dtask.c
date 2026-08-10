@@ -14,15 +14,24 @@
 
 #include "lauxlib.h"
 #include "dtask.h"
+#include "dqueue.h"
 
 
 static diluvium_task_hook task_hook = NULL;
 static void *task_hook_ud = NULL;
+static diluvium_task_wait task_wait = NULL;
+static void *task_wait_ud = NULL;
 
 
 LUA_API void diluvium_task_sethook (diluvium_task_hook hook, void *ud) {
   task_hook = hook;
   task_hook_ud = ud;
+}
+
+
+LUA_API void diluvium_task_setwait (diluvium_task_wait fn, void *ud) {
+  task_wait = fn;
+  task_wait_ud = ud;
 }
 
 
@@ -136,6 +145,56 @@ LUA_API int diluvium_task_call (lua_State *L, int nargs, int nres,
 
   notify(co);
   status = lua_resume(co, L, nargs + 2, &got);
+  /*
+  ** Drive the program while it parks. This loop is what makes a host a host
+  ** rather than a launcher: the runtime describes what it is waiting for and
+  ** this decides what to do about it, with the clock entirely on this side
+  ** (8.3). When a queue is bound to something beyond this instance, the same
+  ** loop serves -- only 'diluvium_queue_ready' learns more.
+  */
+  while (status == LUA_YIELD) {
+    diluvium_waitset ws;
+    lua_Integer fired;
+    int why;
+    if (!diluvium_queue_waitset(co, got, &ws)) {
+      /* Somebody else's yield. A host has no business guessing what an
+         ordinary 'coroutine.yield' from the top level meant, so say so. */
+      lua_settop(co, 0);
+      luaL_unref(L, LUA_REGISTRYINDEX, ref);
+      notify(NULL);
+      lua_pushliteral(L, "task yielded something that is not a wait-set; "
+                         "a top-level coroutine.yield has no host to answer it");
+      return DILUVIUM_TASK_YIELD;
+    }
+    lua_pop(co, got);  /* the yielded description; the answer replaces it */
+    for (;;) {
+      fired = diluvium_queue_ready(co, &ws, &why);
+      if (why != DILUVIUM_FIRED_TIMEOUT)
+        break;                      /* ready, or a queue went away */
+      if (ws.timeout_ms == 0)
+        break;                      /* a poll: report the timeout */
+      {
+        int r = (task_wait != NULL)
+                ? task_wait(ws.timeout_ms, task_wait_ud)
+                : ((ws.timeout_ms < 0) ? -1 : 0);
+        if (r > 0)
+          continue;                 /* something may have arrived; look again */
+        if (r == 0)
+          break;                    /* the time passed; report the timeout */
+        /* The host knows this can never be satisfied. Hanging would be worse
+           than saying so, and a program parked forever on a queue nothing can
+           write to is a bug worth surfacing at the moment it happens. */
+        lua_settop(co, 0);
+        luaL_unref(L, LUA_REGISTRYINDEX, ref);
+        notify(NULL);
+        lua_pushliteral(L, "deadlock: the program is waiting for a queue that "
+                           "nothing in this host can write to, with no timeout");
+        return DILUVIUM_TASK_ERROR;
+      }
+    }
+    diluvium_queue_fire(co, fired, why);
+    status = lua_resume(co, L, 2, &got);
+  }
   notify(NULL);
 
   if (status == LUA_OK) {

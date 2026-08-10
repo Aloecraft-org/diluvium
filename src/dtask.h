@@ -75,4 +75,27 @@ typedef void (*diluvium_task_hook) (lua_State *co, void *ud);
 
 LUA_API void diluvium_task_sethook (diluvium_task_hook hook, void *ud);
 
+
+/*
+** How the host waits.
+**
+** 8.3 puts the clock on the host side, so the driver never sleeps: when a
+** program parks with a timeout, this is asked to let that much time pass.
+** 'ms' is a relative duration in milliseconds, or negative for "no timeout,
+** wait until something happens".
+**
+** Return 1 when something may have changed and the wait-set should be
+** re-examined, 0 when the timeout elapsed with nothing arriving, and -1 when
+** the host knows the wait can never be satisfied -- a single-threaded CLI
+** waiting on local queues nothing else can write to, for instance. A -1 turns
+** into an error naming the deadlock, which is the honest answer and much
+** better than hanging.
+**
+** With no wait function installed, an indefinite park is reported as a
+** deadlock and a finite one times out immediately without any time passing.
+*/
+typedef int (*diluvium_task_wait) (lua_Integer ms, void *ud);
+
+LUA_API void diluvium_task_setwait (diluvium_task_wait fn, void *ud);
+
 #endif

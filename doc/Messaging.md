@@ -353,7 +353,16 @@ mistake and it fails by silently addressing the wrong queue.
 
 **Handles are therefore never reused within an instance.** A destroyed handle
 stays destroyed, so using a stale one raises instead of hitting whichever queue
-took its place. That converts the failure this section warns about from a wrong
+took its place.
+
+One exception, and it is principled rather than convenient: `queue.wait` accepts
+a **destroyed** handle and fires `"closed"` for it, while still raising for a
+handle that was never issued. `push` and `pop` are operations *on* a queue and
+have no way to express "it is gone"; `wait` waits *for* queues, 6.3 says it
+resumes when a listed one is disabled or destroyed, and 6.4 gives that its own
+status. Without the distinction a destroyed queue in a wait-set would abort a
+wait that a listed sibling could have satisfied — and a typo would still be
+silently accepted, which is why "never issued" stays an error. That converts the failure this section warns about from a wrong
 answer somewhere else into an error at the call site. The cost is that a program
 churning queues walks the handle space upward, which no real program does.
 
@@ -1337,13 +1346,38 @@ now pinned deliberately as its own test, since "a stage that cannot keep up does
 not grow, and the sender is told which messages did not make it" is the other
 half of *bounded, always*.
 
-**M3: yield-aware layer**
-`queue.wait`, `on_full = "block"`, `lua_isyieldable` guard with specific
-diagnostics per 8.4, wait-set protocol, the parked outcome in the REPL contract,
-and the corresponding Lab adjustment.
-Accept when: an agent parks and resumes correctly; a wait in each genuinely
-non-yieldable context of 8.4 raises a named error; **a wait inside `pcall`
-succeeds**, since that is legal Lua; the no-C-frame assertion passes.
+**M3: yield-aware layer** — done, apart from the REPL half.
+`queue.wait`, `on_full = "block"`, the wait-set protocol, the yieldability guard
+with 8.4's diagnostics, and the drive loop in `docall`'s `--task` branch — which
+is the point at which the CLI stopped being an entry and became a host.
+
+Accepted on `test/test_wait.lua`, 58 checks, run under `--task`: a satisfiable
+wait answering without parking; a wait picking whichever listed queue is ready,
+with readiness beating a closed sibling; a zero timeout polling; a finite timeout
+elapsing with wall clock actually passing, since the host owns the clock; a
+disabled queue delivering what it holds and only then reporting `"closed"`; a
+destroyed queue firing `"closed"` rather than raising; **a wait inside `pcall`
+and `xpcall` succeeding**; each genuinely non-yieldable context refusing by name;
+and a VM-dispatched metamethod parking happily, which is the half that keeps the
+previous item honest.
+
+Deadlock is reported rather than hung. Under a single-threaded CLI over local
+queues, nothing can write while the program is parked, so an indefinite wait can
+never be satisfied — the host says so and the program exits non-zero. That is the
+CLI's judgement and not the runtime's: 8.3 puts the clock, and therefore this
+call, on the host side. Checked in subprocesses, since the failure mode being
+tested is "hangs forever".
+
+`queue.wait` takes at most 32 handles. A program waiting on more is describing a
+routing problem, and 7.4 says routing belongs in a program.
+
+Still open, deliberately: `repl_eval`, the parked-prompt question and the Lab
+adjustment. Nothing about them is blocked — `wasi_check.sh` drives the standalone
+binary, so `repl_eval` is not conformance-tested and can be converted whenever
+Lab is ready to answer what a prompt shows while a program waits.
+
+Sizes at `-O3` on linux-x86_64: queues 10.4 KB against 15 KB, msgpack 13.8 KB
+against 25 KB, driver 1.7 KB.
 
 **M4: instance C ABI plus reference host**
 Full `dv_*` surface minus snapshots, status codes, threading contract, version
@@ -1406,8 +1440,13 @@ Lean. Cover semantics and boundaries, not permutations.
   silently, since the handler still runs and still looks like it worked.
 - **Yield/resume.** One test per host binding: push in, agent wakes, agent pushes
   out, host receives.
-- **Non-yieldable rejection.** One test per context in 8.4, plus one asserting
-  that a yield inside `pcall` **succeeds**.
+- **Non-yieldable rejection** (`test/test_wait.lua`). One test per context in
+  8.4, plus one asserting a yield inside `pcall` **succeeds**, and one asserting
+  a VM-dispatched metamethod parks — the pair is what keeps the boundary from
+  drifting in either direction.
+- **Deadlock, not hang.** An indefinite park under a host that cannot satisfy it
+  reports and exits. Run as a subprocess, since the failure being tested is a
+  program that never returns.
 - **No-C-frame assertion.** Park an agent on `queue.wait` and verify the CallInfo
   chain has no continuation-less `CIST_C` frame below the wait. This property is
   what makes M6 possible and it will silently break during refactoring.

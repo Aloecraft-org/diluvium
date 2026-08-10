@@ -72,13 +72,15 @@ do
        "an unknown on_full is refused")
     ok(not pcall(queue.declare, "t/bad", {direction = "sideways"}),
        "an unknown direction is refused")
-    -- 'block' is in the grammar but needs the wait-set protocol. Refusing it
-    -- is better than treating it as 'reject', which would hand a program the
-    -- opposite of the backpressure it asked for and look like it worked.
-    local okk, err = pcall(queue.declare, "t/bad", {on_full = "block"})
-    ok(not okk, "on_full 'block' is refused in this milestone")
-    ok(tostring(err):find("wait", 1, true) ~= nil,
-       "and says what it is waiting on: " .. tostring(err))
+    -- 'block' was refused while the wait-set protocol did not exist; it is
+    -- accepted now. Its parking behaviour lives in test_wait.lua, which runs
+    -- under --task, because a push that parks needs a host to resume it. What
+    -- belongs here is that declaring it works and that a push with room behaves
+    -- like any other -- the part that does not need a host.
+    local b = queue.declare("t/block", {capacity = 2, on_full = "block"})
+    eq(queue.info(b).on_full, "block", "on_full 'block' is accepted")
+    eq(select(2, queue.push(b, 1)), "ok", "and a push with room does not park")
+    eq(select(2, queue.push(b, 2)), "ok", "up to capacity")
 end
 
 print("-- the status table in 6.4, one case per row")
