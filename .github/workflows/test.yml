@@ -151,6 +151,12 @@ jobs:
       - name: Check that the runtime fingerprint separates builds
         run: ./test/fingerprint_check.sh
 
+      # The release build catches what the amalgamation hides: a file that uses a
+      # core macro without including its header compiles in onelua.c and fails
+      # here. Two such bugs reached the tree before this was in the sweep.
+      - name: Build the platform target, which links each file separately
+        run: make build_platform
+
       # Needs a signal and a subprocess, so it cannot live in run_tests.sh.
       # The --task case is the one that regresses silently.
       - name: Check that Ctrl-C interrupts a runaway loop
