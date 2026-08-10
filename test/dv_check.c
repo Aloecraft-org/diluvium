@@ -47,6 +47,31 @@ static void eq_st (dv_status got, dv_status want, const char *what) {
 }
 
 
+/*
+** The payload of a msgpack string, NUL-terminated into 'out'.
+**
+** Assuming a one-byte header works only up to 31 bytes: past that the codec emits
+** str8 (0xd9) with a length byte, and 'buf + 1' then starts one byte early. Every
+** message here is an error string, which is exactly the length that crosses the
+** boundary, so the header is read rather than guessed.
+*/
+static const char *mp_str (const uint8_t *b, size_t n, char *out, size_t cap) {
+  size_t len, off;
+  out[0] = '\0';
+  if (n < 1) return out;
+  if ((b[0] & 0xe0) == 0xa0) { len = b[0] & 0x1f; off = 1; }
+  else if (b[0] == 0xd9 && n >= 2) { len = b[1]; off = 2; }
+  else if (b[0] == 0xda && n >= 3) { len = ((size_t)b[1] << 8) | b[2]; off = 3; }
+  else return out;
+  if (off + len > n) len = (n > off) ? n - off : 0;
+  if (len > cap - 1) len = cap - 1;
+  memcpy(out, b + off, len);
+  out[len] = '\0';
+  return out;
+}
+
+
+
 /* msgpack for a few small values, so the test needs no encoder of its own. */
 static const uint8_t MP_ONE[]   = { 0x01 };
 static const uint8_t MP_TWO[]   = { 0x02 };
@@ -314,24 +339,81 @@ static void timeout_answer (void) {
 }
 
 
+/*
+** The host names a handle that has gone away, and the runtime works out that it
+** has, so a host never has to model the difference.
+**
+** The version that used to stand here was called 'closed_answer' and its comment
+** said "naming it means gone", but it named a *live empty* queue and asserted
+** "timeout": the name and comment described one path and the assertion took
+** another. Trying to make it match turned up why it could not. A queue closes only
+** when the guest calls 'queue.destroy' or 'queue.disable', a parked guest cannot
+** call either, and the host has no call that closes one -- so
+** DILUVIUM_FIRED_CLOSED is *unreachable through 'dv_resume'*. The branch computing
+** it there is defensive, and the reachable path is the synchronous one asserted
+** below and in test_wait.lua: a wait on a queue that can never deliver fires at
+** once, so the host is never asked about it.
+*/
 static void closed_answer (void) {
-  /* The host names a handle; the runtime works out that it has gone away, so a
-     host never has to model the difference. */
   dv_instance *inst = load(
     "local q = queue.declare('c') "
-    "local id, v, status = queue.wait({q}) "
+    "queue.disable(q) "
     "local out = queue.declare('res', {exported = true}) "
-    "queue.push(out, status) return 0", 0);
+    "local id, v, status = queue.wait({q}) "
+    "queue.push(out, tostring(status)) return 0", 0);
   dv_waitset ws;
   uint8_t buf[32];
-  size_t n;
+  size_t n = 0;
   if (inst == NULL) { ok(0, "load"); return; }
-  eq_st(dv_run(inst, &ws), DV_IDLE, "it parks");
-  /* Nothing was pushed, and the queue is empty, so naming it means "gone". */
-  eq_st(dv_resume(inst, ws.ids[0]), DV_DONE, "the host names the handle anyway");
+  /* No park at all: a queue that can never deliver fires immediately, so the
+     program is finished by the time 'dv_run' returns and the host is never asked
+     to answer anything. */
+  eq_st(dv_run(inst, &ws), DV_DONE,
+        "a wait on a queue that can never deliver finishes without parking");
   dv_queue_pop(inst, dv_queue_lookup(inst, "res"), buf, sizeof(buf), &n);
-  ok(n == 8 && memcmp(buf + 1, "timeout", 7) == 0,
-     "and an unready handle reads as a timeout rather than a phantom message");
+  ok(n >= 7 && memcmp(buf + 1, "closed", 6) == 0,
+     "and the program is told the queue is gone");
+  if (!(n >= 7 && memcmp(buf + 1, "closed", 6) == 0))
+    printf("      (got %.*s)\n", (int)(n > 0 ? n - 1 : 0), (const char *)buf + 1);
+  dv_free(inst);
+}
+
+
+/*
+** Naming a live, empty queue does nothing at all.
+**
+** It used to synthesise a timeout, and that was a lie the program could not
+** detect: 6.3 defines "timeout" as 'queue.wait' having elapsed, and this program
+** passes no timeout, so it would be told one elapsed and then index the nil it was
+** handed. Passing 0 is the only way to say the timeout elapsed.
+*/
+static void a_spurious_resume_invents_nothing (void) {
+  dv_instance *inst = load(
+    "local q = queue.declare('c') "
+    "local out = queue.declare('res', {exported = true}) "
+    "local id, v, status = queue.wait({q}) "        /* no timeout */
+    "queue.push(out, tostring(status) .. '/' .. tostring(v)) return 0", 0);
+  dv_waitset ws;
+  uint8_t buf[64];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  eq_st(dv_run(inst, &ws), DV_IDLE, "it parks with no timeout");
+  eq_st(dv_resume(inst, ws.ids[0]), DV_IDLE,
+        "naming a live empty queue leaves it parked rather than resuming it");
+  ok(dv_waitset_get(inst, &ws) == DV_OK && ws.n == 1,
+     "and it is still waiting on the same handle, so the host may retry");
+  /* A real message then arrives and is delivered normally, which is the proof that
+     the no-op did not consume the park. */
+  dv_queue_push(inst, ws.ids[0], (const uint8_t *)"\xa2hi", 3);
+  eq_st(dv_resume(inst, ws.ids[0]), DV_DONE, "a real message resumes it");
+  dv_queue_pop(inst, dv_queue_lookup(inst, "res"), buf, sizeof(buf), &n);
+  {
+    char text[64];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strstr(msg, "ok/hi") != NULL,
+       "and the program sees the message, never a phantom timeout");
+    if (strstr(msg, "ok/hi") == NULL) printf("      (got %s)\n", msg);
+  }
   dv_free(inst);
 }
 
@@ -432,30 +514,6 @@ static int bind_ref (void *ud, const uint8_t *ref, size_t len,
 
 /* msgpack fixext1 with code 0x02 and one payload byte: an endpoint reference as
    it arrives in a message. */
-/*
-** The payload of a msgpack string, NUL-terminated into 'out'.
-**
-** Assuming a one-byte header works only up to 31 bytes: past that the codec emits
-** str8 (0xd9) with a length byte, and 'buf + 1' then starts one byte early. Every
-** message here is an error string, which is exactly the length that crosses the
-** boundary, so the header is read rather than guessed.
-*/
-static const char *mp_str (const uint8_t *b, size_t n, char *out, size_t cap) {
-  size_t len, off;
-  out[0] = '\0';
-  if (n < 1) return out;
-  if ((b[0] & 0xe0) == 0xa0) { len = b[0] & 0x1f; off = 1; }
-  else if (b[0] == 0xd9 && n >= 2) { len = b[1]; off = 2; }
-  else if (b[0] == 0xda && n >= 3) { len = ((size_t)b[1] << 8) | b[2]; off = 3; }
-  else return out;
-  if (off + len > n) len = (n > off) ? n - off : 0;
-  if (len > cap - 1) len = cap - 1;
-  memcpy(out, b + off, len);
-  out[len] = '\0';
-  return out;
-}
-
-
 static void ref_message (uint8_t *out, char c) {
   out[0] = 0xd4;
   out[1] = 0x02;
@@ -1169,6 +1227,7 @@ int main (void) {
   parking();
   timeout_answer();
   closed_answer();
+  a_spurious_resume_invents_nothing();
   blocking_push_from_guest();
   text_only();
   top_level_yield();

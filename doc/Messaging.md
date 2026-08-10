@@ -2648,6 +2648,27 @@ artifact between sessions that do not share context.
   correctly while asserting the wrong one. When a property is stated in prose and
   also asserted in a test, the two must be read against each other, because the test
   is what will be believed.
+- **`dv_resume` invented a timeout, and a test blessed it.** When a host named a
+  handle that was live, enabled and empty, the ABI reported `"timeout"` -- to a
+  program that had passed no timeout. 6.3 defines `"timeout"` as `queue.wait` having
+  elapsed, so a program written to the contract would take that branch and index the
+  nil it was handed. `fired == 0` is already how a host says the timeout elapsed, so
+  naming a live queue is a host mistake or a race between two threads that both saw a
+  message; both are now answered by staying parked and returning `DV_IDLE`, which the
+  host may simply retry. The CLI host had always done this — `dtask.c` loops rather
+  than synthesising a reason — so the two in-tree hosts of one protocol had disagreed.
+- **Chasing that test's own name found the branch is unreachable.** It was called
+  `closed_answer` and its comment said "naming it means gone", while it named a live
+  empty queue and asserted `"timeout"`. Rewriting it to actually reach
+  `DILUVIUM_FIRED_CLOSED` through `dv_resume` failed, and the reason is worth
+  recording: a queue closes only when the guest calls `queue.destroy` or
+  `queue.disable`, a parked guest cannot call either, and the host has no call that
+  closes one. So that branch in `dv_resume` is defensive, not live, and the reachable
+  path is synchronous — a wait on a queue that can never deliver fires at once and
+  the host is never asked. The test now asserts *that*, and says why the other thing
+  cannot be asserted. A test whose name, comment and assertion disagree is worth
+  chasing precisely because one of the three may be describing something real that
+  nothing checks.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

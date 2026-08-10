@@ -625,8 +625,27 @@ dv_status dv_resume (dv_instance *inst, dv_queue_id fired) {
     one.timeout_ms = 0;
     one.n = 1;
     one.ids[0] = (lua_Integer)fired;
-    if (diluvium_queue_ready(inst->co, &one, &why) == 0)
-      why = DILUVIUM_FIRED_TIMEOUT;  /* named a handle that is not ready */
+    if (diluvium_queue_ready(inst->co, &one, &why) == 0) {
+      /*
+      ** The named handle is neither ready nor closed, so nothing has happened to
+      ** it. This used to report a timeout, and that was a lie the guest could not
+      ** detect: 6.3 defines "timeout" as "queue.wait elapsed", and a program that
+      ** passed no timeout would receive one anyway -- then index the nil value it
+      ** was handed, which is what any program written to the documented contract
+      ** does next.
+      **
+      ** 'fired == 0' is already how a host says the timeout elapsed, so naming a
+      ** live empty queue is either a host mistake or a race between two threads
+      ** that both saw a message. Both are answered the same way: stay parked and
+      ** report DV_IDLE, so the resume is a no-op the host may retry. Nothing is
+      ** consumed -- the park's description stays on the stack and 'parked' stays
+      ** set -- which is why this returns before the three lines below.
+      **
+      ** This is also what the CLI host has always done over the same protocol:
+      ** dtask.c loops rather than synthesising a reason.
+      */
+      return DV_IDLE;
+    }
   }
   lua_pop(inst->co, inst->pending);   /* the park's description */
   inst->pending = 0;

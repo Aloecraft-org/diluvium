@@ -220,6 +220,12 @@ dv_status dv_run (dv_instance *inst, dv_waitset *out_waitset);
 ** has to model the difference.
 **
 ** Returns what 'dv_run' returns, including DV_IDLE if the program parks again.
+**
+** Naming a handle that is neither ready nor gone does nothing: the program stays
+** parked and this returns DV_IDLE, so the call may simply be retried. It used to
+** synthesise a timeout, which was a lie a program could not detect -- 6.3 defines
+** "timeout" as 'queue.wait' having elapsed, and a program that passed no timeout
+** would be told one had. Passing 0 remains the only way to say the timeout elapsed.
 */
 dv_status dv_resume (dv_instance *inst, dv_queue_id fired);
 
