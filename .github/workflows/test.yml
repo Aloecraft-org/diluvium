@@ -176,6 +176,14 @@ jobs:
       - name: Fuzz the msgpack token cursor
         run: make mp_cursor_fuzz
 
+      # Prints what a resident instance costs; asserts nothing. 18.2's profile A
+      # drops hibernation, so a deployment's density is bounded by the resident
+      # figure and not by a snapshot's size -- and that figure had never been
+      # measured. It is here so the number appears in every run's log and a drift
+      # is visible in the diff between two runs, which is the whole use for it.
+      - name: Measure what a resident instance costs
+        run: make footprint
+
       # The swarm layer as an actual library, which nothing built until now: 4.1,
       # 11.5 and 12.1 all call it a separate library and 12.1 lists a
       # diluvium-swarm archive among the release artifacts, but dvs.c was only ever

@@ -441,6 +441,17 @@ dshim_check: _build_step0
 	  $(CURDIR)/test/dshim_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dshim_check
 
+# What a resident instance costs, printed rather than asserted. 18.2's profile A
+# drops hibernation, so density is bounded by the resident figure and that figure
+# had never been measured -- see the header of test/footprint.c for why this
+# asserts nothing. Built without ltests.h: that build installs its own allocator
+# and its bookkeeping would be counted as the instance's.
+footprint: _build_step0
+	gcc -Wall -Wextra -O2 -std=c99 $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -o $(CURDIR)/dist/footprint \
+	  $(CURDIR)/test/footprint.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/footprint
+
 # Run the suite. Keeps going after a failure and prints a summary, so one
 # broken test does not mask the state of the rest. The list of tests and the
 # skip reasons live in test/run_tests.sh -- add new tests there, not here.
@@ -458,7 +469,8 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
-        snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib
+        snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib \
+        footprint
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua
