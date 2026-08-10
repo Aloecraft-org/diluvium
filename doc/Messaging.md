@@ -541,13 +541,18 @@ There are therefore two front doors, deliberately:
 | `lua.c` / the CLI | Stock Lua. Main thread, non-yieldable top level. | The upstream conformance suite |
 | The `dv_*` ABI, via `dtask.c` | Coroutine-hosted. Yieldable top level, parks on queues. | This document |
 
-The consequence worth stating plainly: **a program using `queue.wait` is not
-runnable by `diluvium foo.lua`.** The intended fix is an opt-in task mode on the
-CLI (`diluvium --task foo.lua`) that enters through the driver, making the CLI a
-reference host rather than only a script runner. That is a new path rather than a
-conversion, so it is conformance-safe, and it is also what would let messaging
-semantics be tested from the ordinary `.lua` suite instead of only from a C
-harness. Not built yet.
+`--task` on the CLI enters through the driver, so `diluvium --task foo.lua` runs
+a program that can wait while `diluvium foo.lua` stays stock. It is a new path
+rather than a conversion, which is what makes it conformance-safe, and it turns
+the CLI into a reference host rather than only a script runner. It is also what
+lets messaging semantics be tested from the ordinary `.lua` suite rather than a
+C harness per feature, which is why it was built before M1.
+
+`--task` is refused together with `-i`: what an interactive session should show
+while a program is parked is a real question, and combining the two would answer
+it by accident. When `queue.wait` lands, the wait-set drive loop belongs in
+`docall`'s task branch -- that is the point at which this mode stops being an
+entry and becomes a host.
 
 "Task" rather than "agent" deliberately: 4.0 makes "agent" an application word for
 a program holding a capability, so naming a runtime entry point after it would be
@@ -1215,9 +1220,18 @@ Sequenced first because the entry shape is the part that is painful to retrofit,
 and separated from M3 because "what does the prompt do while parked" is a UX
 question that deserves a considered answer rather than a same-day one.
 
-Not covered, and stated rather than implied: the SIGINT hook has no test, because
-with the CLI unconverted there is no path on which Ctrl-C can regress. It needs
-one at the same time as the first caller that wires `globalL` to it.
+**M0b: `--task` on the CLI** — done.
+`collectargs` learns one long option; `docall` branches to the driver; `globalL`
+follows the running thread through the driver's hook. Refused with `-i`. Error
+output is byte-identical between modes, checked by hand against the same failing
+script.
+
+Accepted on: `coroutine.isyieldable()` false by default and true under `--task`;
+`--task -i` refused; and `test/interrupt_check.sh` asserting Ctrl-C interrupts a
+runaway loop in **both** modes. That last one closes the gap M0 left open --
+removing the `diluvium_task_sethook` call leaves the `--task` case running until
+the harness kills it, which is exactly the silent regression the hook exists to
+prevent, and it now has a test that catches it.
 
 **M1: msgpack codec**
 Port to 5.5, integer subtype, explicit array/map rule plus `as_array`/`as_map`,
@@ -1295,10 +1309,10 @@ Lean. Cover semantics and boundaries, not permutations.
   traceback across the state hop; argument and result counts past a fresh
   thread's free slots; the caller's stack unchanged; a top-level yield reported.
   In C because the driver has no guest binding by design.
-- **Interrupt.** Send SIGINT to a runaway loop and assert it is interrupted.
-  **Not written yet**, and only reachable once a caller wires `globalL` to the
-  driver's hook. Write it with that caller, not before, and do not treat the
-  hook's existence as coverage.
+- **Interrupt** (`test/interrupt_check.sh`, `make interrupt_check`). SIGINT to a
+  runaway loop, in both execution modes. Shell rather than Lua because it needs
+  a subprocess and a signal. The `--task` case is the one that regresses
+  silently, since the handler still runs and still looks like it worked.
 - **Yield/resume.** One test per host binding: push in, agent wakes, agent pushes
   out, host receives.
 - **Non-yieldable rejection.** One test per context in 8.4, plus one asserting

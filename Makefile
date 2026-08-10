@@ -265,6 +265,13 @@ failing_test_cases:
 # .lua suite to call yet. Built with the same debug flags as the suite, since
 # 'api_check' is where a stack-arithmetic mistake surfaces as an abort
 # instead of silent corruption.
+# Ctrl-C must interrupt a runaway loop in both execution modes. Shell rather
+# than Lua because it needs a subprocess and a signal, and nothing else in the
+# suite presses Ctrl-C -- see the header of test/interrupt_check.sh for the
+# hazard this exists to catch.
+interrupt_check: test_build
+	@$(CURDIR)/test/interrupt_check.sh --bin $(TEST_BIN)
+
 dtask_check: _build_step0
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
 	  -o $(CURDIR)/dist/dtask_check \

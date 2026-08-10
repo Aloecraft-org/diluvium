@@ -52,7 +52,7 @@ lvm.c       type-test R[A] in OP_SETLIST before reading it as a table (corrupt-b
 ltm.c       same table type-test for the vararg-table path in luaT_getvarargs
 luaconf.h   fixed string hash seed (deterministic pairs order)
 lua.h       Diluvium version/branding strings
-lua.c       Diluvium branding; REPL input handling moved to drepl.c
+lua.c       Diluvium branding; REPL input handling moved to drepl.c; --task delegates to dtask.c
 onelua.c    include analyze.c; rename ltests.c resetCI (amalgamation clash)
 '
 

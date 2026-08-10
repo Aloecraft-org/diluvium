@@ -121,6 +121,11 @@ jobs:
       - name: Run the call-driver contract tests
         run: make dtask_check
 
+      # Needs a signal and a subprocess, so it cannot live in run_tests.sh.
+      # The --task case is the one that regresses silently.
+      - name: Check that Ctrl-C interrupts a runaway loop
+        run: ./test/interrupt_check.sh --bin dist/diluvium_debug
+
   patch-guard:
     name: Core patch guard
     needs: resolve
