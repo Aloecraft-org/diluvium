@@ -173,6 +173,63 @@ dvs_id dvs_parent (dvs_swarm *sw, dvs_id id);
 dvs_status dvs_kill (dvs_swarm *sw, dvs_id id);
 
 
+/* ---------------------------------------------------- the snapshot cache -- */
+
+/*
+** 9.1.2 item 6. An instance that is not resident has no 'dv_instance' behind it at
+** all -- only its bytes -- which is the point: a swarm's cost at rest should be a
+** buffer per idle agent and not an interpreter per idle agent.
+**
+** How an instance comes to be non-resident. 10.1 makes hibernation self-initiated,
+** and it stays that way here: a program pushes '{op = "hibernate"}' to
+** 'system/lifecycle' and then parks, and the swarm swaps it out on the next drain.
+** Nothing swaps an instance out behind its back, because 'dv_snapshot' requires a
+** parked instance and only the program knows when it is at a point it is willing to
+** stop at.
+**
+** This is not yet 10.1's 'hibernate()' returning twice -- that is a guest function
+** M6 did not build, and the difference is visible: a program here parks with
+** 'queue.wait' and continues from the wait when it comes back, rather than
+** continuing from a call that returns 'true'. For the idle-on-inbox case 10.2 calls
+** "the overwhelmingly common state at scale" the two are the same thing; for a
+** program that wants to hibernate mid-computation they are not.
+*/
+
+/* Swap an instance out to the cache. It must be parked; a running or already
+   non-resident instance is refused rather than forced. */
+dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id);
+
+/* Bring one back. 'dvs_step' does this by itself when a message arrives for a
+   'wake_on_message' instance; a host may also ask directly. */
+dvs_status dvs_wake (dvs_swarm *sw, dvs_id id);
+
+/* 1 when there is a live instance behind the handle, 0 when it is cached or gone. */
+int dvs_resident (dvs_swarm *sw, dvs_id id);
+
+/* How large the instance's cached snapshot is, or 0 when it is resident. */
+size_t dvs_cached_size (dvs_swarm *sw, dvs_id id);
+
+
+/*
+** Push a message into an instance's queue by name -- the host's side of 8.4's
+** delivery table, and the only call that knows what to do about a non-resident
+** destination:
+**
+**   resident                          -> the queue, DVS_OK
+**   dead or unknown                   -> DVS_GONE, immediately, never blocking
+**   cached, with 'wake_on_message'    -> a bounded host buffer, DVS_OK; the
+**                                        instance is restored on the next step and
+**                                        the buffer drains ahead of live pushes
+**   cached, without 'wake_on_message' -> DVS_GONE
+**
+** The buffer is bounded, and a full one is DVS_LIMIT rather than a larger buffer:
+** 6.2's bounded queues exist so that backpressure is visible, and an unbounded
+** wake buffer would be the one place in the system where it was not.
+*/
+dvs_status dvs_push (dvs_swarm *sw, dvs_id id, const char *queue,
+                     const void *msg, size_t len);
+
+
 /*
 ** Does 'id' hold 'cap'?
 **

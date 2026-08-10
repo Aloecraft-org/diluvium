@@ -124,7 +124,7 @@ said would happen:
 | queue subsystem | under **20 KB** | 17.6 KB — `dqueue.c` 15.0 + `dendpoint.c` 2.6 |
 | instance C ABI | under 10 KB | 6.1 KB |
 | hibernate | under 30 KB | 22.7 KB — `dshim.c`, `dhash.c`, `dsnap.c` |
-| swarm layer | separate library, not counted | not built |
+| swarm layer | separate library, not counted | 11.0 KB — `dvs.c`, not linked into the runtime |
 
 The queue target moved from 15 KB, and the reason is worth recording rather than
 quietly adjusting: it was set against 6, which describes queues alone. What
@@ -872,12 +872,31 @@ instances throughout.
 
 | Name | Direction | Contents |
 |---|---|---|
-| `system/lifecycle` | guest writes | spawn, kill, query |
+| `system/lifecycle` | guest writes | spawn, kill, query, hibernate |
 | `system/events` | guest reads | child exited, faulted, exceeded budget |
 
 Monitor semantics only. **Do not implement Erlang-style bidirectional links.**
 One-directional monitoring covers supervision; links can be layered later if
 wanted.
+
+**As built.** Both queues are declared by the guest, like every other queue (6.1) —
+there is no host-side declaration and no special case. The swarm drains
+`system/lifecycle` only for an instance holding the `lifecycle` capability, so a
+program without it may declare the queue and write to it and nothing will ever read
+it. That is 9.3's "submits a request to a reviewer because it holds no capability"
+arrived at by mechanism rather than by a refusal at declare time.
+
+`hibernate` is a fourth op the draft did not list, and it belongs here rather than in
+a new mechanism: 10.1 makes hibernation self-initiated, and a program asking to be
+swapped out is asking for something the swarm layer owns (item 6). With an `id` it
+swaps out a descendant, on the same ancestry rule as `kill` — which is still
+self-initiated in the way that matters, since `dv_snapshot` requires a parked
+instance and the descendant chooses when to park.
+
+The events are `spawned`, `exited`, `faulted`, `exceeded`, `hibernated`, `throttled`,
+`denied`, and `status`. `spawned` and `denied` are additions the draft's list implies
+but does not state: a supervisor that cannot tell a successful spawn from a refused
+one cannot implement backoff, which 9.1.2 says is its job and not this layer's.
 
 ### 9.3 Capability attenuation
 
@@ -887,6 +906,12 @@ Attenuation only, enforced by the swarm layer, no exceptions.
 This is what makes a privilege hierarchy structural rather than conventional. An
 agent that must submit a request to a reviewer does so because it holds no
 capability for the target queue, not because it was asked politely.
+
+**As built:** checked before anything is created, so a refused spawn costs nothing
+and leaves nothing behind. Names match exactly or through a single trailing `*`,
+which is the one pattern 6.6 already shows (`queue:work/*`); a `*` anywhere else is a
+literal, because inventing a glob here would be doing 6.6's future work rather than
+leaving room for it.
 
 ### 9.4 Resource control
 
@@ -912,6 +937,33 @@ fine; yielding from one reintroduces the C-frame problem and breaks hibernate.
 | Push to a dead instance | `"gone"`, immediately, never blocking |
 | Push to a non-resident instance with `wake_on_message` | Accept into a bounded host buffer, return `"ok"`, restore asynchronously, drain the buffer ahead of live pushes |
 | Push to a non-resident instance without `wake_on_message` | `"gone"` |
+
+**Two corrections from building it.**
+
+*The rate limit defers; it does not deny.* The obvious reading of "rate-limit" is to
+consume the request and answer `"denied"`, and that is what the first version did. It
+turns a burst of ten spawns into three spawns and seven denials, and the seven
+denials then overrun a bounded `system/events` and displace real events. So the drain
+reads the op *before* taking a message off the queue and leaves a throttled spawn
+where it is, in the program's own bounded queue, emitting one `throttled` event per
+step rather than one per request. The burst arrives over the next few steps, in
+order, and nothing is lost. A rate limit that drops requests is a filter; the row
+means a rate.
+
+*`wake_on_message` is set by the sleeper, not by its parent.* The draft implies a
+spawn-time flag, and there is one, but the useful place to set it is the `hibernate`
+request: waking on a message is a property of the destination, and the program going
+to sleep is the only thing that knows whether it wants to be woken. A parent's
+spawn-time flag is a guess made earlier with less information, so it stands as the
+default and the request overrides it.
+
+*And one thing the row already had right, which is worth saying because it is easy to
+implement wrongly:* "drain the buffer ahead of live pushes" is a consequence of
+*where* the drain sits, not of any ordering logic. The buffer empties inside the
+wake, before the wake returns, and therefore before any live push can reach the new
+instance. An implementation that drained at the end of the step instead would satisfy
+every other clause of the row and get the ordering wrong; removing the placement is
+one of the mutations `dvs_check.c` is verified against.
 
 ---
 
@@ -1542,14 +1594,33 @@ closed). It owns the six items listed in 9.1.2 and requires a host-supplied
 vtable:
 
 ```c
-typedef struct {
-  void* (*create)(void* ud, const dv_spawn_req* req);
-  void  (*destroy)(void* ud, void* ctx);
-  int   (*drive)(void* ud, void* ctx);
-} dv_host_vtable;
+typedef struct dvs_host {
+  void *(*create) (void *ud, dvs_id id, dv_instance *inst);
+  void  (*destroy) (void *ud, dvs_id id, void *ctx);
+  /* 1 to keep going, 0 when the instance has finished or failed. */
+  int   (*drive) (void *ud, dvs_id id, dv_instance *inst, void *ctx);
+  void *ud;
+} dvs_host;
 ```
 
 Everything above that vtable is portable C. Everything below is the host's.
+
+**The draft's signatures were wrong in three ways, all found by writing a host.**
+`create` was handed a `dv_spawn_req` and expected to build the instance; but sizing
+a budget, loading a chunk and setting a stamp are the same in every host, and making
+each one redo them is how three hosts end up with three different orderings of the
+same three calls. So the swarm builds the instance and `create` is handed it, to
+associate whatever the host wants with it — a task handle, a thread, nothing at all.
+`drive` needed the instance for the same reason: a host driving one step calls
+`dv_run` or `dv_resume`, and it cannot do that from a `void *ctx` alone. And all
+three needed the `dvs_id`, because a host that logs, or that keeps its own table
+beside the swarm's, has no other way to name what it was handed. `ud` moved into the
+struct so the vtable is one thing to pass rather than two.
+
+The `create`/`destroy` pair is also what hibernation is written against: swapping an
+instance out destroys its context, and waking it calls `create` again with a new
+`dv_instance`. There is no reattach, because 11.5 gives a host no way to describe
+one and a context built for a freed instance is not worth keeping.
 
 ### 11.6 Version negotiation
 
@@ -2038,15 +2109,68 @@ stands between a deliberately rewritten snapshot and the interpreter.
 Not done: userdata `__persist` (ext 0x05). Refused by name, with a message saying
 so, which is what 10.7 item 2 specifies — and 10.3 records why the obvious design
 does not work, because that is worth more than a half-implementation that breaks
-when a userdata is referenced twice. The header's capability field is still
-compared against an empty set until M7.
+when a userdata is referenced twice.
 
-**M7: swarm layer**
+The header's capability field is still compared against an empty set, and M7 did not
+change that: the swarm holds each instance's capability set, but nothing carries it
+into a snapshot, so `dvs_hibernate` stamps nothing and a cached snapshot is not bound
+to the capabilities its instance held. Within one swarm that is sound — the set lives
+in the slot and the slot outlives the swap — but a snapshot written to disk and
+restored elsewhere would come back with whatever the restoring swarm grants. 10.10
+calls that the capability-check layer, and it is still the deferred one of the three.
+
+**M7: swarm layer** — done.
 Instance table, `system/lifecycle` and `system/events`, attenuation, budgets,
 orphan policy, rate limits, snapshot cache with `wake_on_message`.
 Accept when: a supervisor spawns and restarts children; a child cannot be granted
 capability the supervisor lacks; a message to a swapped-out instance wakes it and
-arrives in order ahead of live pushes.
+arrives in order ahead of live pushes. **All met.**
+
+`src/dvs.h` and `src/dvs.c` — 11.0 KB, a separate library (`libdiluvium-swarm`,
+prefix `dvs_`) that is not linked into the runtime. It includes `dv.h` and the
+codec's token cursor and nothing else from the tree; the Makefile compiles it apart
+from the amalgamation so a stray `lua.h` fails the build rather than passing
+unnoticed. That is 4.1's boundary made checkable instead of merely stated: the
+moment this file needs a `lua_State`, something has been put in the wrong layer.
+
+There is no supervisor type, which is 9.1's central claim rather than an omission.
+Every supervisor in `test/dvs_check.c` is a Diluvium program of a few lines — it
+declares `system/lifecycle` and `system/events`, pushes a spawn, waits for an event,
+and starts a replacement when it hears one exited. If any of those tests had needed a
+C-side restart policy that would have been evidence the layer had grown something
+9.1.2 says belongs in a program.
+
+66 checks. Each mitigation was verified by removing it and naming the test that goes
+red — attenuation, the lifecycle gate, the spawn-rate deferral, subtree recursion,
+the descendant rule on kill, handle non-reuse, the table bound, the wake buffer's
+bound, `wake_on_message`, and the placement of the buffer drain. Two of those
+removals turned *nothing* red, which is the case 17's rule exists for: both were weak
+tests rather than weak code (a child that exited before anyone looked at whether it
+had been created, and a rate check made one step too early — a step drains before it
+drives, so on the first step the root has not run and its queue is empty). A third
+removal is genuinely unreachable and is now commented as a guard rather than left
+looking load-bearing.
+
+Two things the codec taught this layer, both worth recording because neither is
+visible from the design:
+
+- **An empty Lua table is a map on the wire, not an array.** `mp_is_array` requires
+  at least one element, so `caps = {}` — the obvious way for a program to say "no
+  capabilities" — arrived as an empty map and was refused as malformed. A reader of
+  msgpack written by this codec must treat an empty map as an empty sequence. A
+  *non*-empty map is still an error, since that is a table with names in it.
+- **The reads go through the token cursor, not a second parser.** 5's "one codec
+  rather than three" would have been broken by the alternative, and the cursor is
+  cross-checked in `dvs_check.c` against the encoder that wrote the bytes, because
+  two entry points over one format are only trustworthy once they have been shown to
+  agree.
+
+What is *not* here: 10.1's `hibernate()` returning twice. M6 built `dv_snapshot` and
+`dv_restore` at the ABI and never built the guest function, so a program here asks to
+be swapped out through `system/lifecycle` and parks, and continues from the park when
+it comes back rather than from a call returning `true`. For the idle-on-inbox case
+10.2 calls "the overwhelmingly common state at scale" those are the same thing; for a
+program that wants to hibernate mid-computation they are not, and the gap is real.
 
 **M4b: Python and JavaScript bindings** — Python done, JS partly.
 `bindings/python` (cffi in API mode, 17 tests) and `bindings/js` (a bundled
@@ -2152,8 +2276,14 @@ representative agent. These inform the 6.5 revisit and the cache sizing in M7.
 
 ## 15. Open questions
 
-1. **Snapshot cache storage.** File layout and eviction policy for M7. Not
-   designed here.
+1. **Snapshot cache storage.** File layout and eviction policy. Still open after M7,
+   which built the cache in memory: a snapshot is a `malloc`'d buffer on the
+   instance's slot, and there is neither a file layout nor an eviction policy,
+   because a host that wants either has a place to put it and this layer has no
+   basis for choosing. What M7 *did* have to bound is the wake buffer — 16 messages
+   per non-resident instance, and a full one answers `DVS_LIMIT` rather than growing,
+   since 6.2's bounded queues exist so backpressure is visible and an unbounded wake
+   buffer would be the one place in the system where it was not.
 
 Closed since the first draft: the swarm prefix is `dvs_` (11.5); default `on_full`
 is `"reject"` (6.3); the queue name separator is `/`, structural only (6.6);
@@ -2300,6 +2430,39 @@ artifact between sessions that do not share context.
   frame's pc is the *right* in-range offset, so the header carries a digest of the
   payload. Measured against the fuzzer: 4 crashes with neither, 3 with field checks
   alone, 0 with both. The digest is integrity, not authentication.
+- **§11.5's host vtable could not have been implemented.** `create` was handed a
+  spawn request and expected to build the instance, `drive` was given only a
+  `void *ctx`, and none of the three knew which instance it was called about. So a
+  host could not call `dv_run`, and every host would have reimplemented the same
+  three setup calls in its own order. The swarm now builds the instance and the
+  vtable is handed it, plus the `dvs_id`, and `ud` lives in the struct. Found by
+  writing a host rather than by reading the section — a vtable is one of the few
+  things that cannot be reviewed, only implemented against.
+- **"Rate-limit the lifecycle capability" reads as "deny", and should be "defer".**
+  Denying consumes the request and answers, which turns a burst of ten into three
+  spawns and seven denials — and the denials then overrun a bounded `system/events`
+  and displace the events a supervisor actually needs. Leaving the request in the
+  program's own bounded queue makes it a rate rather than a filter. General shape:
+  when a limit protects a bounded resource, check it before consuming, because
+  answering costs the same resource.
+- **An empty Lua table is a map on the wire.** `mp_is_array` requires at least one
+  element, so `caps = {}` was refused as malformed by the first reader written
+  against the format. Anything decoding this codec's output has to treat an empty
+  map as an empty sequence, and this is the first place outside `dmsgpack.c` that
+  had to know it.
+- **Two more green tests that were not evidence, both in M7.** An overreaching spawn
+  was checked with a child that returned immediately, so it was reaped before the
+  assertion looked and "no child was created" held whether the grant was refused or
+  not; and the spawn rate was checked after one step, when a step drains before it
+  drives and the root had therefore not yet pushed anything. Removing each
+  mitigation turned nothing red. That is now five times, across two milestones, and
+  in every case the mutation found a weak *test* rather than weak code — which is
+  the more useful reading of the rule than the one it was first written for.
+- **A `dv_instance *` does not outlive its instance, but a `dvs_id` does.** Three
+  test crashes from one cause: a pointer fetched before a loop and used after, while
+  the instance behind it finished and was released. This is why `dvs_instance` takes
+  a handle and returns a pointer that must be re-fetched, and why the snapshot cache
+  can return `NULL` for a handle that is perfectly alive.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

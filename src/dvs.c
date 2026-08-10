@@ -37,11 +37,29 @@
 #define DVS_MAX_CAPS		32
 #define DVS_MAX_CAP_LEN		96
 
+/* How many messages may wait for a non-resident instance, and how long a queue
+   name may be. Bounded on purpose: see dvs.h on 'dvs_push'. */
+#define DVS_MAX_PENDING		16
+#define DVS_MAX_QNAME		64
+
+
+/*
+** One message held for a non-resident instance. The queue is recorded by *name*
+** rather than by handle, because handles belong to a 'dv_instance' and the whole
+** point is that there is not one right now -- the instance the message is delivered
+** into is a different one, restored from bytes, and only the name survives that.
+*/
+typedef struct dvs_pending {
+  char queue[DVS_MAX_QNAME];
+  uint8_t *msg;
+  size_t len;
+} dvs_pending;
+
 
 typedef struct dvs_slot {
   dvs_id id;                    /* 0 when the slot is free */
   dvs_id parent;
-  dv_instance *inst;
+  dv_instance *inst;            /* NULL while the instance is cached */
   void *ctx;                    /* whatever the host's 'create' returned */
   char *caps[DVS_MAX_CAPS];
   size_t ncaps;
@@ -50,6 +68,12 @@ typedef struct dvs_slot {
   int wake_on_message;
   int alive;
   int started;
+  /* The cache. 'snap' is the instance's whole state while it is not resident, and
+     'pend' is what arrived for it in the meantime, oldest first. */
+  uint8_t *snap;
+  size_t snaplen;
+  dvs_pending pend[DVS_MAX_PENDING];
+  size_t npend;
 } dvs_slot;
 
 
@@ -130,6 +154,18 @@ dvs_swarm *dvs_new (const dvs_host *host, uint32_t max_instances,
 }
 
 
+/* Drop everything the cache is holding for a slot. */
+static void drop_cache (dvs_slot *sl) {
+  size_t i;
+  free(sl->snap);
+  sl->snap = NULL;
+  sl->snaplen = 0;
+  for (i = 0; i < sl->npend; i++)
+    free(sl->pend[i].msg);
+  sl->npend = 0;
+}
+
+
 static void release (dvs_swarm *sw, dvs_slot *sl) {
   size_t i;
   if (sl->ctx != NULL && sw->host.destroy != NULL)
@@ -138,6 +174,7 @@ static void release (dvs_swarm *sw, dvs_slot *sl) {
   if (sl->inst != NULL)
     dv_free(sl->inst);
   sl->inst = NULL;
+  drop_cache(sl);
   for (i = 0; i < sl->ncaps; i++)
     free(sl->caps[i]);
   sl->ncaps = 0;
@@ -468,6 +505,172 @@ dvs_status dvs_kill (dvs_swarm *sw, dvs_id id) {
 
 
 /* ======================================================================
+** The snapshot cache (9.1.2 item 6)
+** ====================================================================== */
+
+int dvs_resident (dvs_swarm *sw, dvs_id id) {
+  dvs_slot *sl = find(sw, id);
+  return (sl != NULL && sl->alive && sl->inst != NULL);
+}
+
+
+size_t dvs_cached_size (dvs_swarm *sw, dvs_id id) {
+  dvs_slot *sl = find(sw, id);
+  return (sl != NULL) ? sl->snaplen : 0;
+}
+
+
+dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id) {
+  dvs_slot *sl = find(sw, id);
+  size_t need = 0;
+  uint8_t *buf;
+  if (sl == NULL || !sl->alive)
+    return DVS_GONE;
+  if (sl->inst == NULL)
+    return DVS_OK;              /* already cached; asking twice is not an error */
+  /*
+  ** Size first, then write. 'dv_snapshot' answers the size for a NULL buffer, which
+  ** is the only honest way to allocate for something whose size is the reachable
+  ** value graph -- a guess large enough for the common case is a guess that fails on
+  ** the agent that matters.
+  */
+  if (dv_snapshot(sl->inst, NULL, NULL, 0, &need) != DV_OK) {
+    set_error(sw, "instance %u will not hibernate: %s", (unsigned)id,
+              dv_last_error(sl->inst) ? dv_last_error(sl->inst) : "not parked");
+    return DVS_ERROR;
+  }
+  buf = (uint8_t *)malloc(need != 0 ? need : 1);
+  if (buf == NULL) {
+    set_error(sw, "no memory for a %lu-byte snapshot", (unsigned long)need);
+    return DVS_ERROR;
+  }
+  if (dv_snapshot(sl->inst, NULL, buf, need, &sl->snaplen) != DV_OK) {
+    set_error(sw, "instance %u will not hibernate: %s", (unsigned)id,
+              dv_last_error(sl->inst) ? dv_last_error(sl->inst) : "?");
+    free(buf);
+    return DVS_ERROR;
+  }
+  sl->snap = buf;
+  /*
+  ** The host's context goes with the instance, because it was created for that
+  ** instance and 11.5 gives the host no way to reattach one. Waking calls 'create'
+  ** again, which is the same contract a spawn has.
+  */
+  if (sl->ctx != NULL && sw->host.destroy != NULL)
+    sw->host.destroy(sw->host.ud, sl->id, sl->ctx);
+  sl->ctx = NULL;
+  dv_free(sl->inst);
+  sl->inst = NULL;
+  return DVS_OK;
+}
+
+
+dvs_status dvs_wake (dvs_swarm *sw, dvs_id id) {
+  dvs_slot *sl = find(sw, id);
+  dv_instance *inst;
+  dv_config cfg;
+  size_t i;
+  if (sl == NULL || !sl->alive)
+    return DVS_GONE;
+  if (sl->inst != NULL)
+    return DVS_OK;              /* already resident */
+  if (sl->snap == NULL) {
+    set_error(sw, "instance %u has no cached snapshot", (unsigned)id);
+    return DVS_ERROR;
+  }
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.abi_version = DV_ABI_VERSION;
+  inst = dv_new(&cfg);
+  if (inst == NULL) {
+    set_error(sw, "could not create an instance to wake into");
+    return DVS_ERROR;
+  }
+  /* The budget goes back on before the restore, for the same reason it goes on
+     before a load: 'dv_set_budget' refuses a running instance, and a woken agent
+     that had a budget must not come back without one. */
+  if (sl->instructions != 0 || sl->memory_kb != 0)
+    dv_set_budget(inst, sl->instructions, sl->memory_kb);
+  if (dv_restore(inst, NULL, sl->snap, sl->snaplen) != DV_OK) {
+    set_error(sw, "instance %u will not restore: %s", (unsigned)id,
+              dv_last_error(inst) ? dv_last_error(inst) : "?");
+    dv_free(inst);
+    return DVS_ERROR;
+  }
+  sl->inst = inst;
+  free(sl->snap);
+  sl->snap = NULL;
+  sl->snaplen = 0;
+  /*
+  ** The buffer drains here, before this call returns and therefore before any live
+  ** push can reach the instance -- which is 8.4's "drain the buffer ahead of live
+  ** pushes", and it is a consequence of where the drain sits rather than of any
+  ** ordering logic. A message that is refused now is dropped rather than kept: the
+  ** queue it names is bounded, the sender was already told DVS_OK, and holding it
+  ** for a queue that has no room would be an unbounded buffer wearing a different
+  ** name.
+  */
+  for (i = 0; i < sl->npend; i++) {
+    dv_queue_id q = dv_queue_lookup(inst, sl->pend[i].queue);
+    if (q != 0)
+      dv_queue_push(inst, q, sl->pend[i].msg, sl->pend[i].len);
+    free(sl->pend[i].msg);
+    sl->pend[i].msg = NULL;
+  }
+  sl->npend = 0;
+  if (sw->host.create != NULL)
+    sl->ctx = sw->host.create(sw->host.ud, sl->id, inst);
+  return DVS_OK;
+}
+
+
+dvs_status dvs_push (dvs_swarm *sw, dvs_id id, const char *queue,
+                     const void *msg, size_t len) {
+  dvs_slot *sl = find(sw, id);
+  dvs_pending *p;
+  size_t nlen;
+  if (queue == NULL || msg == NULL)
+    return DVS_ERROR;
+  /*
+  ** 8.4: a push to a dead or unknown instance is "gone", immediately and without
+  ** blocking. There is nothing to wait for and saying so late helps nobody.
+  **
+  ** 'find' does most of this by itself, because 'release' clears the handle and a
+  ** handle is never reused -- removing '!sl->alive' turns no test red, and that is
+  ** worth writing down rather than leaving as an apparently load-bearing check. It
+  ** guards the window between 'claim' and 'build', where a slot has a handle and no
+  ** instance yet.
+  */
+  if (sl == NULL || !sl->alive)
+    return DVS_GONE;
+  if (sl->inst != NULL) {
+    dv_queue_id q = dv_queue_lookup(sl->inst, queue);
+    if (q == 0)
+      return DVS_UNKNOWN;
+    return (dv_queue_push(sl->inst, q, (const uint8_t *)msg, len) == DV_OK)
+           ? DVS_OK : DVS_LIMIT;
+  }
+  /* Cached. Without 'wake_on_message' this is "gone" -- an agent that did not ask
+     to be woken is, from a sender's point of view, not there. */
+  if (!sl->wake_on_message)
+    return DVS_GONE;
+  nlen = strlen(queue);
+  if (nlen == 0 || nlen >= DVS_MAX_QNAME)
+    return DVS_ERROR;
+  if (sl->npend >= DVS_MAX_PENDING)
+    return DVS_LIMIT;
+  p = &sl->pend[sl->npend];
+  p->msg = (uint8_t *)malloc(len != 0 ? len : 1);
+  if (p->msg == NULL)
+    return DVS_ERROR;
+  memcpy(p->msg, msg, len);
+  p->len = len;
+  memcpy(p->queue, queue, nlen + 1);
+  sl->npend++;
+  return DVS_OK;
+}
+
+
+/* ======================================================================
 ** Draining system/lifecycle (9.1.2 item 4)
 ** ====================================================================== */
 
@@ -655,6 +858,64 @@ static void do_kill (dvs_swarm *sw, dvs_slot *parent, const char *msg,
 }
 
 
+/*
+** '{op = "hibernate"}' swaps the requester out; with an 'id', a descendant.
+**
+** Self by default, because 10.1 makes hibernation self-initiated and a program is
+** the only thing that knows when it is at a point it is willing to stop at. A
+** supervisor may hibernate something below it, on the same ancestry rule as kill --
+** but it can only do so while that instance is parked, so the descendant still
+** chooses the moment by choosing when to park.
+*/
+static void do_hibernate (dvs_swarm *sw, dvs_slot *parent, const char *msg,
+                          size_t len) {
+  uint64_t target = 0;
+  dvs_id who = parent->id;
+  dvs_slot *subject;
+  if (field_int(msg, len, "id", &target) && target != 0 &&
+      (dvs_id)target != parent->id) {
+    dvs_slot *sl = find(sw, (dvs_id)target);
+    dvs_id walk;
+    if (sl == NULL) {
+      emit_event(sw, parent->id, "denied", (dvs_id)target, "no such instance");
+      return;
+    }
+    for (walk = sl->parent; walk != 0; walk = dvs_parent(sw, walk)) {
+      if (walk == parent->id)
+        break;
+    }
+    if (walk == 0) {
+      emit_event(sw, parent->id, "denied", (dvs_id)target, "not a descendant");
+      return;
+    }
+    who = (dvs_id)target;
+  }
+  /*
+  ** 'wake_on_message' may be set here as well as at spawn time, and this is the
+  ** better place for it: 8.4 makes waking a property of the destination, and the
+  ** program going to sleep is what knows whether it wants to be woken. A spawn-time
+  ** flag is the parent's guess. Absent, the spawn-time value stands.
+  */
+  subject = find(sw, who);
+  if (subject != NULL && field_bool(msg, len, "wake_on_message"))
+    subject->wake_on_message = 1;
+  if (dvs_hibernate(sw, who) != DVS_OK) {
+    /* The event goes to the requester and not to the subject: a program that could
+       not be swapped out is still running and will read its own queues, but the
+       thing that needs to know is whatever asked. */
+    emit_event(sw, parent->id, "denied", who, sw->error);
+    return;
+  }
+  /* Only tell the parent, and only when it is not the subject -- an instance that
+     hibernated itself is about to stop reading, and an event it will not see until
+     it wakes is one that arrives out of order with whatever woke it. */
+  if (who != parent->id)
+    emit_event(sw, parent->id, "hibernated", who, NULL);
+  else if (parent->parent != 0)
+    emit_event(sw, parent->parent, "hibernated", who, NULL);
+}
+
+
 static void do_query (dvs_swarm *sw, dvs_slot *parent, const char *msg,
                       size_t len) {
   uint64_t target = 0;
@@ -739,12 +1000,14 @@ static void drain (dvs_swarm *sw, dvs_slot *sl) {
       do_kill(sw, sl, (const char *)buf, n);
     else if (strcmp(op, "query") == 0)
       do_query(sw, sl, (const char *)buf, n);
+    else if (strcmp(op, "hibernate") == 0)
+      do_hibernate(sw, sl, (const char *)buf, n);
     else
       emit_event(sw, sl->id, "denied", 0, op);
     /* A drain that acted on a request may have freed this slot -- a supervisor can
        kill its own subtree, and 'kill_subtree' does not spare the caller's
        children. Re-check before going round again. */
-    if (sl->id == 0 || !sl->alive)
+    if (sl->id == 0 || !sl->alive || sl->inst == NULL)
       return;
   }
 }
@@ -768,6 +1031,30 @@ int dvs_step (dvs_swarm *sw) {
   ** The slot array is walked by index and re-checked, because acting on a request
   ** can free slots, including ones ahead of this position.
   */
+  /*
+  ** Waking comes first, before either draining or driving, so that a woken instance
+  ** gets a whole step in the same 'dvs_step' the message arrived in rather than one
+  ** step later. 8.4 calls the restore asynchronous, and it is -- the sender got
+  ** DVS_OK and went on -- but "asynchronous" should not mean "a step late for no
+  ** reason".
+  **
+  ** A wake that fails is fatal to the instance and reported as a fault, because the
+  ** alternative is a handle that is alive, non-resident and permanently unreachable:
+  ** every later push would be buffered against a snapshot that will never restore.
+  */
+  for (i = 0; i < sw->nslots; i++) {
+    dvs_slot *sl = &sw->slots[i];
+    if (sl->id == 0 || !sl->alive || sl->inst != NULL || sl->npend == 0)
+      continue;
+    if (dvs_wake(sw, sl->id) != DVS_OK) {
+      dvs_id gone = sl->id, parent = sl->parent;
+      char why[256];
+      snprintf(why, sizeof(why), "%s", sw->error);
+      kill_subtree(sw, gone, 0);
+      if (parent != 0)
+        emit_event(sw, parent, "faulted", gone, why);
+    }
+  }
   for (i = 0; i < sw->nslots; i++) {
     if (sw->slots[i].id != 0 && sw->slots[i].alive)
       drain(sw, &sw->slots[i]);
@@ -776,7 +1063,10 @@ int dvs_step (dvs_swarm *sw) {
     dvs_slot *sl = &sw->slots[i];
     dvs_id id;
     int keep;
-    if (sl->id == 0 || !sl->alive)
+    /* A cached instance is not driven: there is nothing to drive. It is still
+       alive, and 'dvs_alive' counts it, because a handle that names a snapshot is
+       a handle a sender may legitimately push to. */
+    if (sl->id == 0 || !sl->alive || sl->inst == NULL)
       continue;
     id = sl->id;
     keep = sw->host.drive(sw->host.ud, id, sl->inst, sl->ctx);
