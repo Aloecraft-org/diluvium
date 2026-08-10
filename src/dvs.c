@@ -876,6 +876,43 @@ static int field_id (const char *msg, size_t len, const char *key, dvs_id *out) 
 }
 
 
+/*
+** The budget, read the way 9.1 writes it.
+**
+**   budget = { instructions = 5e6, memory_kb = 512 }
+**
+** Nested, and 'do_spawn' read flat top-level 'instructions' and 'memory_kb' -- so a
+** request written exactly as the document shows it gave the child **no budget at
+** all**, silently, which then let a runaway child hang 'dvs_step' with nothing to
+** stop it. The document is the contract here; the code was wrong.
+**
+** The flat form is still accepted, because it is what this layer has understood
+** until now and someone may already have written it. Nested wins where both appear,
+** since that is the documented spelling.
+*/
+static void field_budget (const char *msg, size_t len, uint64_t *insns,
+                          uint64_t *mem) {
+  diluvium_mp_cursor c;
+  diluvium_mp_token t;
+  field_int(msg, len, "instructions", insns);   /* the flat form, if present */
+  field_int(msg, len, "memory_kb", mem);
+  diluvium_mp_open(&c, msg, len);
+  if (!diluvium_mp_field(&c, "budget"))
+    return;
+  /* The cursor is on the value; 'diluvium_mp_field' reads a map header at the
+     current position, so looking inside is the same call again -- which is why the
+     cursor's entry points compose without a second parser. */
+  {
+    const char *inner = (const char *)c.p;
+    size_t innerlen = c.left;
+    if (!diluvium_mp_read(&c, &t) || t.kind != DILUVIUM_MP_MAP)
+      return;
+    field_int(inner, innerlen, "instructions", insns);
+    field_int(inner, innerlen, "memory_kb", mem);
+  }
+}
+
+
 static int field_bool (const char *msg, size_t len, const char *key) {
   diluvium_mp_cursor c;
   diluvium_mp_token t;
@@ -965,8 +1002,7 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
       return;
     }
   }
-  field_int(msg, len, "instructions", &insns);
-  field_int(msg, len, "memory_kb", &mem);
+  field_budget(msg, len, &insns, &mem);
   sl = claim(sw);
   if (sl == NULL) {
     emit_event(sw, parent->id, "denied", 0, "the instance table is full");

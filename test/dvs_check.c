@@ -1279,6 +1279,202 @@ static void a_chain_is_killed_from_the_top (void) {
 }
 
 
+/*
+** A budget written the way 9.1 writes it actually reaches the child.
+**
+** 9.1's example nests it -- 'budget = { instructions = 5e6, memory_kb = 512 }' --
+** and 'do_spawn' read flat top-level fields, so a request copied out of the document
+** gave the child **no budget at all**, silently. The consequence is not cosmetic: a
+** runaway child then has nothing to stop it, and 9.4 is explicit that a guest cannot
+** limit itself because a loop that never yields never gives anything the chance.
+*/
+static void a_documented_budget_reaches_the_child (void) {
+  static const char SUP[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local ev  = queue.declare('system/events', {cap = 8})\n"
+    "local log = queue.declare('log', {cap = 8})\n"
+    "local hold = queue.declare('hold', {cap = 2})\n"
+    /*
+    ** A child that parks, so its budget can be read back from outside while it is
+    ** still alive.
+    **
+    ** Deliberately NOT a runaway child here. Spawning 'while true do end' would make
+    ** this test hang rather than fail whenever the budget does not reach the child --
+    ** which is exactly what happened when the fix was pulled out to verify it, and a
+    ** test that burns a 30-minute CI timeout instead of failing in a second is a bad
+    ** trade for coverage that lives elsewhere. Enforcement is covered by
+    ** 'a_host_can_budget_every_child_from_create', where the host always sets a
+    ** budget and so nothing can spin.
+    */
+    "queue.push(sys, {op = 'spawn', code = \"local q = \"\n"
+    "  .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\", caps = {},\n"
+    "  budget = {instructions = 200000, memory_kb = 4096}})\n"
+    "local _, e = queue.wait({ev})\n"
+    "queue.push(log, 'spawned:' .. tostring(e.id))\n"
+    "queue.wait({hold})\n";
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle", "queue:log" };
+  int i;
+  char first[128], second[128];
+  dvs_id kid = 0;
+  uint64_t insns = 0, mem = 0;
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, SUP, sizeof(SUP) - 1, caps, 2, 0, 0, &root) != DVS_OK) {
+    printf("      (%s)\n", dvs_last_error(sw));
+    ok(0, "the supervisor starts");
+    dvs_free(sw);
+    return;
+  }
+  first[0] = second[0] = '\0';
+  /* Bounded: if the budget did not reach the child, the loop below is where a
+     runaway 'while true do end' hangs the whole swarm -- which is the failure this
+     test exists to catch, and why it cannot be an unbounded spin. */
+  for (i = 0; i < 12; i++) {
+    dv_instance *sup;
+    uint32_t k;
+    dvs_step(sw);
+    for (k = 2; k < 24 && kid == 0; k++) {
+      if (dvs_parent(sw, k) == root) {
+        kid = k;
+        /* Read the budget while the child is still alive: it is about to exceed and
+           be reaped, and a released slot answers DVS_UNKNOWN. */
+        dvs_budget(sw, kid, &insns, &mem);
+      }
+    }
+    sup = dvs_instance(sw, root);
+    if (sup == NULL) break;
+    {
+      dv_queue_id log = dv_queue_lookup(sup, "log");
+      uint8_t out[192];
+      size_t n = 0;
+      while (log != 0 &&
+             dv_queue_pop(sup, log, out, sizeof(out), &n) == DV_OK && n > 1)
+        msg_str(out, n, (first[0] == '\0') ? first : second, sizeof(first));
+    }
+  }
+  printf("      (%s / %s)\n", first, second);
+  ok(strncmp(first, "spawned:", 8) == 0, "the child is spawned");
+  /* The budget was recorded on the slot, which is what 'dvs_budget' reads -- and
+     also proves the nested form was parsed rather than defaulted to zero. */
+  if (kid != 0)
+    printf("      (child budget: insns=%lu mem_kb=%lu)\n",
+           (unsigned long)insns, (unsigned long)mem);
+  okf(insns == 200000, "with the instruction budget the request nested",
+      (long)insns, 200000);
+  okf(mem == 4096, "and the memory limit", (long)mem, 4096);
+  /* The recorded budget is what 'build' hands to 'dv_set_budget', and that call's
+     enforcement is asserted where nothing can hang. Together they cover the path. */
+  dvs_free(sw);
+}
+
+
+/*
+** The flat form still works, because it is what this layer understood until now.
+*/
+static void the_flat_budget_form_is_still_accepted (void) {
+  static const char SUP[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local ev  = queue.declare('system/events', {cap = 8})\n"
+    "local hold = queue.declare('hold', {cap = 2})\n"
+    "queue.push(sys, {op = 'spawn', code = \"local q = \"\n"
+    "  .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\", caps = {},\n"
+    "  instructions = 123456, memory_kb = 77})\n"
+    "queue.wait({hold})\n";
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0, kid = 0;
+  static const char *caps[] = { "lifecycle" };
+  uint64_t insns = 0, mem = 0;
+  uint32_t k;
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, SUP, sizeof(SUP) - 1, caps, 1, 0, 0, &root) != DVS_OK) {
+    ok(0, "the supervisor starts");
+    dvs_free(sw);
+    return;
+  }
+  spin(sw, 5);
+  for (k = 2; k < 24 && kid == 0; k++)
+    if (dvs_parent(sw, k) == root) kid = k;
+  ok(kid != 0, "a child spawned with a flat budget");
+  dvs_budget(sw, kid, &insns, &mem);
+  okf(insns == 123456, "carries the flat instruction budget", (long)insns, 123456);
+  okf(mem == 77, "and the flat memory limit", (long)mem, 77);
+  dvs_free(sw);
+}
+
+
+/*
+** A host can set a budget itself, from 'create'.
+**
+** 18.2's profile A leans on this: rather than trust the request path, a host sets
+** every child's budget as it is handed the instance. 'create' is called after
+** 'dv_load' and before anything runs, which is exactly the window 'dv_set_budget'
+** requires -- it refuses a running instance, because "a budget that changed
+** mid-flight would make 'exceeded' mean nothing". Asserted rather than assumed,
+** because a workaround nobody has run is a claim.
+*/
+static uint64_t host_budget_insns = 0;
+
+static void *host_create_budgeted (void *ud, dvs_id id, dv_instance *inst) {
+  (void)ud; (void)id;
+  if (inst != NULL && host_budget_insns != 0)
+    dv_set_budget(inst, host_budget_insns, 0);
+  return NULL;
+}
+
+static void a_host_can_budget_every_child_from_create (void) {
+  dvs_host h;
+  dvs_swarm *sw;
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle", "queue:log" };
+  static const char SUP[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local ev  = queue.declare('system/events', {cap = 8})\n"
+    "local log = queue.declare('log', {cap = 8})\n"
+    "local hold = queue.declare('hold', {cap = 2})\n"
+    /* No budget in the request at all: the host supplies it. */
+    "queue.push(sys, {op = 'spawn', code = 'while true do end', caps = {}})\n"
+    "local _, e = queue.wait({ev})\n"
+    "local _, e2 = queue.wait({ev})\n"
+    "queue.push(log, tostring(e2.event))\n"
+    "queue.wait({hold})\n";
+  int i;
+  char line[128];
+  memset(&h, 0, sizeof(h));
+  h.create = host_create_budgeted;
+  h.drive = host_drive;
+  host_budget_insns = 200000;
+  sw = dvs_new(&h, 16, 4);
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, SUP, sizeof(SUP) - 1, caps, 2, 0, 0, &root) != DVS_OK) {
+    ok(0, "the supervisor starts");
+    dvs_free(sw);
+    host_budget_insns = 0;
+    return;
+  }
+  line[0] = '\0';
+  for (i = 0; i < 12; i++) {
+    dv_instance *sup;
+    dvs_step(sw);
+    sup = dvs_instance(sw, root);
+    if (sup == NULL) break;
+    {
+      dv_queue_id log = dv_queue_lookup(sup, "log");
+      uint8_t out[192];
+      size_t n = 0;
+      if (log != 0 && dv_queue_pop(sup, log, out, sizeof(out), &n) == DV_OK &&
+          n > 1)
+        msg_str(out, n, line, sizeof(line));
+    }
+  }
+  printf("      (event: %s)\n", line[0] ? line : "(none)");
+  ok(strcmp(line, "exceeded") == 0,
+     "a host-set budget stops a runaway child that asked for none");
+  host_budget_insns = 0;
+  dvs_free(sw);
+}
+
+
 int main (void) {
   printf("=== the msgpack token cursor ===\n");
   the_cursor_agrees_with_the_encoder();
@@ -1296,6 +1492,9 @@ int main (void) {
   a_wire_id_that_does_not_fit_is_refused();
   a_spawn_is_not_truncated_at_a_zero_byte();
   a_chain_is_killed_from_the_top();
+  a_documented_budget_reaches_the_child();
+  the_flat_budget_form_is_still_accepted();
+  a_host_can_budget_every_child_from_create();
 
   a_host_can_read_an_instance_s_budget_and_capabilities();
 
