@@ -1990,12 +1990,40 @@ LUA_API int diluvium_mp_skip (diluvium_mp_cursor *c) {
     if (!diluvium_mp_read(c, &tok))
       return 0;
     pending--;
-    if (tok.kind == DILUVIUM_MP_ARRAY)
-      pending += tok.len;
-    else if (tok.kind == DILUVIUM_MP_MAP) {
-      if (tok.len > (size_t)-1 / 2)
+    if (tok.kind == DILUVIUM_MP_ARRAY || tok.kind == DILUVIUM_MP_MAP) {
+      size_t need = tok.len;
+      /*
+      ** Bound the claim by the bytes remaining, and do it BEFORE any arithmetic
+      ** that could overflow. Every value costs at least one byte, so a container
+      ** promising more values than there are bytes left cannot be satisfied by any
+      ** input -- refusing here is not a heuristic, it is the only possible verdict.
+      **
+      ** The earlier version counted instead: it added the claim to 'pending' and
+      ** waited to run out of bytes. That reaches the right answer on a 64-bit
+      ** size_t and the wrong one on a 32-bit size_t, which is what wasm32 is and
+      ** what 11's 'dv_layout' exists because of. Two array32 headers claiming
+      ** 0xFFFFFFFF and 2 elements drive the running total to exactly 2^32, which
+      ** wraps to zero, and 'pending == 0' is how this loop reports success -- so a
+      ** twelve-byte message would be skipped in ten bytes and '_field' would read
+      ** whatever followed as a map key.
+      **
+      ** Keeping 'pending <= c->left' as an invariant makes the overflow
+      ** unreachable at any width rather than merely unlikely at one of them, and it
+      ** turns a four-billion-iteration count-down into one comparison.
+      */
+      if (need > c->left)
         return 0;
-      pending += tok.len * 2;
+      if (tok.kind == DILUVIUM_MP_MAP) {
+        /* Pairs are two values each. 'need <= c->left' already holds, so the
+           doubling is checked against that bound instead of being performed and
+           checked afterwards. */
+        if (need > c->left - need)
+          return 0;
+        need += need;
+      }
+      if (pending > c->left - need)
+        return 0;
+      pending += need;
     }
   }
   return 1;

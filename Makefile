@@ -352,6 +352,22 @@ sanitize_checks: _build_step0
 	$(SAN_ENV) $(CURDIR)/dist/dhash_check_asan >/dev/null; \
 	echo "all contract tests clean under asan+ubsan"
 
+# The token cursor on hostile input, under the sanitizers.
+#
+# The cursor is a trust boundary: it is the parser the swarm layer uses to read
+# 'system/lifecycle' requests, and those are written by guest programs, which 9
+# treats as untrusted with respect to capability. The cross-check in dvs_check.c
+# feeds it bytes the *encoder* produced -- exactly the input that cannot be
+# malformed -- so nothing exercised it on anything hostile before this.
+#
+# Always with -fsanitize=address: without it the out-of-bounds assertions are
+# unenforced and the run means very little.
+mp_cursor_fuzz: _build_step0
+	gcc $(SAN_CFLAGS) -DLUA_USE_LINUX -Wl,-E -ldl -DMAKE_LIB \
+	  -I$(CURDIR)/.data -o $(CURDIR)/dist/mp_cursor_fuzz \
+	  $(CURDIR)/test/mp_cursor_fuzz.c $(CURDIR)/.data/onelua.c -lm
+	@$(SAN_ENV) $(CURDIR)/dist/mp_cursor_fuzz
+
 snap_fuzz: _build_step0
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
 	  -o $(CURDIR)/dist/snap_harness \
@@ -381,7 +397,7 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
-        snap_fuzz sanitize_checks
+        snap_fuzz sanitize_checks mp_cursor_fuzz
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua

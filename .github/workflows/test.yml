@@ -168,6 +168,14 @@ jobs:
       - name: Fuzz the snapshot restore path
         run: make snap_fuzz
 
+      # The token cursor on hostile input. It is the parser the swarm layer uses
+      # for 'system/lifecycle', and guests write those, so it is a trust boundary
+      # that nothing had tested on malformed bytes -- the only cross-check fed it
+      # what the encoder produced. 400,000 inputs under ASan; it found an overflow
+      # that only bites where size_t is 32 bits, which is wasm32.
+      - name: Fuzz the msgpack token cursor
+        run: make mp_cursor_fuzz
+
       # The release build catches what the amalgamation hides: a file that uses a
       # core macro without including its header compiles in onelua.c and fails
       # here. Two such bugs reached the tree before this was in the sweep.
