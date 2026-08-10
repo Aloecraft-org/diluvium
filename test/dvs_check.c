@@ -121,6 +121,84 @@ static dvs_swarm *swarm_with (uint32_t rate) {
 }
 
 
+/*
+** A swarm with hibernation switched on.
+**
+** It is off by default in this release, because 18.1's snapshot defect makes the
+** wake-then-error path corrupt memory. The tests below still turn it on, so the
+** machinery does not rot while it is disabled -- what they must NOT do is stop
+** asserting that it is off by default, which is the point of
+** 'hibernation_is_off_unless_asked_for'.
+*/
+static dvs_swarm *swarm_with_hibernation (uint32_t rate) {
+  dvs_swarm *sw = swarm_with(rate);
+  if (sw != NULL)
+    dvs_allow_hibernation(sw, 1);
+  return sw;
+}
+
+
+/*
+** Off by default, refused by name, and the refusal says why.
+**
+** 18.2's profile A depends on this: a defect that cannot be reached is worth more
+** than one that is merely written down, and a host that hits this should be told
+** what it hit rather than left with a bare DVS_ERROR on a call that reads as though
+** it should work.
+*/
+static void hibernation_is_off_unless_asked_for (void) {
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "queue:work" };
+  static const char *src = "local q = queue.declare('work', {cap = 4}) "
+                           "queue.wait({q})";
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, src, strlen(src), caps, 1, 0, 0, &root) != DVS_OK) {
+    ok(0, "a program starts");
+    dvs_free(sw);
+    return;
+  }
+  dvs_step(sw);                 /* it parks, so 'not parked' is not the reason */
+  ok(dvs_hibernate(sw, root) == DVS_ERROR,
+     "a parked instance is not hibernated by default");
+  ok(dvs_resident(sw, root), "and stays resident");
+  {
+    const char *e = dvs_last_error(sw);
+    ok(e != NULL && strstr(e, "18.1") != NULL,
+       "and the refusal points at the defect that motivates it");
+    ok(e != NULL && strstr(e, "dvs_allow_hibernation") != NULL,
+       "and names the call that overrides it");
+  }
+  dvs_allow_hibernation(sw, 1);
+  ok(dvs_hibernate(sw, root) == DVS_OK, "asking for it explicitly works");
+  ok(!dvs_resident(sw, root), "and then the instance is cached");
+  dvs_free(sw);
+}
+
+
+/*
+** The payload of a msgpack string message, NUL-terminated.
+**
+** Read through the cursor rather than by skipping a header byte. Skipping one is
+** right only up to 31 characters: past that the codec emits str8 and 'buf + 1' lands
+** on the length byte, which is how a "denied:..." event once read as
+** "\x25denied:...". Using the cursor also means these tests exercise the reader the
+** swarm layer itself uses.
+*/
+static const char *msg_str (const uint8_t *b, size_t n, char *out, size_t cap) {
+  diluvium_mp_cursor c;
+  diluvium_mp_token t;
+  out[0] = '\0';
+  diluvium_mp_open(&c, b, n);
+  if (diluvium_mp_read(&c, &t) && t.kind == DILUVIUM_MP_STR) {
+    size_t m = (t.len < cap - 1) ? t.len : cap - 1;
+    memcpy(out, t.p, m);
+    out[m] = '\0';
+  }
+  return out;
+}
+
+
 /* Run up to 'n' steps, or until nothing is alive. */
 static int spin (dvs_swarm *sw, int n) {
   int i, alive = dvs_alive(sw);
@@ -656,7 +734,7 @@ static void last_log (dv_instance *inst, char *out, size_t cap) {
 
 
 static void an_instance_swaps_out_and_a_message_wakes_it (void) {
-  dvs_swarm *sw = swarm_with(4);
+  dvs_swarm *sw = swarm_with_hibernation(4);
   dvs_id root = 0;
   static const char *caps[] = { "lifecycle", "queue:work", "queue:log" };
   char line[128];
@@ -718,7 +796,7 @@ static void a_cached_instance_without_wake_on_message_is_gone (void) {
   ** ask to be woken is, to a sender, not there -- and "gone" says so immediately
   ** instead of buffering something nothing will ever read.
   */
-  dvs_swarm *sw = swarm_with(4);
+  dvs_swarm *sw = swarm_with_hibernation(4);
   dvs_id root = 0, kid = 0;
   static const char *caps[] = { "lifecycle", "queue:work" };
   static const char PARENT[] =
@@ -761,7 +839,7 @@ static void the_wake_buffer_is_bounded (void) {
   ** is DVS_LIMIT, and the sender learns it the same way a push to a full live queue
   ** does.
   */
-  dvs_swarm *sw = swarm_with(4);
+  dvs_swarm *sw = swarm_with_hibernation(4);
   dvs_id root = 0;
   static const char *caps[] = { "lifecycle", "queue:work", "queue:log" };
   int i, accepted = 0, refused = 0;
@@ -828,7 +906,7 @@ static void pushing_to_a_dead_instance_is_gone (void) {
 ** host had no way at all to learn the budget an instance was configured with.
 */
 static void a_host_can_read_an_instance_s_budget_and_capabilities (void) {
-  dvs_swarm *sw = swarm_with(4);
+  dvs_swarm *sw = swarm_with_hibernation(4);
   dvs_id root = 0;
   static const char *caps[] = { "lifecycle", "queue:work/*", "queue:log" };
   static const char *src = "local q = queue.declare('hold', {cap = 2}) "
@@ -1023,6 +1101,184 @@ static void a_wildcard_cannot_widen_a_grant (void) {
 }
 
 
+/* ------------------------------------------------- the Profile A defect set */
+
+/*
+** A wire id that does not fit a handle is refused, not truncated.
+**
+** 'dvs_id' is 32 bits and the wire carries 64. Casting the wider value meant a
+** request naming 0x100000002 became 2, 'find' located instance 2, and the kill was
+** carried out **against a different live instance** and reported as success. The
+** supervisor below asks to kill 0x100000000 + the child's id, which is not a handle
+** and must not resolve to one.
+*/
+static void a_wire_id_that_does_not_fit_is_refused (void) {
+  static const char SUP[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local ev  = queue.declare('system/events', {cap = 8})\n"
+    "local log = queue.declare('log', {cap = 8})\n"
+    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local KID = \"local q = queue.declare('hold', {cap = 2}) queue.wait({q})\"\n"
+    "queue.push(sys, {op = 'spawn', code = KID, caps = {}})\n"
+    "local _, e = queue.wait({ev})\n"
+    "queue.push(log, 'spawned:' .. tostring(e.id))\n"
+    /* 2^32 + the child's handle: the low 32 bits are a live instance. */
+    "queue.push(sys, {op = 'kill', id = 4294967296 + e.id})\n"
+    "local _, e2 = queue.wait({ev})\n"
+    "queue.push(log, tostring(e2.event) .. ':' .. tostring(e2.detail))\n"
+    "queue.wait({hold})\n";
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle", "queue:log" };
+  int i;
+  char first[128], second[128];
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, SUP, sizeof(SUP) - 1, caps, 2, 0, 0, &root) != DVS_OK) {
+    printf("      (%s)\n", dvs_last_error(sw));
+    ok(0, "the supervisor starts");
+    dvs_free(sw);
+    return;
+  }
+  first[0] = second[0] = '\0';
+  for (i = 0; i < 10; i++) {
+    dv_instance *sup = dvs_instance(sw, root);
+    dvs_step(sw);
+    sup = dvs_instance(sw, root);
+    if (sup == NULL) break;
+    {
+      dv_queue_id log = dv_queue_lookup(sup, "log");
+      uint8_t out[192];
+      size_t n = 0;
+      while (log != 0 &&
+             dv_queue_pop(sup, log, out, sizeof(out), &n) == DV_OK && n > 1) {
+        char *slot = (first[0] == '\0') ? first : second;
+        msg_str(out, n, slot, sizeof(first));
+      }
+    }
+  }
+  printf("      (%s / %s)\n", first, second);
+  ok(strncmp(first, "spawned:", 8) == 0, "a child is spawned");
+  ok(strncmp(second, "denied:", 7) == 0,
+     "and a kill naming 2^32 + its handle is denied, not carried out");
+  /* The decisive part: the child is still alive, because the truncated id named it. */
+  okf(dvs_alive(sw) == 2, "the instance the truncation would have named survives",
+      dvs_alive(sw), 2);
+  dvs_free(sw);
+}
+
+
+/*
+** A spawned program is not cut at its first zero byte.
+**
+** 'do_spawn' took the code with 'field_str' and then measured it with 'strlen', so a
+** compiled chunk -- which is full of zeroes -- ran as a prefix of itself and the
+** spawn was reported as successful. Source with an embedded zero is the same bug in
+** miniature and needs no compiler to demonstrate.
+*/
+static void a_spawn_is_not_truncated_at_a_zero_byte (void) {
+  static const char SUP[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local ev  = queue.declare('system/events', {cap = 8})\n"
+    "local log = queue.declare('log', {cap = 8})\n"
+    "local hold = queue.declare('hold', {cap = 2})\n"
+    /* The zero byte sits inside a string literal, so a truncated chunk is a syntax
+       error and a whole one runs. The child reports which happened. */
+    "local KID = \"local marker = 'a\\0b'\\n\"\n"
+    "         .. \"local q = queue.declare('hold', {cap = 2})\\n\"\n"
+    "         .. \"queue.wait({q})\\n\"\n"
+    "queue.push(sys, {op = 'spawn', code = KID, caps = {}})\n"
+    "local _, e = queue.wait({ev})\n"
+    "queue.push(log, tostring(e.event))\n"
+    "queue.wait({hold})\n";
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle", "queue:log" };
+  int i;
+  char line[128];
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, SUP, sizeof(SUP) - 1, caps, 2, 0, 0, &root) != DVS_OK) {
+    ok(0, "the supervisor starts");
+    dvs_free(sw);
+    return;
+  }
+  line[0] = '\0';
+  for (i = 0; i < 8; i++) {
+    dv_instance *sup;
+    dvs_step(sw);
+    sup = dvs_instance(sw, root);
+    if (sup == NULL) break;
+    {
+      dv_queue_id log = dv_queue_lookup(sup, "log");
+      uint8_t out[192];
+      size_t n = 0;
+      if (log != 0 && dv_queue_pop(sup, log, out, sizeof(out), &n) == DV_OK &&
+          n > 1)
+        msg_str(out, n, line, sizeof(line));
+    }
+  }
+  printf("      (event: %s)\n", line[0] ? line : "(none)");
+  ok(strcmp(line, "spawned") == 0,
+     "a program containing a zero byte spawns whole rather than as a prefix");
+  okf(dvs_alive(sw) == 2, "and the child is running", dvs_alive(sw), 2);
+  dvs_free(sw);
+}
+
+
+/*
+** A chain is killed from the top, at whatever depth it has.
+**
+** 'kill_subtree' carried a comment saying it did not recurse, above a body that
+** called itself once per level. The comment is now true -- it marks and sweeps over
+** the flat table -- but the crash the finding described is **not reachable**, and
+** saying so is more useful than a test pretending otherwise: ~131,000 nested frames
+** fit in an 8 MB stack, and 131,000 instances would need something like 6 GB of
+** lua_States to exist at all. The machine runs out of instances long before the
+** stack runs out of frames.
+**
+** So what changed is that the code matches its comment and the depth limit is gone
+** in principle, not that an exploitable crash was closed. What is testable is the
+** behaviour, which the mark-and-sweep must preserve: a chain dies from its root
+** whatever its length, and nothing outside the chain is touched.
+*/
+static void a_chain_is_killed_from_the_top (void) {
+  dvs_swarm *sw = swarm_with(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle" };
+  /* Three generations by delegation, plus an unrelated root that must survive --
+     the sweep marks by parentage, so a bug that marked too much would take it. */
+  static const char CHAIN[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local q   = queue.declare('hold', {cap = 2})\n"
+    "local KID = \"local sys = queue.declare('system/lifecycle', {cap = 8})\\n\"\n"
+    "         .. \"local q = queue.declare('hold', {cap = 2})\\n\"\n"
+    "         .. \"queue.push(sys, {op = 'spawn', code = \\\"local q = \"\n"
+    "         .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\\\",\"\n"
+    "         .. \" caps = {'lifecycle'}})\\n\"\n"
+    "         .. \"queue.wait({q})\\n\"\n"
+    "queue.push(sys, {op = 'spawn', code = KID, caps = {'lifecycle'}})\n"
+    "queue.wait({q})\n";
+  static const char *lone = "local q = queue.declare('hold', {cap = 2}) "
+                            "return queue.wait({q})";
+  dvs_id bystander = 0;
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  if (dvs_root(sw, CHAIN, sizeof(CHAIN) - 1, caps, 1, 0, 0, &root) != DVS_OK ||
+      dvs_root(sw, lone, strlen(lone), caps, 1, 0, 0, &bystander) != DVS_OK) {
+    printf("      (%s)\n", dvs_last_error(sw) ? dvs_last_error(sw) : "?");
+    ok(0, "a chain and an unrelated instance start");
+    dvs_free(sw);
+    return;
+  }
+  spin(sw, 8);
+  okf(dvs_alive(sw) == 4, "three generations plus one bystander",
+      dvs_alive(sw), 4);
+  ok(dvs_kill(sw, root) == DVS_OK, "the chain's root is killed");
+  okf(dvs_alive(sw) == 1, "the whole chain goes with it", dvs_alive(sw), 1);
+  ok(dvs_instance(sw, bystander) != NULL,
+     "and the unrelated instance is untouched, so the sweep marked by parentage");
+  dvs_free(sw);
+}
+
+
 int main (void) {
   printf("=== the msgpack token cursor ===\n");
   the_cursor_agrees_with_the_encoder();
@@ -1037,10 +1293,14 @@ int main (void) {
   a_child_cannot_kill_its_supervisor();
   a_faulting_child_reports_a_readable_reason();
   a_wildcard_cannot_widen_a_grant();
+  a_wire_id_that_does_not_fit_is_refused();
+  a_spawn_is_not_truncated_at_a_zero_byte();
+  a_chain_is_killed_from_the_top();
 
   a_host_can_read_an_instance_s_budget_and_capabilities();
 
   printf("\n=== the snapshot cache and wake_on_message (8.4, 9.5) ===\n");
+  hibernation_is_off_unless_asked_for();
   pushing_to_a_dead_instance_is_gone();
   an_instance_swaps_out_and_a_message_wakes_it();
   a_cached_instance_without_wake_on_message_is_gone();

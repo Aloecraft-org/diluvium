@@ -1236,6 +1236,41 @@ static void null_arguments_are_refused_not_dereferenced (void) {
 }
 
 
+/*
+** The error message describes the step that just ran, not the instance's history.
+**
+** dv.h says it is "valid until the next call on it", and nothing enforced that: the
+** buffer was sticky, so anything reading it after a *successful* step saw an error
+** from earlier in the instance's life. The swarm layer decides between its "exited"
+** and "faulted" events exactly that way, so a supervisor restarted healthy children
+** that had recovered from an error -- and with hibernation switched on, a refused
+** snapshot set the error and every clean exit afterwards read as a fault.
+*/
+static void an_error_does_not_outlive_the_step_that_caused_it (void) {
+  dv_instance *inst = load("return 0", 0);
+  dv_waitset ws;
+  if (inst == NULL) { ok(0, "load"); return; }
+  /* Resuming an instance that is not parked is refused, and sets a message. */
+  eq_st(dv_resume(inst, 1), DV_BUSY, "resuming an unparked instance is refused");
+  ok(dv_last_error(inst) != NULL, "and that leaves a message to read");
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_DONE, "the program then runs to completion");
+  ok(dv_last_error(inst) == NULL,
+     "and the message is gone, so a clean finish cannot read as a failure");
+  dv_free(inst);
+  /* The other direction: a real error must still be readable after it happens. */
+  {
+    dv_instance *bad = load("error('boom', 0)", 0);
+    if (bad == NULL) { ok(0, "load a failing program"); return; }
+    memset(&ws, 0, sizeof(ws));
+    eq_st(dv_run(bad, &ws), DV_ERROR, "a failing program reports DV_ERROR");
+    ok(dv_last_error(bad) != NULL && strstr(dv_last_error(bad), "boom") != NULL,
+       "and its message survives the call that produced it");
+    dv_free(bad);
+  }
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -1248,6 +1283,7 @@ int main (void) {
   parking();
   timeout_answer();
   null_arguments_are_refused_not_dereferenced();
+  an_error_does_not_outlive_the_step_that_caused_it();
   closed_answer();
   a_spurious_resume_invents_nothing();
   blocking_push_from_guest();

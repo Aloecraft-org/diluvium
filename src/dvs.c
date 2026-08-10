@@ -92,6 +92,7 @@ typedef struct dvs_slot {
   int wake_on_message;
   int alive;
   int started;
+  int doomed;                   /* scratch, used only by 'kill_subtree' */
   /* The cache. 'snap' is the instance's whole state while it is not resident, and
      'pend' is what arrived for it in the meantime, oldest first. */
   uint8_t *snap;
@@ -108,6 +109,7 @@ struct dvs_swarm {
   dvs_id next_id;
   uint32_t spawn_rate;
   uint32_t spawns_this_step;
+  int allow_hibernation;        /* off by default: see dvs.h */
   char error[512];
 };
 
@@ -558,6 +560,21 @@ static void emit_event (dvs_swarm *sw, dvs_id to, const char *what,
 ** Subtree kill (9.5)
 ** ====================================================================== */
 
+/*
+** Kill an instance and everything below it, without recursion.
+**
+** The comment that used to be here claimed exactly that -- "by repeated scan rather
+** than a recursive walk ... a recursive walk would meet the C stack at a depth a
+** program is entitled to reach" -- above a body that called itself once per level.
+** 9.1.1 says delegation depth is unbounded, and a guest can build the chain, so the
+** claim was right and the code was not.
+**
+** Mark and sweep instead. Marking is a fixed point over a flat table: a slot is
+** doomed if it is the target or if its parent is doomed, and passes repeat until one
+** changes nothing. That terminates at nslots passes at worst and cannot recurse; it
+** also cannot hang on a parentage cycle, which should not exist but which nothing
+** currently prevents.
+*/
 static void kill_subtree (dvs_swarm *sw, dvs_id id, int notify_parent) {
   dvs_slot *sl = find(sw, id);
   uint32_t i;
@@ -565,25 +582,29 @@ static void kill_subtree (dvs_swarm *sw, dvs_id id, int notify_parent) {
   if (sl == NULL)
     return;
   parent = sl->parent;
-  /*
-  ** Children first, and by repeated scan rather than a recursive walk: the table
-  ** is flat, a subtree can be as deep as delegation went, and 9.1.1 says depth is
-  ** unbounded. A recursive walk would meet the C stack at a depth a program is
-  ** entitled to reach.
-  */
+  for (i = 0; i < sw->nslots; i++)
+    sw->slots[i].doomed = 0;
+  sl->doomed = 1;
   for (;;) {
-    int found = 0;
+    int changed = 0;
     for (i = 0; i < sw->nslots; i++) {
-      if (sw->slots[i].id != 0 && sw->slots[i].parent == id) {
-        kill_subtree(sw, sw->slots[i].id, 0);
-        found = 1;
-        break;
+      dvs_slot *s = &sw->slots[i];
+      if (s->id == 0 || s->doomed || s->parent == 0)
+        continue;
+      if (find(sw, s->parent) != NULL && find(sw, s->parent)->doomed) {
+        s->doomed = 1;
+        changed = 1;
       }
     }
-    if (!found)
+    if (!changed)
       break;
   }
-  release(sw, sl);
+  /* Release after marking, never during: 'release' clears the handle, so a slot
+     freed mid-walk would break the parent lookups the walk still depends on. */
+  for (i = 0; i < sw->nslots; i++) {
+    if (sw->slots[i].id != 0 && sw->slots[i].doomed)
+      release(sw, &sw->slots[i]);
+  }
   if (notify_parent && parent != 0)
     emit_event(sw, parent, "exited", id, "killed");
 }
@@ -614,12 +635,31 @@ size_t dvs_cached_size (dvs_swarm *sw, dvs_id id) {
 }
 
 
+void dvs_allow_hibernation (dvs_swarm *sw, int allow) {
+  if (sw != NULL)
+    sw->allow_hibernation = allow ? 1 : 0;
+}
+
+
 dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id) {
   dvs_slot *sl = find(sw, id);
   size_t need = 0;
   uint8_t *buf;
   if (sl == NULL || !sl->alive)
     return DVS_GONE;
+  /*
+  ** Refused unless asked for. 18.1's snapshot defect makes the wake-then-error path
+  ** corrupt memory, so this release makes it unreachable rather than documenting it.
+  ** The message names the reason, because "DVS_ERROR" on a call that used to work is
+  ** exactly the sort of thing a host wastes an afternoon on.
+  */
+  if (!sw->allow_hibernation) {
+    set_error(sw, "hibernation is off in this build: a restored program that "
+                  "raises an error unwinds from the stack base (see "
+                  "doc/Messaging.md 18.1). Call dvs_allow_hibernation to enable "
+                  "it anyway.");
+    return DVS_ERROR;
+  }
   if (sl->inst == NULL)
     return DVS_OK;              /* already cached; asking twice is not an error */
   /*
@@ -769,8 +809,17 @@ dvs_status dvs_push (dvs_swarm *sw, dvs_id id, const char *queue,
 ** ====================================================================== */
 
 /* Read a string field into 'out'; 1 on success. */
+/*
+** Read a string field. 'outlen', when given, receives the true byte count.
+**
+** The NUL termination is a convenience for the fields that really are text (an op
+** name, a capability); the length is what a caller must use for anything that may
+** contain a zero byte. 'do_spawn' used 'strlen' on the result and so truncated a
+** *compiled chunk* at its first zero byte -- bytecode is full of them -- then
+** reported the spawn as successful, with the child running a prefix of its program.
+*/
 static int field_str (const char *msg, size_t len, const char *key,
-                      char *out, size_t cap) {
+                      char *out, size_t cap, size_t *outlen) {
   diluvium_mp_cursor c;
   diluvium_mp_token t;
   diluvium_mp_open(&c, msg, len);
@@ -779,6 +828,8 @@ static int field_str (const char *msg, size_t len, const char *key,
     return 0;
   memcpy(out, t.p, t.len);
   out[t.len] = '\0';
+  if (outlen != NULL)
+    *outlen = t.len;
   return 1;
 }
 
@@ -798,6 +849,30 @@ static int field_int (const char *msg, size_t len, const char *key,
     return 1;
   }
   return 0;
+}
+
+
+/*
+** Read an instance handle.
+**
+** Separate from 'field_int' because a handle is a 'dvs_id', which is 32 bits, and
+** the wire carries 64. Casting the wider value was a real bug rather than an
+** untidiness: a request naming 0x100000002 truncated to 2, 'find' located instance
+** 2, and the request was carried out against **a different live instance** -- a kill
+** that destroyed the wrong subtree, reported as success. A value that does not
+** survive the round trip is refused instead.
+**
+** Zero is refused here too, because 0 is documented as never a valid handle, so
+** every caller would otherwise repeat the check.
+*/
+static int field_id (const char *msg, size_t len, const char *key, dvs_id *out) {
+  uint64_t v = 0;
+  if (!field_int(msg, len, key, &v))
+    return 0;
+  if (v == 0 || v > (uint64_t)0xffffffffu)
+    return 0;
+  *out = (dvs_id)v;
+  return (uint64_t)*out == v;   /* states the round trip rather than assuming it */
 }
 
 
@@ -855,6 +930,7 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
   char caps[DVS_MAX_CAPS][DVS_MAX_CAP_LEN];
   const char *capv[DVS_MAX_CAPS];
   char code[8192];
+  size_t code_len = 0;
   int ncaps, i;
   uint64_t insns = 0, mem = 0;
   dvs_slot *sl;
@@ -869,7 +945,7 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
     emit_event(sw, parent->id, "denied", 0, "spawn rate limit");
     return;
   }
-  if (!field_str(msg, len, "code", code, sizeof(code))) {
+  if (!field_str(msg, len, "code", code, sizeof(code), &code_len)) {
     emit_event(sw, parent->id, "denied", 0, "no code in the spawn request");
     return;
   }
@@ -906,7 +982,7 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
   sl->parent = parent->id;
   memset(&req, 0, sizeof(req));
   req.code = code;
-  req.code_len = strlen(code);
+  req.code_len = code_len;      /* not strlen: a compiled chunk is full of zeroes */
   req.instructions = insns;
   req.memory_kb = mem;
   req.wake_on_message = field_bool(msg, len, "wake_on_message");
@@ -922,17 +998,18 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
 
 
 static void do_kill (dvs_swarm *sw, dvs_slot *parent, const char *msg,
-                     size_t len) {
-  uint64_t target = 0;
+                    size_t len) {
+  dvs_id target = 0;
   dvs_slot *sl;
   dvs_id walk;
-  if (!field_int(msg, len, "id", &target) || target == 0) {
-    emit_event(sw, parent->id, "denied", 0, "no id in the kill request");
+  if (!field_id(msg, len, "id", &target)) {
+    emit_event(sw, parent->id, "denied", 0,
+               "no usable id in the kill request");
     return;
   }
-  sl = find(sw, (dvs_id)target);
+  sl = find(sw, target);
   if (sl == NULL) {
-    emit_event(sw, parent->id, "denied", (dvs_id)target, "no such instance");
+    emit_event(sw, parent->id, "denied", target, "no such instance");
     return;
   }
   /*
@@ -942,11 +1019,11 @@ static void do_kill (dvs_swarm *sw, dvs_slot *parent, const char *msg,
   */
   for (walk = sl->parent; walk != 0; walk = dvs_parent(sw, walk)) {
     if (walk == parent->id) {
-      kill_subtree(sw, (dvs_id)target, 1);
+      kill_subtree(sw, target, 1);
       return;
     }
   }
-  emit_event(sw, parent->id, "denied", (dvs_id)target, "not a descendant");
+  emit_event(sw, parent->id, "denied", target, "not a descendant");
 }
 
 
@@ -961,15 +1038,17 @@ static void do_kill (dvs_swarm *sw, dvs_slot *parent, const char *msg,
 */
 static void do_hibernate (dvs_swarm *sw, dvs_slot *parent, const char *msg,
                           size_t len) {
-  uint64_t target = 0;
+  dvs_id target = 0;
   dvs_id who = parent->id;
   dvs_slot *subject;
-  if (field_int(msg, len, "id", &target) && target != 0 &&
-      (dvs_id)target != parent->id) {
-    dvs_slot *sl = find(sw, (dvs_id)target);
+  /* The comparison is against the validated handle, not a truncation of it: a
+     request naming 0x100000000 + parent->id used to compare equal to the parent and
+     silently hibernate the requester instead of being refused. */
+  if (field_id(msg, len, "id", &target) && target != parent->id) {
+    dvs_slot *sl = find(sw, target);
     dvs_id walk;
     if (sl == NULL) {
-      emit_event(sw, parent->id, "denied", (dvs_id)target, "no such instance");
+      emit_event(sw, parent->id, "denied", target, "no such instance");
       return;
     }
     for (walk = sl->parent; walk != 0; walk = dvs_parent(sw, walk)) {
@@ -977,10 +1056,10 @@ static void do_hibernate (dvs_swarm *sw, dvs_slot *parent, const char *msg,
         break;
     }
     if (walk == 0) {
-      emit_event(sw, parent->id, "denied", (dvs_id)target, "not a descendant");
+      emit_event(sw, parent->id, "denied", target, "not a descendant");
       return;
     }
-    who = (dvs_id)target;
+    who = target;
   }
   /*
   ** 'wake_on_message' may be set here as well as at spawn time, and this is the
@@ -1010,24 +1089,32 @@ static void do_hibernate (dvs_swarm *sw, dvs_slot *parent, const char *msg,
 
 static void do_query (dvs_swarm *sw, dvs_slot *parent, const char *msg,
                       size_t len) {
-  uint64_t target = 0;
+  dvs_id target = 0;
   dvs_slot *sl;
   char detail[128];
   uint64_t insns = 0, mem = 0;
-  if (!field_int(msg, len, "id", &target)) {
-    emit_event(sw, parent->id, "denied", 0, "no id in the query");
+  if (!field_id(msg, len, "id", &target)) {
+    emit_event(sw, parent->id, "denied", 0, "no usable id in the query");
     return;
   }
-  sl = find(sw, (dvs_id)target);
+  sl = find(sw, target);
   if (sl == NULL) {
-    emit_event(sw, parent->id, "gone", (dvs_id)target, NULL);
+    /*
+    ** "status" with a detail, not an event named "gone": 9.2 lists the events this
+    ** queue carries and "gone" is not among them, so emitting one made a program
+    ** read an event the design does not describe. The information is the same.
+    */
+    emit_event(sw, parent->id, "status", target, "gone");
     return;
   }
-  dv_usage(sl->inst, &insns, &mem);
+  /* A cached instance has no 'dv_instance' to ask, and asking anyway would be a
+     NULL dereference on the one path where a supervisor most wants an answer. */
+  if (sl->inst != NULL)
+    dv_usage(sl->inst, &insns, &mem);
   snprintf(detail, sizeof(detail), "%s insns=%lu mem_kb=%lu",
-           sl->alive ? "alive" : "dead", (unsigned long)insns,
-           (unsigned long)mem);
-  emit_event(sw, parent->id, "status", (dvs_id)target, detail);
+           sl->inst == NULL ? "cached" : sl->alive ? "alive" : "dead",
+           (unsigned long)insns, (unsigned long)mem);
+  emit_event(sw, parent->id, "status", target, detail);
 }
 
 
@@ -1075,14 +1162,14 @@ static void drain (dvs_swarm *sw, dvs_slot *sl) {
       ** One "throttled" event is emitted so the requester can back off -- once per
       ** step rather than once per request, for the same reason.
       */
-      if (field_str((const char *)buf, n, "op", op, sizeof(op)) &&
+      if (field_str((const char *)buf, n, "op", op, sizeof(op), NULL) &&
           strcmp(op, "spawn") == 0 && sw->spawns_this_step >= sw->spawn_rate) {
         emit_event(sw, sl->id, "throttled", 0, "spawn rate limit");
         return;
       }
       dv_queue_release(sl->inst, q);
     }
-    if (!field_str((const char *)buf, n, "op", op, sizeof(op))) {
+    if (!field_str((const char *)buf, n, "op", op, sizeof(op), NULL)) {
       emit_event(sw, sl->id, "denied", 0, "no op in the request");
       continue;
     }

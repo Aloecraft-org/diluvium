@@ -99,6 +99,26 @@ static void set_error (dv_instance *inst, const char *msg) {
 
 
 /* Take the error off the thread's stack and keep a copy the host can read. */
+/*
+** Forget the last error, so 'dv_last_error' describes the step that just ran.
+**
+** dv.h already says the message is "valid until the next call on it", so this is
+** conformance rather than a change of contract -- but nothing enforced it, and the
+** buffer was in fact sticky. That made a *clean* exit indistinguishable from a
+** faulted one to anything reading the error afterwards: the swarm layer decides
+** between its "exited" and "faulted" events that way, so a supervisor restarted
+** healthy children whenever they had recovered from an error earlier in their life.
+**
+** Called immediately before Lua runs, not at the top of the entry points, because
+** the early returns there set errors of their own and a caller reading one after a
+** repeated call should still see it.
+*/
+static void clear_error (dv_instance *inst) {
+  free(inst->error);
+  inst->error = NULL;
+}
+
+
 static void set_error_from (dv_instance *inst, lua_State *from) {
   const char *msg = lua_tostring(from, -1);
   set_error(inst, (msg != NULL) ? msg : "(error object is not a string)");
@@ -562,6 +582,7 @@ dv_status dv_run (dv_instance *inst, dv_waitset *out_waitset) {
     set_error(inst, "dv_run: nothing loaded");
     return DV_ERROR;
   }
+  clear_error(inst);
   inst->co = lua_newthread(inst->L);
   inst->co_ref = luaL_ref(inst->L, LUA_REGISTRYINDEX);
   if (!lua_checkstack(inst->co, 4)) {
@@ -651,6 +672,7 @@ dv_status dv_resume (dv_instance *inst, dv_queue_id fired) {
       return DV_IDLE;
     }
   }
+  clear_error(inst);
   lua_pop(inst->co, inst->pending);   /* the park's description */
   inst->pending = 0;
   inst->parked = 0;

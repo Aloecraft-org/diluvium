@@ -2717,7 +2717,7 @@ Grouped, deduplicated, and ordered by what a caller would hit first.
 | A clean exit is reported as `"faulted"` | `dv_last_error` is sticky, so a supervisor restarts healthy children. Certain to occur, not a corner case. |
 | `do_kill` narrows a 64-bit id to 32 bits | Destroys a different live instance instead of refusing. `do_hibernate`'s self-versus-target guard compares the same truncated value. |
 | `do_spawn` truncates code at the first NUL | The child runs a prefix and it is reported as a successful spawn. Harmless for source, silent corruption for bytecode. |
-| `kill_subtree` recurses once per link | Its own comment says it does not. A deep delegation chain overflows the C stack, and §9.1.1 says depth is unbounded. |
+| `kill_subtree` recurses once per link | Its own comment says it does not. **The crash the finding described is not reachable, and this entry overstated it before being checked:** ~131,000 nested frames fit in an 8 MB stack, and 131,000 instances would need something like 6 GB of `lua_State`s to exist. The machine runs out of instances long before the stack runs out of frames. Fixed anyway — mark and sweep over the flat table — so the code matches its comment and the bound is gone in principle. |
 | `do_query` emits a `"gone"` event | Not one of the events §9.2 lists. |
 
 **Endpoints and the codec.**
