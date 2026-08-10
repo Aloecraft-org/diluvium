@@ -10,11 +10,23 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
-## [5.5.1_build3] - unreleased
+## [5.5.1_build3] - 2026-08-10 (prerelease)
 
 `v5.5.1_build3` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
-Two things, and the second is the larger one.
+**A pre-release, deliberately.** Not because it is unfinished or
+untested -- the suite, the sanitizers and the fuzzers are green, and the
+feature set below is complete -- but because the configuration it is
+*supported in* is narrower than the feature set it ships. Hibernation is
+switched off and should stay off; the capability layer is a structuring
+device rather than a security boundary, so every program loaded must be
+one you wrote or templated. Both are spelled out under **Known issues**,
+which is the part of these notes to read before deploying anything.
+
+`latest` stays on 5.5.1_build2 for that reason, and the release mirror
+does not carry this one. A deployment that wants it should name the tag.
+
+Two things in it, and the second is the larger one.
 
 Compiled chunks are checked at load time instead of being trusted,
 which closes finding 8.

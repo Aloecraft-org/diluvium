@@ -19,10 +19,18 @@
 #   status            released | unreleased | tagged
 #                     `tagged` means the tag exists but no GitHub release
 #                     was published for it.
-#   stable            A real release rather than a candidate. GitHub's own
-#                     `prerelease` flag is not usable here -- every release
-#                     in this repository is flagged false, candidates
-#                     included -- so this field is the truth.
+#   stable            A real release rather than a candidate. This field is
+#                     the truth and GitHub's `prerelease` flag is derived
+#                     from it: `release.yml`'s preflight reads it through
+#                     `changelog.py release-check` and then PATCHes the flag
+#                     after publishing, because the release action will set
+#                     that flag but not clear it. Historically every release
+#                     here was flagged false regardless, candidates
+#                     included; that is what the derivation fixed.
+#                     False is not only for candidates. A release whose
+#                     supported configuration is narrower than the feature
+#                     set it ships is not stable either, and 5.5.1_build3 is
+#                     the first of those.
 #   latest            Optional. Exactly one entry carries `latest: true`;
 #                     that is what a `latest/` path should resolve to.
 #   mirror            Whether the release mirror should carry it. This
@@ -51,14 +59,26 @@ releases:
 
   - version: "5.5.1_build3"
     tag: v5.5.1_build3
-    date: null
-    status: unreleased
-    stable: true
+    date: 2026-08-10
+    status: released
+    stable: false
     mirror: false
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
-      Two things, and the second is the larger one.
+      **A pre-release, deliberately.** Not because it is unfinished or
+      untested -- the suite, the sanitizers and the fuzzers are green, and the
+      feature set below is complete -- but because the configuration it is
+      *supported in* is narrower than the feature set it ships. Hibernation is
+      switched off and should stay off; the capability layer is a structuring
+      device rather than a security boundary, so every program loaded must be
+      one you wrote or templated. Both are spelled out under **Known issues**,
+      which is the part of these notes to read before deploying anything.
+
+      `latest` stays on 5.5.1_build2 for that reason, and the release mirror
+      does not carry this one. A deployment that wants it should name the tag.
+
+      Two things in it, and the second is the larger one.
 
       Compiled chunks are checked at load time instead of being trusted,
       which closes finding 8.
