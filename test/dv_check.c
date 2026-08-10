@@ -432,6 +432,30 @@ static int bind_ref (void *ud, const uint8_t *ref, size_t len,
 
 /* msgpack fixext1 with code 0x02 and one payload byte: an endpoint reference as
    it arrives in a message. */
+/*
+** The payload of a msgpack string, NUL-terminated into 'out'.
+**
+** Assuming a one-byte header works only up to 31 bytes: past that the codec emits
+** str8 (0xd9) with a length byte, and 'buf + 1' then starts one byte early. Every
+** message here is an error string, which is exactly the length that crosses the
+** boundary, so the header is read rather than guessed.
+*/
+static const char *mp_str (const uint8_t *b, size_t n, char *out, size_t cap) {
+  size_t len, off;
+  out[0] = '\0';
+  if (n < 1) return out;
+  if ((b[0] & 0xe0) == 0xa0) { len = b[0] & 0x1f; off = 1; }
+  else if (b[0] == 0xd9 && n >= 2) { len = b[1]; off = 2; }
+  else if (b[0] == 0xda && n >= 3) { len = ((size_t)b[1] << 8) | b[2]; off = 3; }
+  else return out;
+  if (off + len > n) len = (n > off) ? n - off : 0;
+  if (len > cap - 1) len = cap - 1;
+  memcpy(out, b + off, len);
+  out[len] = '\0';
+  return out;
+}
+
+
 static void ref_message (uint8_t *out, char c) {
   out[0] = 0xd4;
   out[1] = 0x02;
@@ -566,6 +590,102 @@ static void endpoint_preauthorised (void) {
   log = dv_queue_lookup(inst, "log");
   dv_queue_pop(inst, log, buf, sizeof(buf), &n);
   ok(n == 5 && memcmp(buf + 1, "live", 4) == 0, "and it is live");
+  dv_free(inst);
+}
+
+
+/*
+** A real reference, and a host that binds nothing.
+**
+** This lives here rather than in test_endpoint.lua because it needs a genuine
+** reference to get as far as the message, and the only way to make one from Lua
+** was the forgery that 'msgpack.decode' used to allow. Keeping that open in order
+** to test the error message behind it would have been testing through the hole.
+**
+** The reference is real: the host pushes ext 0x02 bytes into the inbox, delivery
+** resolves them because the bytes came from outside the guest, and the program
+** binds what it received. What is missing is any binding for it -- no
+** 'dv_endpoint_allow' and no handler -- which is the case a host hits on its first
+** run, so the message it gets should say what is actually wrong.
+*/
+static void endpoint_with_no_host_binding (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local _, ref = queue.wait({inb}) "
+    "local out = queue.declare('log', {exported = true}) "
+    "local ok, err = pcall(endpoint.bind, ref, 'peer') "
+    "queue.push(out, tostring(ok) .. '|' .. tostring(err)) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox, log;
+  uint8_t ref[3], buf[256];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  /* Deliberately nothing: no allow, no handler. */
+  inbox = dv_queue_lookup(inst, "inbox");
+  dv_run(inst, &ws);
+  ref_message(ref, 'Z');
+  dv_queue_push(inst, inbox, ref, sizeof(ref));
+  eq_st(dv_resume(inst, inbox), DV_DONE, "the program runs to completion");
+  log = dv_queue_lookup(inst, "log");
+  if (dv_queue_pop(inst, log, buf, sizeof(buf), &n) == DV_OK && n > 1) {
+    char text[256];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strstr(msg, "false|") == msg, "binding a real reference fails");
+    ok(strstr(msg, "binds no endpoints") != NULL,
+       "and says this host binds no endpoints, rather than something vaguer");
+    if (strstr(msg, "binds no endpoints") == NULL)
+      printf("      (%s)\n", msg);
+  }
+  else {
+    ok(0, "binding a real reference fails");
+    ok(0, "and says this host binds no endpoints, rather than something vaguer");
+  }
+  dv_free(inst);
+}
+
+
+/*
+** The forgery that 'msgpack.decode' used to permit, asserted from the host's side.
+**
+** 7.3 says a reference "cannot be forged" and that a program "receives one in a
+** message and never builds one". That was untrue: the resolver ran on any bytes
+** handed to guest-callable 'msgpack.decode', so a program could mint a reference
+** to any pre-authorised peer by naming it. This is that attack, and it must fail.
+*/
+static void a_guest_cannot_mint_a_reference (void) {
+  dv_instance *inst = load(
+    "local out = queue.declare('log', {exported = true}) "
+    "local forged = msgpack.decode('\\xd4\\x029') "
+    "local ok, err = pcall(endpoint.bind, forged, 'peer') "
+    "queue.push(out, tostring(ok) .. '|' .. tostring(err)) "
+    "return 0", 0);
+  dv_waitset ws;
+  uint8_t buf[256];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  /* The host authorises one peer and hands the program nothing. */
+  dv_endpoint_allow(inst, (const uint8_t *)"9", 1, 42);
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  if (dv_queue_pop(inst, dv_queue_lookup(inst, "log"), buf, sizeof(buf), &n)
+      == DV_OK && n > 1) {
+    char text[256];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strstr(msg, "false|") == msg,
+       "a guest cannot bind a reference it decoded itself");
+    ok(strstr(msg, "never builds one") != NULL,
+       "and the refusal names 7.3's rule");
+    if (strstr(msg, "never builds one") == NULL)
+      printf("      (%s)\n", msg);
+  }
+  else {
+    ok(0, "a guest cannot bind a reference it decoded itself");
+    ok(0, "and the refusal names 7.3's rule");
+  }
+  /* The decisive check: nothing was bound, so the authorised peer is untouched. */
+  ok(dv_endpoint_queue(inst, 42) == 0,
+     "and no queue exists for the peer it tried to reach");
   dv_free(inst);
 }
 
@@ -1055,6 +1175,8 @@ int main (void) {
   endpoints();
   endpoint_refusals();
   endpoint_preauthorised();
+  endpoint_with_no_host_binding();
+  a_guest_cannot_mint_a_reference();
   relay_between_instances();
 
   printf("\n=== budgets (9.4) ===\n");

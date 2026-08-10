@@ -223,21 +223,30 @@ do
        "an unassigned Diluvium code is refused by name")
     ok(err_of("\xd4\x09x"):find("0x09", 1, true) ~= nil,
        "and the message renders the code as hex")
-    -- 4.2 has two halves, and only one of them is reachable from here.
+    -- 4.2's resolver runs on the HOST's bytes and never on a guest's string, so
+    -- from Lua ext 0x02 is an opaque ext value even in a build that has the
+    -- endpoint library installed.
     --
-    -- With a resolver installed, ext 0x02 becomes an endpoint reference. This
-    -- build has one, because 'luaopen_dendpoint' installs it -- so that is what
-    -- this asserts, and the assertion changing is the resolver seam working
-    -- rather than a regression.
+    -- This assertion used to be the opposite, and that was the bug: running the
+    -- resolver here made 'msgpack.decode' the endpoint-reference constructor that
+    -- 7.3 says does not exist. A program could write msgpack.decode('\xd4\x02' ..
+    -- name) and bind the result, reaching any peer the host had pre-authorised
+    -- without ever being handed a reference. The old assertion could not tell a
+    -- real reference from an opaque ext wrapper -- both are tables with a hidden
+    -- metatable -- so it passed either way and the hole survived behind it.
     --
-    -- The other half -- that with NO resolver the same bytes decode to an opaque
-    -- ext value, so an embedder linking only the codec never needs one -- cannot
-    -- be reached from a state that has the endpoint library. It is covered by
-    -- bindings/js, whose codec has no resolver at all and asserts exactly that.
+    -- The other half of 4.2 -- a real reference, resolved from bytes the host
+    -- delivered -- cannot be tested from pure Lua, because it needs a host to do
+    -- the delivering. It is covered by test/dv_check.c's 'endpoint_preauthorised',
+    -- which pushes the reference into the inbox and lets the program bind what it
+    -- received.
     local ep = msgpack.decode("\xd4\x02x")
-    eq(type(ep), "table", "ext 0x02 resolves to an endpoint reference")
-    eq(getmetatable(ep), false, "which a program cannot inspect")
-    eq(ep[3], nil, "and which is not an ext wrapper any more")
+    eq(type(ep), "table", "ext 0x02 decodes to a value a program can hold")
+    eq(ep[1], "x", "an opaque ext wrapper carrying the payload")
+    eq(ep[3], 2, "and the code, so it is plainly not a reference")
+    ok(getmetatable(ep) ~= false,
+       "its metatable is visible, unlike a real reference's, which is hidden -- "
+       .. "that is the discriminator the old assertion used to get backwards")
     -- every ext width
     eq(msgpack.decode("\xd4\x20a")[1], "a", "fixext1")
     eq(msgpack.decode("\xd5\x20ab")[1], "ab", "fixext2")

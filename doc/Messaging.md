@@ -1874,12 +1874,38 @@ Ext 0x02 gets the resolver seam 4.2 promised, and the seam is real rather than
 notional: with the endpoint library loaded a reference in a message arrives as an
 opaque reference object; without it the same bytes decode to an ext value, so an
 embedder linking only the codec sees no error. Both halves are tested, in
-different places — the resolved path in `test_msgpack.lua`, the opaque fallback in
-`bindings/js`, whose codec has no resolver at all.
+different places — the resolved path in `test/dv_check.c`, which needs a host to
+deliver the bytes, and the opaque fallback in `test_msgpack.lua` and `bindings/js`.
 
-A reference cannot be forged. There is no constructor anywhere, its metatable is
-hidden, and a lookalike is refused by name — so 7.3's "never constructed by the
-guest" is structural rather than a convention.
+**"A reference cannot be forged" was false when written, and is now true.** The
+claim was: there is no constructor anywhere, its metatable is hidden, and a
+lookalike is refused by name, so 7.3's "never constructed by the guest" is
+structural rather than a convention. Two of those three held. The constructor was
+`msgpack.decode`: it is guest-callable, and the resolver ran on whatever string it
+was handed, so `msgpack.decode('\xd4\x02' .. name)` produced a genuine reference
+with the real hidden metatable. Demonstrated against a host that pre-authorised one
+peer with `dv_endpoint_allow` and delivered nothing: the program minted the
+reference, bound it, and its message arrived in that peer's queue. A reference was a
+guessable name, not a capability — and 9.3's attenuation partly rests on it being a
+capability.
+
+The fix is that authority follows *where the bytes came from*, since the bytes
+themselves carry none. The decode cursor now records whether it is reading the
+host's bytes or a guest's string, and only the host's reach the resolver: the queue
+delivery path and snapshot restore are trusted, guest-callable `msgpack.decode` is
+not. A guest decoding ext 0x02 gets the opaque ext wrapper an embedder without a
+resolver has always got, which is a documented and inert value.
+
+**Two tests asserted the hole as intended behaviour**, which is why it survived. They
+were not vague about it: an opaque wrapper has a visible metatable and a reference
+hides its, so `eq(getmetatable(ref), false)` distinguished the two exactly — and
+asserted the wrong one. `test_endpoint.lua` went further and obtained "a reference"
+by calling the forgery three times, including in the block titled "a reference
+cannot be forged". The property was documented one way and tested the other, and the
+test won for as long as nobody read both. Both now assert the refusal, the forgery
+list includes the vector that actually worked, and the resolved path moved to
+`dv_check.c` where a host can deliver a real reference — because testing it from Lua
+required keeping the hole open.
 
 Accepted on: a push to a closed endpoint answering `"gone"` immediately, from both
 the guest and the host side, without raising; `endpoint.status` reporting live
@@ -2609,6 +2635,19 @@ artifact between sessions that do not share context.
   it. The rule that actually prevents this is not "be careful with checkout" but
   "commit before mutating": a mutation test needs a clean baseline to return to, and
   the cheap way to have one is a commit, not memory.
+- **The most serious correction in the document: a security claim that two tests
+  actively defended.** 7.3 said an endpoint reference "cannot be forged. There is no
+  constructor anywhere." `msgpack.decode` was the constructor — guest-callable, and
+  it ran the resolver on any string. A program could mint a reference to any
+  pre-authorised peer by naming it, bind it, and push to it, proven end to end
+  against a host that had delivered nothing. The general lesson is not "check your
+  security claims"; it is that **a claim contradicted by a passing test is worse than
+  an unchecked one**, because the test converts the contradiction into evidence. Two
+  tests asserted the forged object *was* a reference, one of them inside a block
+  titled "a reference cannot be forged", and both distinguished the two cases
+  correctly while asserting the wrong one. When a property is stated in prose and
+  also asserted in a test, the two must be read against each other, because the test
+  is what will be believed.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

@@ -951,6 +951,17 @@ typedef struct mp_cur {
   const unsigned char *p;
   size_t left;
   mp_unsnap *snap;                     /* NULL in the plain codec */
+  /*
+  ** Are these bytes the host's, or the guest's own string?
+  **
+  ** Only the host's may mint an endpoint reference. 7.3 says a program "receives
+  ** one in a message and never builds one", and that has to be enforced by where
+  ** the bytes came from, because the bytes themselves carry no authority -- ext
+  ** 0x02's payload is a name a guest can guess or simply try. Set on the queue
+  ** delivery path and on snapshot restore; clear in guest-callable
+  ** 'msgpack.decode'.
+  */
+  int trusted;
 } mp_cur;
 
 
@@ -1064,6 +1075,26 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
       return;
     case 0x02: {  /* endpoint reference: the resolver's, if there is one */
       const diluvium_msgpack_resolver *r;
+      /*
+      ** Untrusted bytes never reach the resolver, and this is a security boundary
+      ** rather than a tidiness rule. 7.3 claims a reference "cannot be forged"
+      ** because "there is no constructor anywhere" -- but 'msgpack.decode' is
+      ** guest-callable, and running the resolver on whatever string it was handed
+      ** made it exactly that constructor. A program could write
+      ** msgpack.decode('\xd4\x02' .. name), get a genuine reference with the real
+      ** hidden metatable, and bind it: proven against a host that had authorised
+      ** one peer and delivered nothing, where the guest reached that peer's queue.
+      ** The reference was a guessable name, not a capability.
+      **
+      ** Falling through to the opaque ext value is the same thing that already
+      ** happens when no resolver is installed, so a guest decoding these bytes gets
+      ** a documented, inert value rather than an error -- and a real reference stays
+      ** something only the host can put in front of a program.
+      */
+      if (!c->trusted) {
+        mp_ext_push(L, code, data, len);
+        return;
+      }
       lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_RESOLVER);
       r = (const diluvium_msgpack_resolver *)lua_touserdata(L, -1);
       lua_pop(L, 1);
@@ -1281,6 +1312,7 @@ static int mp_decode (lua_State *L) {
   c.p = (const unsigned char *)s + (offset - 1);
   c.left = len - (size_t)(offset - 1);
   c.snap = NULL;
+  c.trusted = 0;                  /* a guest's own string mints no references */
   mp_decode_value(&c, 0);
   if (wants_next) {
     /* 5.4: decode(str, offset) also returns where the next value starts.
@@ -1319,6 +1351,9 @@ LUA_API void diluvium_msgpack_decode_n (lua_State *L, const char *s, size_t len,
   c.p = (const unsigned char *)s;
   c.left = len;
   c.snap = NULL;
+  /* The host's own entry point, used by queue delivery: these bytes arrived from
+     outside the guest, so a reference in them is one the host chose to hand over. */
+  c.trusted = 1;
   mp_decode_value(&c, 0);
   if (used != NULL)
     *used = len - c.left;
@@ -1615,6 +1650,12 @@ LUA_API void diluvium_msgpack_decode_graph (lua_State *L, const char *s,
   c.p = (const unsigned char *)s;
   c.left = len;
   c.snap = &snap;
+  /* A snapshot is the host's bytes too. 10.10 treats one as untrusted for
+     *validation* -- every field is range-checked -- but a reference inside it was
+     put there by a previous run of this same program, so restoring it is restoring
+     what the host had already granted, not minting something new. Refusing here
+     would mean a parked agent lost its endpoints across a hibernation. */
+  c.trusted = 1;
   /* Published so a fixup hook can resolve a position. Saved and restored, since
      a nested decode is unsupported but must not leave a dangling pointer. */
   lua_rawgetp(L, LUA_REGISTRYINDEX, &MP_CURDEC);

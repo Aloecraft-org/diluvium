@@ -23,16 +23,32 @@ end
 
 print("=== endpoint ===")
 
-print("-- ext 0x02 resolves to a reference, which is the seam in 4.2")
+print("-- 4.2's resolver runs on the host's bytes, never on a guest's string")
 do
-    -- Without the endpoint library installed this would decode to an opaque ext
-    -- value; with it, the codec asks a resolver. That the codec needs no
-    -- knowledge of endpoints is the whole point of the injected seam.
-    local ref = msgpack.decode("\xd4\x02Z")
-    eq(type(ref), "table", "a reference is a value a program can hold")
-    eq(getmetatable(ref), false, "but not one it can inspect")
-    ok(not pcall(function() return ref.anything end) or ref.anything == nil,
-       "there is nothing inside it to read")
+    -- This block used to assert the opposite: that ext 0x02 decoded from Lua
+    -- became a reference. That WAS the resolver seam working -- and it was also a
+    -- forgery vector, because 'msgpack.decode' is guest-callable, so it was the
+    -- endpoint-reference constructor 7.3 says does not exist. Proven against a
+    -- host that had pre-authorised one peer and delivered nothing: the program
+    -- wrote msgpack.decode('\xd4\x02' .. name), bound it, and pushed to that
+    -- peer's queue.
+    --
+    -- So the guest side of the seam is now an opaque ext wrapper, which is what an
+    -- embedder with no resolver has always got. The resolver still runs -- on the
+    -- delivery path, where the bytes came from the host -- and that half is
+    -- covered by test/dv_check.c's 'endpoint_preauthorised' and
+    -- 'relay_between_instances', because it needs a host and cannot be reached
+    -- from pure Lua.
+    local notref = msgpack.decode("\xd4\x02Z")
+    eq(type(notref), "table", "the bytes still decode to something holdable")
+    ok(getmetatable(notref) ~= false,
+       "but its metatable is visible, so it is an ext wrapper and not a reference")
+    eq(notref[3], 2, "carrying ext code 2 in the open")
+    local okk, err = pcall(endpoint.bind, notref, "peer")
+    ok(not okk, "and endpoint.bind refuses it")
+    ok(tostring(err):find("never builds one", 1, true) ~= nil,
+       "with the message that a program receives a reference instead: "
+       .. tostring(err))
 end
 
 print("-- a reference cannot be forged (7.3)")
@@ -40,7 +56,13 @@ do
     -- 7.3 says a program receives a reference and never constructs one. There is
     -- no constructor exposed, and a lookalike is refused, so that is structural
     -- rather than a convention.
-    for _, fake in ipairs{ {}, {"bytes"}, setmetatable({}, {}), "string", 5 } do
+    -- The last entry is the one that used to work, and it is the reason this list
+    -- was not enough before: every other candidate lacks the metatable, so the
+    -- loop only ever proved that obviously-wrong shapes are refused. A decoded
+    -- ext 0x02 was not obviously wrong -- it was a real reference.
+    for _, fake in ipairs{ {}, {"bytes"}, setmetatable({}, {}), "string", 5,
+                           msgpack.decode("\xd4\x02Z"),
+                           msgpack.decode("\xc7\x06\x02peer-b") } do
         local okk, err = pcall(endpoint.bind, fake, "x")
         ok(not okk, "a forged reference is refused")
         ok(tostring(err):find("never builds one", 1, true) ~= nil,
@@ -48,14 +70,11 @@ do
     end
 end
 
-print("-- with no host to resolve against, bind says so")
-do
-    local ref = msgpack.decode("\xd4\x02Z")
-    local okk, err = pcall(endpoint.bind, ref, "peer")
-    ok(not okk, "bind fails when the host binds no endpoints")
-    ok(tostring(err):find("binds no endpoints", 1, true) ~= nil,
-       "and says that rather than something vaguer: " .. tostring(err))
-end
+-- The "with no host to resolve against, bind says so" case moved to
+-- test/dv_check.c. It needed a *real* reference to get far enough to hit the
+-- no-host message, and the only way to make one from Lua was the forgery this
+-- file now refuses. Asserting it here would mean keeping the hole open to test
+-- the error message behind it.
 
 print("-- an ordinary queue is not an endpoint")
 do
