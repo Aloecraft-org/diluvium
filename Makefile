@@ -252,7 +252,7 @@ build_static_libs: _wasi_static_lib _native_static_lib _portable_static_lib _was
 
 verify_wasm: _wasm_verify_step1 _wasm_verify_step2 _wasm_verify_step3
 
-test_build: _build_step0
+test_build: _build_step0 test_libs
 	gcc $(TEST_CFLAGS) -o $(TEST_BIN) $(CURDIR)/.data/onelua.c -lm
 
 failing_test_cases:
@@ -362,6 +362,23 @@ sanitize_checks: _build_step0
 #
 # Always with -fsanitize=address: without it the out-of-bounds assertions are
 # unenforced and the run means very little.
+# The upstream test C libraries, which 'attrib' needs.
+#
+# They were never built, and the test was skipped with a reason blaming a missing
+# C API harness -- which is linked and was never the problem. attrib covers
+# 'require', the package search paths and C module loading, and this fork ships a
+# modified loadlib.c, so that was real coverage lost behind a wrong sentence.
+#
+# Built best-effort: a platform where these will not build is a platform where
+# attrib skips, which the runner's guard decides by trying to load one rather than
+# by trusting this target to have succeeded.
+test_libs:
+	-@cd $(CURDIR)/test/libs && $(MAKE) LUA_DIR=$(CURDIR)/src >/dev/null 2>&1 \
+	  && cp -f lib2.so P1/ 2>/dev/null; true
+	@ls $(CURDIR)/test/libs/*.so >/dev/null 2>&1 \
+	  && echo "test C libraries built" \
+	  || echo "test C libraries did not build; attrib will skip"
+
 mp_cursor_fuzz: _build_step0
 	gcc $(SAN_CFLAGS) -DLUA_USE_LINUX -Wl,-E -ldl -DMAKE_LIB \
 	  -I$(CURDIR)/.data -o $(CURDIR)/dist/mp_cursor_fuzz \
@@ -397,7 +414,7 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
-        snap_fuzz sanitize_checks mp_cursor_fuzz
+        snap_fuzz sanitize_checks mp_cursor_fuzz test_libs
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua
