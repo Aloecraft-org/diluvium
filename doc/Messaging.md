@@ -2191,10 +2191,45 @@ two readings of the same spec. The JS *wasm wrapper* is unverified: building
 `js-binding` job is the first place it runs. Stated in `bindings/README.md`
 rather than implied.
 
-**M8: packaging**
+**M8: packaging** — not started, but the ground was cleared first.
 Rust and JS first, then Python wheels and the header archive.
 Accept when: the portability demo runs in both environments from published
 packages, not local builds.
+
+*Before any of that*, the three CI jobs that had been failing on every run were
+fixed. Packaging is the milestone that publishes what CI says is good, so starting
+it with three red jobs would have meant publishing on the strength of a signal
+nobody was reading. All three failed for the same structural reason rather than by
+coincidence: **each was the only place a property was checked, and none of them
+could run without a container.**
+
+- **The wasmtime binding could not load any module.** The crate was pinned to
+  wasmtime 27, and the wasi-sdk lowers Lua's `setjmp`/`longjmp` onto
+  exception-handling instructions, so every `diluvium.wasm` contains `throw` and
+  `try_table`. wasmtime 27 has no way to enable EH — the feature is not plumbed, so
+  there is no flag to set — and the module was refused at parse. Now wasmtime 43
+  (43 and not 47: 47's MSRV is the current stable, with no headroom for a CI runner
+  that uses whatever Rust it ships), with `wasm_exceptions` set explicitly and
+  wasmtime's `gc-null` feature, since `gc` alone compiles and then fails at
+  `Engine::new`.
+- **The JavaScript wrapper instantiated with no imports at all.** The wasm is linked
+  against the wasi-sdk's libc, so it imports `wasi_snapshot_preview1` whether or not
+  a program touches a file. There is now a portable preview-1 host — a clock,
+  randomness, stdout and stderr, refusals for the rest — with the stubs synthesized
+  from the module's own import list, so a wasi-sdk bump adds a call answering ENOSYS
+  instead of breaking instantiation.
+- **The changelog tool crashed on its own input.** `upgrading:` had been written as
+  `- |` instead of `|`, copying the shape of the `security:` list below it. The
+  validator declares which keys are scalars and never checked it, so a wrong type
+  passed `validate` and blew up in `render`. It checks now, and the release notes
+  that had been written but never rendered are in `CHANGELOG.md`.
+
+Each fix came with a test that runs *without* the container, which is the part that
+matters more than any of the three fixes: a hand-written wasm module with a `throw`
+for the engine, a hand-assembled module importing `wasi_snapshot_preview1` for the
+shim, and a type check for the validator. All were mutation-verified, and two of
+those mutations turned nothing red and exposed weak tests — including one of my own,
+written minutes earlier.
 
 ---
 
@@ -2463,6 +2498,31 @@ artifact between sessions that do not share context.
   the instance behind it finished and was released. This is why `dvs_instance` takes
   a handle and returns a pointer that must be re-fetched, and why the snapshot cache
   can return `NULL` for a handle that is perfectly alive.
+- **A check that only runs where it cannot be run is not a check.** Three CI jobs
+  failed on every run for weeks, and all three were invisible locally for the same
+  reason: the property each one covered was covered *only* there, and the job needed
+  a container running a pinned wasi-sdk. `cargo build` passed. `npm test` passed.
+  Nobody was lying; there was simply nothing to run. The fix that matters is not the
+  three one-line changes, it is that each now has a test that runs anywhere cargo or
+  node does — a hand-written wasm module with a `throw` in it, and a hand-assembled
+  module that imports `wasi_snapshot_preview1`. When a property can only be checked
+  in an environment you do not have, build the smallest artifact that exhibits it
+  rather than deferring the check to a job you will stop reading.
+- **A validator that declares a schema and does not enforce it is worse than none.**
+  `changelog.py` listed which keys are scalars and only type-checked the list-valued
+  ones, so `upgrading:` written as `- |` passed `validate` and crashed `render`. The
+  two halves of one file disagreed about a type and only one of them said so. The
+  general shape: whenever a declaration and a consumer both know a rule, the
+  declaration has to be the thing that enforces it.
+- **Two more green tests that were not evidence, and one of them was minutes old.**
+  Removing `config.wasm_exceptions(true)` correctly turned the new engine test red;
+  removing the fresh-`DataView` mitigation from the WASI shim turned nothing red,
+  because the test grew the guest's memory *before* making any call, so a lazily
+  cached view was only ever built after the grow. I had written that test in the same
+  turn as the code it was checking. That is seven times now, which is enough to
+  restate the rule with the sharper edge: mutation-verify a test *when you write it*,
+  not when you next suspect it, because the author is the least likely person to
+  notice that it passes for the wrong reason.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

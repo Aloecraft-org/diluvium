@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use wasmtime::{Engine, Instance as WasmInstance, Linker, Memory, Module, Store, TypedFunc};
-use wasmtime_wasi::preview1::WasiP1Ctx;
+use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
 
 /// The ABI version this crate was built against.
@@ -142,8 +142,23 @@ impl Runtime {
         let mut config = wasmtime::Config::new();
         // Fuel is opt-in per instance but has to be enabled on the engine.
         config.consume_fuel(true);
+        //
+        // The exception-handling proposal, and it is not optional. The wasi-sdk
+        // lowers Lua's setjmp/longjmp onto EH instructions -- '-mllvm
+        // -wasm-enable-sjlj' in the Makefile -- so every 'diluvium.wasm' contains
+        // 'try_table' and 'throw', and an engine without EH refuses the module at
+        // parse rather than at the first error a program raises.
+        //
+        // Set explicitly even though wasmtime defaults it on, because that default
+        // is gated on wasmtime's 'gc' feature and this crate builds with
+        // 'default-features = false'. A silently feature-gated default is what put
+        // "exceptions proposal not enabled" in CI for weeks; stating it here means
+        // dropping the feature is a compile error instead of a runtime one.
+        config.wasm_exceptions(true);
         let engine = Engine::new(&config)?;
-        let module = Module::new(&engine, wasm).context("compiling diluvium.wasm")?;
+        let module = Module::new(&engine, wasm)
+            .map_err(anyhow::Error::from)
+            .context("compiling diluvium.wasm")?;
 
         // Which module is this? The repository builds two: diluvium_wasi.wasm,
         // which imports WASI preview-1, and a wasm32-unknown-unknown one that
@@ -157,7 +172,7 @@ impl Runtime {
         // environment, no stdin. A program cannot read the host's filesystem
         // because there is nothing mounted to read.
         let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
-        wasmtime_wasi::preview1::add_to_linker_sync(&mut linker, |cx| cx)?;
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |cx| cx)?;
         Ok(Runtime { engine, module, linker })
     }
 
@@ -188,6 +203,7 @@ impl Runtime {
         let inst = self
             .linker
             .instantiate(&mut store, &self.module)
+            .map_err(anyhow::Error::from)
             .context("instantiating diluvium.wasm")?;
 
         let memory = inst
@@ -282,6 +298,7 @@ impl Exports {
         macro_rules! f {
             ($name:literal) => {
                 inst.get_typed_func(&mut *store, $name)
+                    .map_err(anyhow::Error::from)
                     .with_context(|| format!("the module does not export {}", $name))?
             };
         }

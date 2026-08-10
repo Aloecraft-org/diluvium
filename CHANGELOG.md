@@ -12,7 +12,7 @@ Lua's rather than Diluvium's.
 
 ## [5.5.1_build3] - unreleased
 
-`v5.5.1_build3` &middot; Lua 5.5.1 &middot; bytecode format `0x45`
+`v5.5.1_build3` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
 In progress. The release that closes finding 8: compiled chunks are
 checked at load time instead of being trusted.
@@ -62,6 +62,47 @@ checked at load time instead of being trusted.
   `load(bytes, name, "t")` remains the complete mitigation, and
   inspecting a chunk with `diluvium_compiler -r` remains safer than
   running it.
+- A secure (`~`) function's strings no longer fall out of a single
+  XOR pass over the dump.
+
+  The scramble was one repeated byte, and had been since the feature
+  was written; the two rounds of fixes before this one were about
+  *where* it was applied, never what it was. So `strings` on a dump
+  found nothing, exactly as advertised -- and `tr` or two lines of
+  `xxd` recovered every hidden string at once, which is not
+  meaningfully better than the text editor the README says a secure
+  function defends against. The gap was between the claim and the
+  constant, not in the coverage.
+
+  It is now a generated keystream, seeded from the block length so
+  blocks do not all share a prefix. `test_secure_dump.lua` sweeps all
+  256 single-byte keys rather than checking the one in `ldump.c`, so
+  the test states a property of the encoding instead of a fact about
+  a number, and the CI obfuscation audit does the same sweep over the
+  real `luac` output. Verified to fail on the previous scheme.
+
+  Two properties are now asserted because other work depends on them.
+  The scramble is deterministic -- no nonce, nothing carried between
+  blocks -- because content-addressing prototypes by the hash of
+  their stripped dump needs identical source to give identical bytes,
+  and a nonce would have broken that silently, round-tripping
+  perfectly while the cache stopped working. And it is self-inverse,
+  which is what lets the loader hold the same function under another
+  name.
+
+  This is still obfuscation and still not encryption. What changed is
+  that recovering the strings now takes reading these sources and
+  implementing the keystream -- trivial for anyone who wants to, and
+  no longer one shell command for anyone who does not.
+
+### Upgrading
+
+`LUAC_FORMAT` is 0x46. Chunks compiled by an earlier Diluvium will
+be refused at the header and must be recompiled from source. The
+layout did not change; the secure-function scramble did, and a
+chunk scrambled under the old one would still parse and decode to
+garbage, so the format byte is what turns a silent misread into a
+refusal.
 
 
 ## [5.5.1_build2] - 2026-08-08

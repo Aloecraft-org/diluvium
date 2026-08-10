@@ -35,8 +35,10 @@
 // than half-built.
 
 import { encode, decode } from "./msgpack.js";
+import { wasiPreview1, WASI_MODULE } from "./wasi.js";
 
 export { Ext, Float } from "./msgpack.js";
+export { wasiPreview1, WasiExit, WASI_MODULE } from "./wasi.js";
 
 export const ABI_VERSION = 1;
 
@@ -356,8 +358,12 @@ export const Diluvium = {
    * because the loader refusing malformed bytecode is a smaller claim than
    * bytecode being safe.
    */
-  async load(wasm, source, { name = "=(program)", allowBytecode = false } = {}) {
-    const mod = await instantiate(wasm);
+  async load(wasm, source, {
+    name = "=(program)",
+    allowBytecode = false,
+    wasiWrite = undefined,
+  } = {}) {
+    const mod = await instantiate(wasm, { wasiWrite });
     const library = mod.exports.dv_abi_version();
     if (library !== ABI_VERSION) {
       throw new AbiMismatch(
@@ -396,18 +402,29 @@ export const Diluvium = {
   },
 };
 
-async function instantiate(wasm) {
+async function instantiate(wasm, { wasiWrite } = {}) {
   if (wasm && wasm.exports) return wasm; // already instantiated
+
+  // The module is linked against the wasi-sdk's libc, so it imports
+  // `wasi_snapshot_preview1` regardless of what any program does -- the imports
+  // come from libc's startup and stdio. Instantiating with `{}` fails before a line
+  // of Lua runs. See src/wasi.js for what is and is not provided.
+  const module =
+    wasm instanceof WebAssembly.Module
+      ? wasm
+      : await WebAssembly.compile(wasm instanceof Uint8Array ? wasm : new Uint8Array(wasm));
+
+  const wasi = wasiPreview1(wasiWrite ? { write: wasiWrite } : {});
+  wasi.complete(module);
+  const instance = await WebAssembly.instantiate(module, {
+    [WASI_MODULE]: wasi.imports,
+  });
+  wasi.attach(instance);
+
   // The wasm build is not a WASI reactor, so its constructors have to be run by
-  // hand -- the same thing doc/repl-reference.html records about run_lua.
-  const imports = {};
-  let instance;
-  if (wasm instanceof WebAssembly.Module) {
-    instance = await WebAssembly.instantiate(wasm, imports);
-  } else {
-    const bytes = wasm instanceof Uint8Array ? wasm : new Uint8Array(wasm);
-    ({ instance } = await WebAssembly.instantiate(bytes, imports));
-  }
+  // hand -- the same thing doc/repl-reference.html records about run_lua. This is
+  // also why `_start` is never called: the module is a command, but it is being
+  // used as a library, and `_start` would run main and exit.
   if (typeof instance.exports.__wasm_call_ctors === "function") {
     instance.exports.__wasm_call_ctors();
   }

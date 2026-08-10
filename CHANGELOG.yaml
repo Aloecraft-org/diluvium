@@ -61,14 +61,13 @@ releases:
       In progress. The release that closes finding 8: compiled chunks are
       checked at load time instead of being trusted.
 
-    upgrading:
-      - |
-        `LUAC_FORMAT` is 0x46. Chunks compiled by an earlier Diluvium will
-        be refused at the header and must be recompiled from source. The
-        layout did not change; the secure-function scramble did, and a
-        chunk scrambled under the old one would still parse and decode to
-        garbage, so the format byte is what turns a silent misread into a
-        refusal.
+    upgrading: |
+      `LUAC_FORMAT` is 0x46. Chunks compiled by an earlier Diluvium will
+      be refused at the header and must be recompiled from source. The
+      layout did not change; the secure-function scramble did, and a
+      chunk scrambled under the old one would still parse and decode to
+      garbage, so the format byte is what turns a silent misread into a
+      refusal.
 
     security:
       - |

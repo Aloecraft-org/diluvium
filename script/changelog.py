@@ -126,6 +126,22 @@ def validate(doc):
         if r.get("latest"):
             latest.append(r)
 
+        # SCALARS is declared above and was never enforced, which is how a
+        # 'upgrading:' written as '- |' instead of '|' -- copying the style of
+        # the 'security:' block right below it -- passed validate and then
+        # crashed render in CI. The two halves of this file disagreed about a
+        # type and only one of them said so.
+        for key in sorted(SCALARS):
+            val = r.get(key)
+            # By what it is not, rather than by an allowlist: YAML resolves a
+            # bare 'date: 2026-01-01' to a datetime.date, and an allowlist of
+            # scalar types would have to name every tag the resolver knows.
+            if not isinstance(val, (list, tuple, dict, set)):
+                continue
+            bad.append("%s: %s must be a single value, not a %s -- a block "
+                       "scalar is '%s: |', not '%s:' followed by '- |'"
+                       % (where, key, type(val).__name__, key, key))
+
         for key, _ in SECTIONS:
             items = r.get(key)
             if items is None:

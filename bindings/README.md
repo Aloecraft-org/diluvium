@@ -18,8 +18,8 @@ transcription. What took thought was the *wrapper* decisions, and they generalis
 | :--- | :--- |
 | `rust/` | Complete. `diluvium-sys` (raw FFI, builds the amalgamation) and `diluvium` (safe wrapper, `rmp-serde`). 16 tests, a doctest, an example host. |
 | `python/` | Complete. cffi in API mode, so a version mismatch fails at build time rather than at the first call. 17 tests. |
-| `js/` | Codec complete and cross-checked against the C implementation (15 tests). **The wasm wrapper is unverified**: building `diluvium.wasm` needs the wasi-sdk, which was not available where it was written. See below. |
-| `rust/diluvium-wasmtime/` | Written, compiles, **unverified** for the same reason: it needs a real `.wasm`. Gives containment and fuel metering; see below. |
+| `js/` | Codec complete and cross-checked against the C implementation (15 tests), plus the WASI host (11 tests). **The wrapper's end-to-end path is still CI-only**: loading a real `diluvium.wasm` needs the wasi-sdk in a container. See below. |
+| `rust/diluvium-wasmtime/` | Compiles, and the engine configuration has tests (3). **The end-to-end path is still CI-only**: it needs a real `.wasm`. Gives containment and fuel metering; see below. |
 
 ## The JS wrapper's gap, stated plainly
 
@@ -28,11 +28,37 @@ transcription. What took thought was the *wrapper* decisions, and they generalis
 JavaScript — so cross-implementation agreement on the wire format is a checked
 fact.
 
-`js/src/index.js` is not tested at all. It was written against `dv.h` and the
-wasm build's exports, but `make build_wasm` needs a container running the pinned
-wasi-sdk, and that was unavailable. The CI job `js-binding` builds the wasm and
-runs an integration test; until that has passed once, treat the file as reviewed
-code rather than working code.
+`js/src/index.js` was written against `dv.h` and the wasm build's exports, but
+`make build_wasm` needs a container running the pinned wasi-sdk, so the only place
+a real module is ever loaded is the CI job `js-binding`.
+
+**What that cost, and what was done about it.** The wrapper instantiated the module
+with no imports at all, and the wasm is linked against the wasi-sdk's libc, so it
+imports `wasi_snapshot_preview1` whether or not any program touches a file -- the
+imports come from libc's own startup and stdio. Every CI run for weeks failed with
+`Import #0 module="wasi_snapshot_preview1": module is not an object or function`,
+before a line of Lua ran, and nothing a developer could run locally would have said
+so.
+
+`js/src/wasi.js` is now a minimal preview-1 host: a clock, randomness, writes to
+stdout and stderr, and refusals for everything else. `node:wasi` was not used
+because this wrapper is meant to run in a browser too. Two decisions worth knowing:
+
+- The stubs are **synthesized from the module's own import list**, via
+  `WebAssembly.Module.imports()`. A wasm module must have every declared import
+  satisfied or instantiation fails outright, and which ones libc declares depends on
+  the sysroot and the link flags -- so a wasi-sdk bump adds a call that answers
+  ENOSYS instead of breaking the wrapper. A fixed list is how this breaks again on
+  someone else's build.
+- The `DataView` is rebuilt on every call rather than cached, because `memory.grow`
+  detaches the old `ArrayBuffer` and a cached view then throws on every access. The
+  test that covers this had to be written carefully: a lazily cached view is only
+  created after the grow unless something writes *before* it, and the first version
+  passed with the bug present.
+
+It is still not the same as loading a real module. `js/test/wasi.test.js` proves the
+import object is complete and behaves; whether the exports the wrapper reads are the
+ones the runtime provides is a question only `make build_wasm` answers.
 
 Two things were done to shrink what can be wrong in it: every struct offset comes
 from `dv_layout` instead of a constant, and every allocation inside the guest's
@@ -61,6 +87,35 @@ fires. `Instance::set_fuel` is that, and the example demonstrates it stopping
 `while true do end`.
 
 The cost is speed, and a copy per message that the native binding does not make.
+
+**The engine has to enable the exception-handling proposal, and that is not
+optional.** The wasi-sdk lowers `setjmp`/`longjmp` onto EH instructions (`-mllvm
+-wasm-enable-sjlj` in the Makefile) and Lua's error handling is built on `longjmp`,
+so `throw` and `try_table` are in every `diluvium.wasm` whether or not a program
+ever raises an error. The crate was pinned to wasmtime 27, which has no way to
+enable EH at all -- the feature is not plumbed, so there is no flag to set -- and
+every CI run for weeks failed with `exceptions proposal not enabled (at offset
+0xd60)`. It is now wasmtime 43, with `config.wasm_exceptions(true)` set explicitly
+even though that is the default, because the default is gated behind wasmtime's `gc`
+feature and this crate builds with `default-features = false`. Stating it makes
+dropping the feature a compile error rather than a runtime one, which is the
+difference between a mistake caught in a second and one that took weeks.
+
+43 rather than the newest, and the reason is the CI job: it uses whatever stable Rust
+the runner ships rather than pinning a toolchain, and wasmtime 47's own MSRV is
+1.94.0 — the current stable, with no headroom. 43 asks for 1.91.0 and has the same
+exception-handling support, which is all this crate needs from a recent wasmtime. The
+crate now declares `rust-version` so cargo's resolver enforces that rather than
+leaving it to whoever bumps the dependency next.
+
+The feature to ask for is **`gc-null`**, not `gc`: `gc` alone compiles and then
+fails at `Engine::new` with "none of the collectors are available", and a guest that
+only needs EH never allocates a GC object, so the collector that cannot collect is
+the correct one.
+
+`diluvium-wasmtime/tests/engine.rs` covers this with a hand-written module
+containing a `throw`, which needs no container -- the point being that the property
+the crate depends on is now checked somewhere a developer will see it.
 
 Writing it turned up a real gap in the ABI, which is now `dv_endpoint_allow`: the
 endpoint bind handler was a C function pointer, and in wasm a function pointer is

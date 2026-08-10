@@ -216,6 +216,15 @@ jobs:
         working-directory: bindings/rust
         run: cargo build -p diluvium-wasmtime --examples
 
+      # These need no container, which is the point of them: the engine has to
+      # accept the exception-handling instructions the wasi-sdk emits for Lua's
+      # setjmp/longjmp, and for weeks nothing checked that anywhere a developer
+      # would see it -- the only module the crate ever loaded came from the step
+      # below. A hand-written module with a 'throw' in it is enough.
+      - name: Run the engine-configuration tests
+        working-directory: bindings/rust
+        run: cargo test -p diluvium-wasmtime
+
       # Needs the wasi-sdk in a container, so this is the only place the crate is
       # exercised against a real module. See bindings/README.md.
       - name: Build the wasm runtime
@@ -258,10 +267,14 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
-      # The codec is testable on its own, and it is checked against vectors
-      # produced by src/dmsgpack.c rather than against the spec -- so this asserts
-      # cross-implementation agreement on the wire format.
-      - name: Test the codec
+      # Two things, neither needing a container. The codec is checked against
+      # vectors produced by src/dmsgpack.c rather than against the spec, so this
+      # asserts cross-implementation agreement on the wire format. And the WASI
+      # host is checked against a hand-assembled module that imports
+      # wasi_snapshot_preview1 -- because the wrapper instantiated with no imports
+      # at all for weeks, and the only step that would have noticed was the one
+      # below that needs the wasi-sdk.
+      - name: Test the codec and the WASI host
         working-directory: bindings/js
         run: npm test
 
