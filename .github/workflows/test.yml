@@ -86,9 +86,11 @@ jobs:
     needs: resolve
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
-    # macOS is advisory for now: the debug build has never been exercised there,
-    # so a failure should surface without blocking the pipeline. Flip
-    # experimental to false once it has been green for a few runs.
+    # Both entries are experimental: false, so neither is advisory -- macOS was
+    # promoted after it had been green for a while and the comment saying otherwise
+    # outlived the change. Kept as a matrix field rather than deleted because the
+    # next platform added will want it, and a job whose failure is ignored should
+    # have to say so out loud.
     continue-on-error: ${{ matrix.experimental }}
     strategy:
       fail-fast: false
@@ -352,6 +354,16 @@ jobs:
           ASAN_OPTIONS: detect_leaks=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: ./test/run_tests.sh --bin dist/diluvium_asan --timeout 900
+
+      # The contract tests, which the sweep had been missing entirely. The step
+      # above builds onelua.c and runs the *Lua* suite, so it covers the runtime a
+      # program reaches and not the C ABI a host reaches -- and dvs.c is not in the
+      # amalgamation at all, so the newest code with the most raw malloc/free in the
+      # tree had never met a sanitizer. This found undefined behaviour in the SHA-256
+      # update on its first run: lua_dump signals end-of-dump by calling the writer
+      # with (NULL, 0), and memcpy's parameters are non-null whatever the length.
+      - name: Contract tests under the sanitizers
+        run: make sanitize_checks
 
       # The compiler and the analyzer walk instruction operands by hand, so
       # they are exactly where a decoding mistake hides. This is what caught

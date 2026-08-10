@@ -1048,7 +1048,11 @@ int dvs_step (dvs_swarm *sw) {
       continue;
     if (dvs_wake(sw, sl->id) != DVS_OK) {
       dvs_id gone = sl->id, parent = sl->parent;
-      char why[256];
+      /* As wide as 'sw->error' itself: 'kill_subtree' below clears the slot and
+         'emit_event' overwrites the swarm's error buffer, so the reason has to be
+         copied out first -- and copying it into something narrower would truncate
+         exactly the restore failures whose message is the longest. */
+      char why[sizeof(sw->error)];
       snprintf(why, sizeof(why), "%s", sw->error);
       kill_subtree(sw, gone, 0);
       if (parent != 0)

@@ -74,6 +74,11 @@ static const char DS_CANARY[] =
 /* Collect a dump into a SHA-256 state. */
 static int ds_dumpwriter (lua_State *L, const void *p, size_t sz, void *ud) {
   (void)L;
+  /* ldump.c signals the end of the dump with (NULL, 0), the same way it does for
+     'ds_codewriter' below. There is nothing to hash; saying so is clearer than
+     relying on the hash function tolerating it, even though it now does. */
+  if (p == NULL)
+    return 0;
   diluvium_sha256_update((diluvium_sha256_ctx *)ud, p, sz);
   return 0;
 }

@@ -316,6 +316,42 @@ dvs_check: _build_step0
 	  $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dvs_check
 
+# Every contract test under AddressSanitizer and UndefinedBehaviorSanitizer.
+#
+# These were outside the sanitizer sweep entirely, and that was a real hole rather
+# than an oversight worth shrugging at: the ASan job builds 'onelua.c' and runs the
+# *Lua* suite, so it covers the runtime a program reaches but not the C ABI a host
+# reaches -- and dvs.c is not in the amalgamation at all, so the newest code, with
+# the most raw malloc/free in the tree, had never met a sanitizer. Adding this found
+# undefined behaviour in the SHA-256 update on its first run.
+#
+# Not the ltests.h build: that installs its own allocator and would fight ASan for
+# the same job. TEST_CFLAGS is therefore not reused here.
+SAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g
+SAN_ENV = ASAN_OPTIONS=detect_leaks=1 \
+	  UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1
+
+sanitize_checks: _build_step0
+	@set -e; \
+	for t in dv_check dtask_check dshim_check dsnap_check; do \
+	  echo "=== $$t (asan+ubsan)"; \
+	  gcc $(SAN_CFLAGS) -DLUA_USE_LINUX -Wl,-E -ldl -DMAKE_LIB \
+	    -I$(CURDIR)/.data -o $(CURDIR)/dist/$${t}_asan \
+	    $(CURDIR)/test/$$t.c $(CURDIR)/.data/onelua.c -lm; \
+	  $(SAN_ENV) $(CURDIR)/dist/$${t}_asan >/dev/null; \
+	done; \
+	echo "=== dvs_check (asan+ubsan)"; \
+	gcc $(SAN_CFLAGS) -DLUA_USE_LINUX -Wl,-E -ldl -DMAKE_LIB \
+	  -I$(CURDIR)/.data -o $(CURDIR)/dist/dvs_check_asan \
+	  $(CURDIR)/test/dvs_check.c $(CURDIR)/.data/dvs.c \
+	  $(CURDIR)/.data/onelua.c -lm; \
+	$(SAN_ENV) $(CURDIR)/dist/dvs_check_asan >/dev/null; \
+	echo "=== dhash_check (asan+ubsan)"; \
+	gcc $(SAN_CFLAGS) -I$(CURDIR)/.data -o $(CURDIR)/dist/dhash_check_asan \
+	  $(CURDIR)/test/dhash_check.c $(CURDIR)/.data/dhash.c; \
+	$(SAN_ENV) $(CURDIR)/dist/dhash_check_asan >/dev/null; \
+	echo "all contract tests clean under asan+ubsan"
+
 snap_fuzz: _build_step0
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
 	  -o $(CURDIR)/dist/snap_harness \
@@ -343,7 +379,9 @@ test_ci: test_build
 test_one: test_build
 	@$(TEST_RUNNER) --bin $(TEST_BIN) $(T)
 
-.PHONY: test_build test_cases test_ci test_one failing_test_cases
+.PHONY: test_build test_cases test_ci test_one failing_test_cases \
+        dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
+        snap_fuzz sanitize_checks
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua

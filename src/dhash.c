@@ -96,6 +96,17 @@ void diluvium_sha256_init (diluvium_sha256_ctx *s) {
 void diluvium_sha256_update (diluvium_sha256_ctx *s, const void *data,
                              size_t len) {
   const unsigned char *p = (const unsigned char *)data;
+  /*
+  ** A zero-length update is a no-op, and 'data' may be NULL when it is. Stated
+  ** here rather than left to each caller because the alternative is undefined
+  ** behaviour that works: 'memcpy(dst, NULL, 0)' is UB -- memcpy's parameters are
+  ** declared non-null whatever the length -- and it does exactly what you want on
+  ** every compiler until one uses the non-nullness to delete a check somewhere
+  ** else. UBSan found this coming out of 'lua_dump', which signals end-of-dump by
+  ** calling the writer with (NULL, 0).
+  */
+  if (len == 0)
+    return;
   s->total += (unsigned long long)len;
   if (s->nblock > 0) {  /* finish the partial block first */
     size_t want = 64 - s->nblock;
