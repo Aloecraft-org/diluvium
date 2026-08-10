@@ -5,6 +5,7 @@
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "dlibs.h"
 #include "drepl.h"
 
 int system(const char *c) { return -1; }
@@ -30,6 +31,7 @@ WASM_EXPORT("init_lua") void init_lua()
 
         global_L = luaL_newstate();
         luaL_openlibs(global_L);
+        diluvium_openlibs(global_L);
     }
 }
 

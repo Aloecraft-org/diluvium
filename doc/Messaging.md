@@ -215,11 +215,22 @@ State the seam as an injected interface, so it is designed rather than discovere
 
 ### 5.1 Source
 
-Start from Redis's `lua_cmsgpack.c`. Self-contained, no external msgpack-c
-dependency, well tested at scale. BSD licensed, which is Apache-2.0 compatible for
-inclusion: retain the original copyright header and add a NOTICE entry.
+Derived from lua-cmsgpack 0.4.0 (`lua_cmsgpack.c`, as vendored by Redis).
+**MIT licensed, not BSD** as this section first said; Apache-2.0 compatible
+either way, and `NOTICE` records it.
 
-Expect real porting work. It targets Lua 5.1.
+The draft warned to expect real porting work because the file targets Lua 5.1.
+It no longer does: upstream is version-guarded throughout (`#if
+LUA_VERSION_NUM < 502` and `< 503`) and already branches on `lua_isinteger`, so
+`luaL_register` does not appear, `lua_objlen` is behind a guard and
+`lua_setfenv` is absent. The porting table below is kept for the record but
+almost nothing in it applied.
+
+What the work actually was, in descending order of size: the ext registry (5.5),
+which upstream has no trace of; the buffer, the integer decoding and the float
+width policy, all rewritten for reasons recorded in the file header; and the
+array-versus-map rule, which upstream disagrees with. Landed as
+`src/dmsgpack.c`, registered through `src/dlibs.c`.
 
 ### 5.2 Required porting changes
 
@@ -263,9 +274,18 @@ msgpack.decode(str)              -> value
 msgpack.decode(str, offset)      -> value, next_offset
 msgpack.as_array(t)              -> tagged wrapper
 msgpack.as_map(t)                -> tagged wrapper
+msgpack.ext(code, data)          -> tagged wrapper
 ```
 
 Errors are raised, not returned, consistent with the standard library.
+
+`msgpack.ext` was not in the first draft. It is required to make 5.5 coherent:
+that section says decoding an application-range code must surface its bytes to
+the program, which is half a feature if the program cannot then produce one.
+`code` must be in 0x10-0x7F, so a program cannot mint a reserved code. A decoded
+ext arrives as the same wrapper shape, with the payload at `[1]` and the code at
+`[3]`, which is what makes an ext value round-trip through a program that does
+not understand it.
 
 ### 5.5 Ext code registry
 
@@ -1233,13 +1253,24 @@ removing the `diluvium_task_sethook` call leaves the `--task` case running until
 the harness kills it, which is exactly the silent regression the hook exists to
 prevent, and it now has a test that catches it.
 
-**M1: msgpack codec**
-Port to 5.5, integer subtype, explicit array/map rule plus `as_array`/`as_map`,
-depth cap, cyclic-input error, ext registry with reserved codes rejected cleanly,
-resolver seam per 4.2.
-Accept when: round-trip corpus passes, integers survive as integers, cyclic input
-raises, reserved ext codes produce named errors, and ext 0x02 with no resolver
-installed decodes to an opaque value rather than failing.
+**M1: msgpack codec** — done.
+`src/dmsgpack.c` plus `src/dlibs.c` for registration, since `linit.c` cannot
+host a new library without editing a core file that is not allowlisted and
+changing the meaning of every `LUA_<lib>K` mask.
+
+Accepted on `test/test_msgpack.lua`, 139 checks: round-trip corpus; integers
+surviving as integers including `math.mininteger`; both sides of every integer
+width cutoff asserted **as wire bytes** rather than only round-tripped, since a
+codec wrong in both directions round-trips perfectly and interoperates with
+nothing; floats always float64; the empty table as a map; forced shapes; a
+cyclic table raising with "cycle" in the message; a non-encodable value naming
+its type and its key path (`a.b[1]`); the decode offset chain; every reserved
+ext code failing by name, with 0x01 saying decQuad specifically; ext 0x02
+decoding opaquely with no resolver installed; and every single byte plus every
+truncation of a valid encoding refused without a crash.
+
+Stripped size 13.0 KB of text at `-O3` on linux-x86_64, against a 25 KB budget.
+Not yet measured on musl or wasm, which 3.2 asks for.
 
 **M2: queue subsystem, local only**
 Declare, lookup, destroy, push, pop, enable, disable, len, capacity, state. All
@@ -1420,6 +1451,11 @@ artifact between sessions that do not share context.
 - **The continuation was described as being for yields.** It runs on errors too,
   and the post-call code is unreachable on that path, so a naive continuation
   swallows every error into a successful exit. See 8.2 item 2.
+- **The msgpack source was called BSD.** It is MIT. And the porting table in
+  5.2 described a version of that file from years ago: upstream is already
+  version-guarded and already uses `lua_isinteger`, so the warning to "expect
+  real porting work" pointed at the wrong work. The real work was the ext
+  registry, which upstream has none of.
 - **The general lesson.** The first draft was written against an abstract Lua 5.5
   rather than against this tree, which is what produced both the `pcall` error and
   the secure-function gap. Assertions about core internals — `lua_upvaluejoin`,

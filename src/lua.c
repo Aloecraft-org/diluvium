@@ -22,6 +22,7 @@
 #include "analyze.h"
 #include "drepl.h"
 #include "dtask.h"
+#include "dlibs.h"
 #include "dline.h"
 #include "llimits.h"
 
@@ -763,6 +764,7 @@ static int pmain (lua_State *L) {
   else
     l_getenv = &getenv;
   luai_openlibs(L);  /* open standard libraries */
+  diluvium_openlibs(L);  /* Diluvium: msgpack, and what follows it */
   createargtable(L, argv, argc, script);  /* create table 'arg' */
   lua_gc(L, LUA_GCRESTART);  /* start GC... */
   lua_gc(L, LUA_GCGEN);  /* ...in generational mode */

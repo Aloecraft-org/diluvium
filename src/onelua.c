@@ -127,6 +127,8 @@
 #include "drepl.c"
 #include "dline.c"
 #include "dtask.c"
+#include "dmsgpack.c"
+#include "dlibs.c"
 #endif
 
 /* test library -- used only for internal development */
