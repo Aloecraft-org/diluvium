@@ -59,11 +59,14 @@ import tempfile
 
 THREAD_EXT_CODE = 0x08
 
-# The record header, from dsnap.c: a version byte then five 32-bit words
-# (live slots, nyield, frame count, tbc count, reserved capacity), then
-# DS_FRAME_WORDS words per frame.
-THREAD_WORDS = 5
-FRAME_WORDS = 10
+# The record header, from dsnap.c: a version byte then six 32-bit words
+# (live slots, nyield, frame count, tbc count, reserved capacity, errfunc
+# slot), then DS_FRAME_WORDS words per frame, the eleventh being the frame's
+# saved error-handler slot. These constants only *label* mutants -- the sweep
+# poisons every word regardless -- but a label computed from a stale layout
+# points a debugger at the wrong field, which is its own kind of red herring.
+THREAD_WORDS = 6
+FRAME_WORDS = 11
 
 # What to write into a 32-bit field. Zero and one are the boundary cases a
 # 1-based index rejects; the two large values are what an unchecked field

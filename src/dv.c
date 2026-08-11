@@ -789,8 +789,9 @@ dv_status dv_restore (dv_instance *inst, const char *host,
   ** the program's, not one residency's). The counter comes out of the header
   ** the load just accepted, so the reader failing here means the header
   ** changed between the two reads -- refuse rather than wake unmetered. Read
-  ** before the instance takes the thread, so this refusal leaves no state
-  ** behind.
+  ** before the instance takes the thread, so the refusal at least leaves the
+  ** instance unstarted; the load's queue state is already installed, which is
+  ** one more reason this branch existing beats it ever running.
   */
   {
     uint64_t used = 0;

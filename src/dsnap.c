@@ -1563,15 +1563,25 @@ static int ds_decodethread (lua_State *L, const unsigned char *data,
                             size_t len) {
   lua_State *co;
   unsigned long nslots, nframes;
-  unsigned long capacity;
+  unsigned long capacity, ntbc;
   if (len < 1 + DS_THREAD_WORDS * 4 || data[0] != DS_THREAD_VERSION)
     return luaL_error(L, "snapshot: a thread record is malformed or of a "
                          "version this runtime does not write");
   nslots = ds_get32(data + 1);
   nframes = ds_get32(data + 9);
+  ntbc = ds_get32(data + 13);
   capacity = ds_get32(data + 17);
+  /*
+  ** 'ntbc' is bounded with the others because its bound is load-bearing on a
+  ** 32-bit 'unsigned long': every marked slot is a distinct stack slot, so a
+  ** count above 'nslots' is not credible -- and unbounded, a crafted
+  ** 0x40000000 makes 'ntbc * 4' wrap to 0 in the 'namepos' arithmetic, which
+  ** then passes its own length check and sends the finish hook's slot reads
+  ** four gigabytes past the record. LP64 never wraps and refuses on length;
+  ** this makes the refusal every platform's.
+  */
   if (nslots < 1 || nslots > 1000000UL || nframes < 1 || nframes > 100000UL ||
-      capacity < nslots || capacity > 1000000UL)
+      ntbc > nslots || capacity < nslots || capacity > 1000000UL)
     return luaL_error(L, "snapshot: a thread record claims %d slots and %d "
                          "frames, which is not credible",
                       (int)nslots, (int)nframes);

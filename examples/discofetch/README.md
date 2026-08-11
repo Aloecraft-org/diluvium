@@ -247,12 +247,14 @@ coordinator will need that before it runs more than one spawn at a time.
 
 ## What is not here, and what it would take
 
-**No hibernation.** Every instance in this example is resident, which is release
-5.5.1_build3's supported configuration — `doc/Messaging.md` §18.1 records a snapshot
-defect that makes the wake-then-error path corrupt memory, so `dvs_hibernate` refuses
-unless a host asks for it by name. At ~46 KB per parked instance (`make footprint`),
-ten thousand idle sessions is about 449 MB, so for this shape of workload staying
-resident is affordable and the swap-out is an optimisation rather than a requirement.
+**No hibernation.** Every instance in this example is resident — by choice now, not
+necessity. When this was written, `doc/Messaging.md` §18.1 recorded a snapshot defect
+that made the wake-then-error path corrupt memory and `dvs_hibernate` refused unless
+asked by name; that block is closed (`doc/Hibernate.md`) and hibernation is on by
+default. This example still never calls it: at ~46 KB per parked instance
+(`make footprint`), ten thousand idle sessions is about 449 MB, so for this shape of
+workload staying resident is affordable and the swap-out is an optimisation rather
+than a requirement.
 
 **No two-way traffic between handlers.** A match currently ends the session. To have
 matched peers exchange candidates through the swarm, the host would hand each handler

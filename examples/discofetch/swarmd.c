@@ -324,7 +324,7 @@ int main (int argc, char **argv) {
   if (sw == NULL) { fprintf(stderr, "swarmd: no swarm\n"); return 1; }
 
   printf("=== discofetch toy swarm ===\n");
-  printf("hibernation: off (doc/Messaging.md 18.1) -- every instance is resident\n");
+  printf("hibernation: available, unused here -- every instance stays resident\n");
   printf("root caps: lifecycle, queue:*   -- the ceiling for the whole swarm.\n");
   printf("           A trailing '*' is a prefix; a bare \"*\" is a literal name,\n");
   printf("           on purpose, so nothing can widen a grant by wildcard.\n\n");
