@@ -1848,7 +1848,10 @@ Accepted on `test/dv_check.c` (73 checks, written against `dv.h` alone — which
 is also a check that the header suffices on its own) and 16 Rust tests plus a
 doctest and an example host. Between them: the version refused at `dv_new`;
 errors crossing with a traceback that names the failing frame; a guest queue
-invisible until the program declares it; every row of 6.4 from the host side;
+invisible until the program declares it; every row of 6.4 from the host side —
+true of seven rows when this was written and of all eight since, because
+`disabled` had no host-side assertion and deleting the enabled check in
+`diluvium_queue_push_bytes` turned nothing red (audit finding 10);
 `DV_BUFFER_TOO_SMALL` leaving the message in place so a host can size a buffer
 and retry; the peek/release zero-copy path with its registry anchor; export
 notifications firing for exported queues and not for private ones; parking,

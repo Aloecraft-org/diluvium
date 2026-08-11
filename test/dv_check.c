@@ -209,6 +209,50 @@ static void queues (void) {
 }
 
 
+/*
+** 6.4's `disabled` row, from the host side. Audit finding 10.
+**
+** M4 was accepted on "every row of 6.4 from the host side" and seven of the
+** eight rows were true of it; this was the eighth. Deleting the enabled check
+** in 'diluvium_queue_push_bytes' turned nothing red, and what that check exists
+** for is 6.1's reason -- a program going down should reject cleanly rather than
+** accept messages it will never read. Nothing in the tree said so from the side
+** a host is on: the only assertion on the flag was `enabled == 1`, the positive
+** direction, and the one guest that disabled a queue disabled a private one no
+** host push can reach.
+**
+** Disabled is not destroyed, which is the other half: what the queue already
+** holds stays readable, so a host can drain what a program pushed before it
+** stopped taking more.
+*/
+static void a_disabled_queue_refuses_a_host_push (void) {
+  dv_instance *inst = load(
+    "local q = queue.declare('work', {capacity = 2, exported = true}) "
+    "queue.push(q, 'held') "
+    "queue.disable(q) "
+    "return 0", 0);
+  dv_queue_id work;
+  dv_queue_info info;
+  uint8_t buf[64];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  eq_st(dv_run(inst, NULL), DV_DONE, "a program that disables a queue runs");
+  work = dv_queue_lookup(inst, "work");
+  ok(work != 0, "and the queue is still there afterwards");
+  memset(&info, 0, sizeof(info));
+  eq_st(dv_queue_state(inst, work, &info), DV_OK, "its state reads");
+  eq_i(info.enabled, 0, "and reports itself disabled");
+  eq_st(dv_queue_push(inst, work, MP_ONE, sizeof(MP_ONE)), DV_QUEUE_DISABLED,
+        "a host push into it is refused rather than silently stored");
+  eq_i(info.len, 1, "the message it held before is still held");
+  eq_st(dv_queue_pop(inst, work, buf, sizeof(buf), &n), DV_OK,
+        "and still pops, because disabled is not destroyed");
+  ok(n == 5 && memcmp(buf + 1, "held", 4) == 0,
+     "as the message the program pushed");
+  dv_free(inst);
+}
+
+
 static void zero_copy (void) {
   dv_instance *inst = load(
     "local q = queue.declare('out', {exported = true}) "
@@ -1713,6 +1757,7 @@ int main (void) {
   run_to_completion();
   errors();
   queues();
+  a_disabled_queue_refuses_a_host_push();
   zero_copy();
   notification();
   parking();
