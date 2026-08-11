@@ -968,7 +968,11 @@ static void a_host_can_read_an_instance_s_budget_and_capabilities (void) {
   dvs_swarm *sw = swarm_with_hibernation(4);
   dvs_id root = 0;
   static const char *caps[] = { "lifecycle", "queue:work/*", "queue:log" };
-  static const char *src = "local q = queue.declare('hold', {cap = 2}) "
+  /* The warm-up loop is load-bearing: it burns enough instructions for the
+     count hook to have fired before the park, so the carry assertion at the
+     bottom is measuring a real number rather than agreeing with zero. */
+  static const char *src = "local n = 0 for i = 1, 5000 do n = n + 1 end "
+                           "local q = queue.declare('hold', {cap = 2}) "
                            "queue.wait({q})";
   uint64_t insns = 0, mem = 0;
   const char *got[8];
@@ -1025,6 +1029,20 @@ static void a_host_can_read_an_instance_s_budget_and_capabilities (void) {
      "its budget is still readable while it is only bytes");
   okf((long)dvs_caps(sw, root, got, 8), "as are its capabilities",
       (long)dvs_caps(sw, root, got, 8), 3);
+  /*
+  ** And the *counter*, not just the limit, survives the round trip. The audit
+  ** (finding 1) caught this test certifying the wrong half of its own claim:
+  ** "the budget survives hibernation" asserted the number read back while
+  ** cached and never woke anything, so the budget could read as preserved
+  ** while enforcement was lost with the hook and the counter with the bytes.
+  */
+  ok(dvs_wake(sw, root) == DVS_OK, "the cached instance wakes");
+  {
+    uint64_t used = 0;
+    dv_instance *inst = dvs_instance(sw, root);
+    ok(inst != NULL && dv_usage(inst, &used, NULL) == DV_OK && used > 0,
+       "and wakes mid-count: the budget is the program's, not one residency's");
+  }
   dvs_free(sw);
 }
 

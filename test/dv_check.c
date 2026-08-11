@@ -2010,6 +2010,78 @@ static void a_restored_program_can_raise (void) {
 }
 
 
+/*
+** Finding 1: the test that never existed. The count hook was armed in exactly
+** one place, inside 'dv_run', and a restored instance cannot reach 'dv_run',
+** so a woken agent kept a readable budget and lost its enforcement -- the one
+** hibernate+budget test in the tree asserted the number read back while
+** cached and never woke it. This one wakes it into the loop 9.4 exists for.
+**
+** The carry matters as much as the hook: 9.4's budget belongs to the program,
+** not to one residency, so the counter must come back exactly where it
+** parked, and the abort must charge both residencies against one limit.
+*/
+static void a_woken_instance_is_still_budgeted (void) {
+  static const char *src =
+    "local q = queue.declare('work', {cap = 2})\n"
+    "local n = 0\n"
+    "for i = 1, 50000 do n = n + 1 end\n"   /* so the counter is visibly on */
+    "queue.wait({q})\n"
+    "while true do n = n + 1 end\n";        /* the runaway, after waking */
+  dv_instance *a = dv_new(NULL), *b;
+  uint8_t *buf;
+  size_t need = 0, got = 0;
+  uint64_t u0 = 0, u1 = 0;
+  if (a == NULL) { ok(0, "an instance"); return; }
+  ok(dv_set_budget(a, 1000000, 0) == DV_OK, "a budget goes on before the run");
+  if (!park_on_queue(a, src)) { dv_free(a); return; }
+  dv_usage(a, &u0, NULL);
+  ok(u0 > 0, "the first residency consumed instructions on the record");
+  if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0 ||
+      (buf = (uint8_t *)malloc(need)) == NULL) {
+    ok(0, "it snapshots"); dv_free(a); return;
+  }
+  dv_snapshot(a, NULL, buf, need, &got);
+  dv_free(a);
+  b = dv_new(NULL);
+  if (b == NULL) { ok(0, "a fresh instance"); free(buf); return; }
+  ok(dv_set_budget(b, 1000000, 0) == DV_OK,
+     "the budget goes on before the restore, the only order there is");
+  if (dv_restore(b, NULL, buf, got) != DV_OK) {
+    printf("      (%s)\n", dv_last_error(b));
+    ok(0, "it restores");
+    dv_free(b); free(buf); return;
+  }
+  dv_usage(b, &u1, NULL);
+  ok(u1 == u0, "the counter wakes exactly where it parked");
+  if (u1 != u0)
+    printf("      (woke at %lu, parked at %lu)\n",
+           (unsigned long)u1, (unsigned long)u0);
+  {
+    dv_queue_id q = dv_queue_lookup(b, "work");
+    static const uint8_t one[] = { 0x01 };
+    dv_status st;
+    dv_queue_push(b, q, one, sizeof(one));
+    /* Before the fix this call did not return: no hook, no counting, and a
+       loop that never yields has nothing else to stop it. */
+    st = dv_resume(b, q);
+    eq_st(st, DV_ERROR, "the runaway stops in its second residency");
+    ok(dv_exceeded(b), "and the instance says it was the budget");
+    dv_usage(b, &u1, NULL);
+    ok(u1 >= 1000000, "with both residencies charged against the one limit");
+    ok(u1 - u0 < 1000000,
+       "and the second alone under it, so the carry is what stopped it");
+    {
+      const char *m = dv_last_error(b);
+      ok(m != NULL && strstr(m, "budget") != NULL,
+         "with a message naming the budget");
+    }
+  }
+  dv_free(b);
+  free(buf);
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -2065,6 +2137,7 @@ int main (void) {
   garbage_is_refused_not_crashed_on();
   a_registered_prototype_shrinks_a_snapshot();
   a_restored_program_can_raise();
+  a_woken_instance_is_still_budgeted();
 
   printf("\n%d checks, %d failed\n", checks, failures);
   return failures != 0;

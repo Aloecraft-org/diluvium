@@ -920,6 +920,67 @@ static void a_wrong_format_is_refused (lua_State *L) {
 }
 
 
+/*
+** Finding 1's carry: the header holds the instruction count, present even at
+** zero, integer or refused. The tampering halves matter because the count
+** feeds a budget: a header that could smuggle a non-integer past the check
+** would hand 'dv_restore' a counter it has to have an opinion about.
+*/
+static void the_header_carries_the_instruction_count (lua_State *L) {
+  int base = lua_gettop(L);
+  char buf[4096];
+  size_t n, len, hused = 0;
+  uint64_t used = 0;
+  const char *bytes;
+  diluvium_snap_opts opts;
+  memset(&opts, 0, sizeof(opts));
+  opts.insn_used = 123456789;
+  n = diluvium_snap_header(L, &opts, buf, sizeof(buf));
+  ok(n != 0, "a header with an instruction count is written");
+  ok(diluvium_snap_headerusage(L, buf, n, &used) && used == 123456789,
+     "and the reader hands the count back");
+  used = 99;
+  n = diluvium_snap_header(L, NULL, buf, sizeof(buf));
+  ok(n != 0 && diluvium_snap_headerusage(L, buf, n, &used) && used == 0,
+     "no opts means a count of zero -- present rather than absent");
+  /* A count that is not a non-negative integer: tampered the way the format
+     test tampers, because 'tamper' writes strings and this needs both a
+     string and a negative number in the slot. */
+  {
+    static const struct { const char *what; int is_num; lua_Integer num;
+                          const char *str; } bad[] = {
+      { "a count that is not a number is refused", 0, 0, "a lot" },
+      { "a negative count is refused", 1, -5, NULL },
+    };
+    size_t i;
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+      int b2 = lua_gettop(L);
+      n = diluvium_snap_header(L, NULL, buf, sizeof(buf));
+      lua_pushlstring(L, buf, n);
+      lua_getglobal(L, "msgpack");
+      lua_getfield(L, -1, "decode");
+      lua_pushvalue(L, -3);
+      lua_call(L, 1, 1);
+      if (bad[i].is_num)
+        lua_pushinteger(L, bad[i].num);
+      else
+        lua_pushstring(L, bad[i].str);
+      lua_setfield(L, -2, "insn_used");
+      lua_getfield(L, -2, "encode");
+      lua_pushvalue(L, -2);
+      lua_call(L, 1, 1);
+      bytes = lua_tolstring(L, -1, &len);
+      ok(diluvium_snap_checkheader(L, NULL, bytes, len, &hused)
+         == DILUVIUM_SNAP_BAD_HEADER, bad[i].what);
+      ok(!diluvium_snap_headerusage(L, bytes, len, &used),
+         "and the reader refuses the same bytes");
+      lua_settop(L, b2);
+    }
+  }
+  lua_settop(L, base);
+}
+
+
 static void a_missing_field_is_refused (lua_State *L) {
   expect_header_refusal(L, "runtime", NULL, DILUVIUM_SNAP_RUNTIME_MISMATCH,
                         "a header missing its runtime field is refused");
@@ -2330,6 +2391,7 @@ int main (void) {
   a_short_buffer_is_reported_not_overrun(L);
   garbage_is_refused_without_raising(L);
   a_wrong_format_is_refused(L);
+  the_header_carries_the_instruction_count(L);
   a_foreign_runtime_is_refused(L);
   a_missing_field_is_refused(L);
   the_runtime_check_comes_first(L);

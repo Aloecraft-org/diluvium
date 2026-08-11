@@ -347,7 +347,7 @@ static void ds_buildheader (lua_State *L, const diluvium_snap_opts *opts,
   lua_Integer n = 0;
   diluvium_snap_fingerprint(L, fp);
   ds_permanents(L, perm);
-  lua_createtable(L, 0, 6);
+  lua_createtable(L, 0, 7);
   lua_pushinteger(L, DILUVIUM_SNAP_FORMAT);
   lua_setfield(L, -2, "format");
   lua_pushstring(L, fp);
@@ -359,6 +359,11 @@ static void ds_buildheader (lua_State *L, const diluvium_snap_opts *opts,
   lua_setfield(L, -2, "capabilities");
   lua_pushstring(L, (opts != NULL && opts->host != NULL) ? opts->host : "");
   lua_setfield(L, -2, "host");
+  /* Instructions consumed so far, so a budget spans residencies (9.4). Written
+     even when zero: a field that is sometimes absent is a field every reader
+     has to have an opinion about. */
+  lua_pushinteger(L, (opts != NULL) ? (lua_Integer)opts->insn_used : 0);
+  lua_setfield(L, -2, "insn_used");
   /* The payload digest. Empty when the caller has no payload yet -- a bare
      'diluvium_snap_header' is used by tests and by a host that only wants to
      report its runtime identity. */
@@ -504,6 +509,16 @@ LUA_API int diluvium_snap_checkheader (lua_State *L,
     if (!ds_field_is(L, hdr, "host", want))
       rc = DILUVIUM_SNAP_HOST_MISMATCH;
   }
+  if (rc == DILUVIUM_SNAP_ACCEPT) {
+    /* The instruction count must be a non-negative integer. Checked here so
+       that a header this function accepts is one 'diluvium_snap_headerusage'
+       can read -- a caller acting on an acceptance should not meet a second
+       opinion from the reader. */
+    if (lua_getfield(L, hdr, "insn_used") != LUA_TNUMBER ||
+        !lua_isinteger(L, -1) || lua_tointeger(L, -1) < 0)
+      rc = DILUVIUM_SNAP_BAD_HEADER;
+    lua_pop(L, 1);
+  }
   /*
   ** The payload digest, when the header carries one and there is a payload to
   ** check. Last, because every other refusal says something more specific: a
@@ -577,6 +592,29 @@ LUA_API int diluvium_snap_headerqueues (lua_State *L, const char *s,
   }
   lua_remove(L, -2);                            /* drop the header */
   return 1;
+}
+
+
+LUA_API int diluvium_snap_headerusage (lua_State *L, const char *s, size_t len,
+                                       uint64_t *insn_used) {
+  int base = lua_gettop(L);
+  int ok = 0;
+  lua_pushcfunction(L, ds_decodeheader_trampoline);
+  lua_pushlstring(L, s, len);
+  if (lua_pcall(L, 1, 2, 0) != LUA_OK) {
+    lua_settop(L, base);
+    return 0;
+  }
+  lua_pop(L, 1);                                /* the consumed count */
+  if (lua_istable(L, -1) &&
+      lua_getfield(L, -1, "insn_used") == LUA_TNUMBER &&
+      lua_isinteger(L, -1) && lua_tointeger(L, -1) >= 0) {
+    if (insn_used != NULL)
+      *insn_used = (uint64_t)lua_tointeger(L, -1);
+    ok = 1;
+  }
+  lua_settop(L, base);
+  return ok;
 }
 
 

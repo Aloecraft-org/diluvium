@@ -707,6 +707,7 @@ static int dv_save_body (lua_State *L) {
   const char *host = (const char *)lua_touserdata(L, 2);
   memset(&opts, 0, sizeof(opts));
   opts.host = host;
+  opts.insn_used = (uint64_t)lua_tointeger(L, 3);
   diluvium_snap_save(L, 1, &opts);
   return 1;
 }
@@ -737,7 +738,8 @@ dv_status dv_snapshot (dv_instance *inst, const char *host,
   lua_pushcfunction(L, dv_save_body);
   lua_rawgeti(L, LUA_REGISTRYINDEX, inst->co_ref);
   lua_pushlightuserdata(L, (void *)host);
-  if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+  lua_pushinteger(L, (lua_Integer)inst->insn_used);
+  if (lua_pcall(L, 3, 1, 0) != LUA_OK) {
     const char *msg = lua_tostring(L, -1);
     set_error(inst, (msg != NULL) ? msg : "dv_snapshot: refused");
     lua_settop(L, base);
@@ -782,6 +784,24 @@ dv_status dv_restore (dv_instance *inst, const char *host,
     lua_settop(L, base);
     return (rc == DILUVIUM_SNAP_BAD_PAYLOAD) ? DV_ERROR : DV_SNAPSHOT_MISMATCH;
   }
+  /*
+  ** The budget carries on from where the snapshot left it (9.4: the budget is
+  ** the program's, not one residency's). The counter comes out of the header
+  ** the load just accepted, so the reader failing here means the header
+  ** changed between the two reads -- refuse rather than wake unmetered. Read
+  ** before the instance takes the thread, so this refusal leaves no state
+  ** behind.
+  */
+  {
+    uint64_t used = 0;
+    if (!diluvium_snap_headerusage(L, (const char *)s, len, &used)) {
+      set_error(inst, "dv_restore: the accepted header would not answer for "
+                      "its instruction count");
+      lua_settop(L, base);
+      return DV_ERROR;
+    }
+    inst->insn_used = used;
+  }
   /* The restored thread becomes this instance's, and the instance takes on the
      state the snapshot's was in: started, parked, with a wait-set to report. */
   inst->co = lua_tothread(L, -1);
@@ -792,6 +812,18 @@ dv_status dv_restore (dv_instance *inst, const char *host,
     return DV_ERROR;
   }
   inst->co_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+  /*
+  ** The count hook is the other half of finding 1: 'dv_run' is the only other
+  ** place that arms it, and a restored instance can never reach 'dv_run' --
+  ** 'started' below makes it refuse -- so without this a woken instance keeps
+  ** its limit readable and loses its enforcement. Armed on the thread, not the
+  ** main state, for dv_run's reason: the program runs there. The ordering is
+  ** forced, not conventional: 'dv_set_budget' refuses a started instance and
+  ** this function marks it started, so set-budget-then-restore is the only
+  ** order a host can write, and 'insn_limit' is already right here.
+  */
+  if (inst->insn_limit != 0)
+    lua_sethook(inst->co, dv_insn_hook, LUA_MASKCOUNT, DV_HOOK_STEP);
   inst->started = 1;
   inst->finished = 0;
   inst->parked = 1;

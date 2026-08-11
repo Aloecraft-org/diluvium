@@ -27,6 +27,7 @@
 #define dsnap_h
 
 #include <stddef.h>
+#include <stdint.h>
 
 #include "lua.h"
 
@@ -34,8 +35,15 @@
 #include "dmsgpack.h"
 
 
-/* Snapshot format version. Bumped when the stream layout changes. */
-#define DILUVIUM_SNAP_FORMAT	1
+/*
+** Snapshot format version. Bumped when the stream layout changes.
+**
+** 2: the header carries 'insn_used', so an instruction budget spans
+** residencies instead of quietly restarting at zero on every wake (audit
+** finding 1). A format-1 snapshot is refused, which is the cost of the field
+** being trustworthy rather than defaulted.
+*/
+#define DILUVIUM_SNAP_FORMAT	2
 
 
 /*
@@ -67,6 +75,9 @@ LUA_API void diluvium_snap_fingerprint (lua_State *L, char *out);
 typedef struct diluvium_snap_opts {
   const char *host;                    /* host identity stamp, or NULL */
   const char *capabilities;            /* capability set, or NULL */
+  uint64_t insn_used;                  /* instructions consumed so far; goes in
+                                          the header so a budget can span
+                                          residencies */
 } diluvium_snap_opts;
 
 
@@ -249,5 +260,22 @@ LUA_API int diluvium_snap_load (lua_State *L, const diluvium_snap_opts *opts,
 */
 LUA_API int diluvium_snap_headerqueues (lua_State *L, const char *s,
                                         size_t len);
+
+
+/*
+** The instruction count from a header, so a budget spans residencies.
+**
+** 9.4's budget is a property of the program, not of one residency: a snapshot
+** writes down how much has been consumed, and the instance that wakes carries
+** on from there rather than from zero. In the header rather than the payload
+** for the same reason the budget query exists at the swarm layer -- a host
+** deciding whether it can afford to wake a cached instance needs the number
+** precisely when there is no instance to ask.
+**
+** Returns 1 with '*insn_used' set, or 0 for bytes whose header does not carry
+** the field as a non-negative integer.
+*/
+LUA_API int diluvium_snap_headerusage (lua_State *L, const char *s, size_t len,
+                                       uint64_t *insn_used);
 
 #endif

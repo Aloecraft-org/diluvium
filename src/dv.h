@@ -478,6 +478,14 @@ dv_status dv_snapshot (dv_instance *inst, const char *host,
 ** DV_SNAPSHOT_MISMATCH means the header was refused: a different runtime build, a
 ** different permanents or capability set, or the wrong host stamp. DV_ERROR means
 ** the header matched and the payload did not survive reading.
+**
+** A budget spans residencies. The snapshot carries the instructions consumed so
+** far, restore continues the count from there, and the hook that enforces the
+** limit goes back on -- so a woken instance is exactly as budgeted as it was
+** when it parked. Set the budget with 'dv_set_budget' *before* restoring, the
+** same order a load uses; the other order does not exist, because
+** 'dv_set_budget' refuses an instance that has started and a restored instance
+** has.
 */
 dv_status dv_restore (dv_instance *inst, const char *host,
                       const uint8_t *s, size_t len);
