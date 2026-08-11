@@ -1755,8 +1755,18 @@ nothing; floats always float64; the empty table as a map; forced shapes; a
 cyclic table raising with "cycle" in the message; a non-encodable value naming
 its type and its key path (`a.b[1]`); the decode offset chain; every reserved
 ext code failing by name, with 0x01 saying decQuad specifically; ext 0x02
-decoding opaquely with no resolver installed; and every single byte plus every
-truncation of a valid encoding refused without a crash.
+decoding opaquely with no resolver installed; each of the 256 single bytes
+decoding exactly when it is a whole encoding, which 166 of them are; and every
+proper prefix of a valid encoding refused.
+
+That last pair used to read "every single byte plus every truncation of a valid
+encoding refused without a crash", and both halves of it were wrong. 166 single
+bytes are complete values — every fixint, and six one-byte constants — so
+"refused" was never the property to want; and the assertions behind the sentence
+counted `pcall(...) == nil`, which cannot happen, so they were 0 by construction
+and held whatever the decoder did (audit finding 9). Crash detection was never
+the counter's job either: a decoder that reads off the end of a string takes the
+process with it and fails the run on its own.
 
 Stripped size 13.0 KB of text at `-O3` on linux-x86_64, against a 25 KB budget.
 Not yet measured on musl or wasm, which 3.2 asks for.
