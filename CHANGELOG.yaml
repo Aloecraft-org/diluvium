@@ -90,11 +90,16 @@ releases:
       hibernation is now fixed -- twenty-nine of thirty-five, and the six
       that remain are hibernation entire.
 
-      What that means for a deployment: **profile B of `doc/Messaging.md`
-      18.2 is now available.** A host may load a program it did not write,
-      provided it does not set `DV_FLAG_UNSAFE_DEBUG` and does not turn
-      hibernation on. Profile A -- every program the operator's own -- is
-      unchanged and may keep the whole `debug` library by asking for it.
+      **And a correction that is the most important thing in these notes.**
+      Section 18.2 said the `debug` library was the one item between a
+      deployment and running programs it did not write. That was wrong.
+      `dv_new` opened every standard library, so an instance also had
+      `os.execute`, `io.popen`, `io.open`, `package.loadlib`, `dofile` and
+      `loadfile` -- and a program that can start a process does not need to
+      forge an endpoint reference. `DV_FLAG_SEALED` is new and leaves those
+      out. **Profile B needs both flags, not one**, and the mistake was found
+      by checking the claim this release was about to make rather than by the
+      audit.
 
       Beyond that: four checks that reported success without checking
       anything, and a defect where destroying an endpoint queue made its
@@ -137,11 +142,51 @@ releases:
 
     added:
       - |
+        `DV_FLAG_SEALED` in `dv_config.flags`: leave `io`, `os` and `package`
+        out of the instance, and `dofile`/`loadfile` with them. What is left
+        is the language, the queues, coroutines and the codec -- so a program
+        reaches nothing but what its host pushes to it.
+
+        Set this whenever the program is not one you wrote. It is a separate
+        switch from `DV_FLAG_UNSAFE_DEBUG` because the two do different jobs:
+        narrowing `debug` makes the capability layer a boundary, and this
+        makes the instance one. Neither implies the other.
+
+        A program needing a clock or a file should be given it through a
+        queue; section 8.3 already says the host owns the clock. `print`
+        still works. A snapshot does not cross this flag -- the permanents
+        fingerprint covers names, and sealing removes them -- so a sealed
+        instance's snapshot restores only into another sealed instance, and
+        the refusal says so.
+
+      - |
         `DV_FLAG_UNSAFE_DEBUG` in `dv_config.flags`: open the whole `debug`
         library in this instance rather than the narrowed one. For profile A
         hosts, whose programs are their own. See **Upgrading**.
 
     security:
+      - |
+        **An instance had every standard library, which section 18.2 did not
+        say and this release did not intend.**
+
+        `os.execute`, `os.remove`, `io.popen`, `io.open`, `package.loadlib`,
+        `require`, `dofile` and `loadfile` were all reachable by a program
+        loaded into an instance; `io.open('/etc/passwd')` returned a file
+        handle. `dv_new` called `luaL_openlibs`, and no section of
+        `doc/Messaging.md` ever decided the standard library surface -- it
+        was inherited and never looked at.
+
+        This is not a smaller version of the forgery problem below. It is a
+        larger one, and it means 18.2's profile B was not reachable in
+        5.5.1_build3 for a reason nobody had written down. `DV_FLAG_SEALED`
+        is the fix, and it is opt-in, so **the default is unchanged and a
+        host that does not set it still has all of the above.** Whether the
+        default should invert is recorded as an open decision in 18.3; it is
+        a compatibility call, since sealing by default breaks any embedder
+        whose guest calls `os.time`.
+
+        Recorded as S1 in `doc/audit/M0-M7.md` under "Found since the sweep".
+
       - |
         **An endpoint reference can no longer be forged through the
         registry.**
@@ -278,6 +323,14 @@ releases:
         and section 18.3 states the decision they amount to: whether this
         project supports hibernation at scale, or says it does not and
         strikes them.
+
+      - |
+        **An instance is not sealed by default.** `DV_FLAG_SEALED` is opt-in,
+        so a host that does not know about it gets `io`, `os` and `package`
+        in its guest -- which is to say the unsafe configuration is the one
+        you get by not reading these notes. Inverting the default is a
+        breaking change and is left as an explicit decision in section 18.3
+        of `doc/Messaging.md` rather than taken quietly here.
 
       - |
         `DV_FLAG_UNSAFE_DEBUG` is a real hole, deliberately.

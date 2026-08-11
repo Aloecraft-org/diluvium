@@ -1808,6 +1808,125 @@ static void a_snapshot_crosses_the_debug_flag (void) {
 }
 
 
+/*
+** DV_FLAG_SEALED, and what an unsealed instance reaches without it.
+**
+** Found while writing this release's notes, by checking a claim rather than by
+** the M0-M7 audit: 18.2's profile B named `debug` as the last thing between a
+** deployment and running programs it did not write, and that list was
+** incomplete. An instance gets every standard library, so `os.execute`,
+** `io.popen`, `io.open` and `package.loadlib` were all in reach -- and
+** `io.open('/etc/passwd')` returned a file handle. Narrowing `debug` makes the
+** capability layer a boundary; it does nothing about a program that can start a
+** process, which does not need to forge an endpoint reference to do harm.
+**
+** The unsealed half is asserted here too, deliberately. It is the default, so a
+** reader of this file should see it stated rather than have to infer it from
+** the absence of a test -- and if the default ever changes, this is the line
+** that has to change with it.
+*/
+static void an_instance_is_not_sealed_by_default (void) {
+  ok(raised("assert(os.execute and io.popen and package.loadlib)", 0)[0] == '\0',
+     "without DV_FLAG_SEALED an instance has os, io and package");
+  ok(raised("local f = io.open('/etc/passwd') assert(f) f:close()", 0)[0] == '\0',
+     "and io.open really opens a file the host never mentioned");
+}
+
+
+static void a_sealed_instance_reaches_nothing_outside_itself (void) {
+  static const struct { const char *expr, *what; } gone[] = {
+    { "os",      "os" },
+    { "io",      "io" },
+    { "package", "package" },
+    { "require", "require" },
+    { "dofile",  "dofile" },
+    { "loadfile","loadfile" },
+    { NULL, NULL }
+  };
+  int i;
+  for (i = 0; gone[i].expr != NULL; i++) {
+    char stmt[64], what[96];
+    snprintf(stmt, sizeof(stmt), "assert(%s == nil)", gone[i].expr);
+    snprintf(what, sizeof(what), "a sealed instance has no '%s'", gone[i].what);
+    ok(raised(stmt, DV_FLAG_SEALED)[0] == '\0', what);
+  }
+  /* What is left is the language and the queues, which is the point: sealing
+     must not cost a program the ability to do its job. */
+  ok(raised("local q = queue.declare('w', {cap = 2}) "
+            "queue.push(q, msgpack.encode and 'ok' or 'ok') "
+            "assert(#('x'):rep(3) == 3 and math.floor(1.5) == 1) "
+            "assert(type(print) == 'function')", DV_FLAG_SEALED)[0] == '\0',
+     "and still has the language, the queues, and print");
+}
+
+
+/*
+** Unlike DV_FLAG_UNSAFE_DEBUG, a snapshot does not cross this one -- and that is
+** the correct answer rather than a limitation, because a program captured
+** holding 'io.open' has nowhere to land in a state that has none. The mechanism
+** is the permanents fingerprint (10.4), which covers names, and sealing removes
+** names rather than replacing them.
+*/
+static void a_snapshot_does_not_cross_the_seal (void) {
+  static const char *src =
+    "local work = queue.declare('work', {cap = 2})\n"
+    "queue.wait({work})\n";
+  dv_config cfg;
+  dv_instance *a, *b;
+  uint8_t *buf;
+  size_t need = 0, got = 0;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.abi_version = DV_ABI_VERSION;
+  cfg.flags = DV_FLAG_SEALED;
+  a = dv_new(&cfg);
+  if (a == NULL || !park_on_queue(a, src)) {
+    ok(0, "a sealed instance parks"); dv_free(a); return;
+  }
+  if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0) {
+    ok(0, "it snapshots"); dv_free(a); return;
+  }
+  buf = (uint8_t *)malloc(need);
+  if (buf == NULL) { ok(0, "room"); dv_free(a); return; }
+  dv_snapshot(a, NULL, buf, need, &got);
+  dv_free(a);
+  cfg.flags = 0;                /* an unsealed instance: more names, not fewer */
+  b = dv_new(&cfg);
+  if (b == NULL) { ok(0, "a fresh instance"); free(buf); return; }
+  ok(dv_restore(b, NULL, buf, got) != DV_OK,
+     "a sealed instance's snapshot does not restore into an unsealed one");
+  {
+    const char *e = dv_last_error(b);
+    ok(e != NULL && strstr(e, "permanents") != NULL,
+       "and the refusal names the permanents set");
+    if (e != NULL && strstr(e, "permanents") == NULL) printf("      (%s)\n", e);
+  }
+  dv_free(b);
+  free(buf);
+  /* And it does restore into another sealed one, so the refusal above is about
+     the seal rather than about sealed instances being unsnapshottable. */
+  cfg.flags = DV_FLAG_SEALED;
+  a = dv_new(&cfg);
+  if (a != NULL && park_on_queue(a, src)) {
+    size_t n2 = 0, g2 = 0;
+    uint8_t *b2;
+    dv_snapshot(a, NULL, NULL, 0, &n2);
+    b2 = (uint8_t *)malloc(n2 != 0 ? n2 : 1);
+    if (b2 != NULL) {
+      dv_snapshot(a, NULL, b2, n2, &g2);
+      dv_free(a);
+      b = dv_new(&cfg);
+      ok(b != NULL && dv_restore(b, NULL, b2, g2) == DV_OK,
+         "but does restore into another sealed one");
+      dv_free(b);
+      free(b2);
+      return;
+    }
+  }
+  dv_free(a);
+  ok(0, "but does restore into another sealed one");
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -1851,6 +1970,9 @@ int main (void) {
   a_guest_cannot_switch_its_own_budget_off();
   a_host_can_ask_for_the_whole_debug_library();
   a_snapshot_crosses_the_debug_flag();
+  an_instance_is_not_sealed_by_default();
+  a_sealed_instance_reaches_nothing_outside_itself();
+  a_snapshot_does_not_cross_the_seal();
 
   printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");
   a_parked_instance_snapshots_and_wakes();

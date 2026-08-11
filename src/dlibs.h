@@ -41,6 +41,14 @@ LUA_API void diluvium_openlibs (lua_State *L);
 */
 #define DILUVIUM_GUEST_FULL_DEBUG	0x1u
 
+/*
+** Leave out `io`, `os` and `package` as well: the three libraries that reach
+** anything outside this state's own memory. What is left is the language, the
+** queues, and whatever the host pushes into them -- which is the model 7.1
+** describes, made true rather than assumed.
+*/
+#define DILUVIUM_GUEST_SEALED		0x2u
+
 LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags);
 
 #endif

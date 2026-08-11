@@ -2813,9 +2813,11 @@ thousand agents is 41 MB and ten thousand is 410 MB. That is the number this pro
 lives or dies by, since dropping hibernation means nothing is swapped out.
 
 **Profile B — untrusted or generated programs.** Adds the whole capability layer as a
-boundary. **Done.** Reserved ext codes are refused on encode, the laundering route is
-closed, budgets are enforced through the documented path (§9.1's nested `budget`
-reaches the child), and the `debug` library is narrowed for instances.
+boundary. **Done, and it was not the whole story** — see the correction at the end of
+this profile, which is the more important half. Reserved ext codes are refused on
+encode, the laundering route is closed, budgets are enforced through the documented
+path (§9.1's nested `budget` reaches the child), and the `debug` library is narrowed
+for instances.
 
 That last one carried the design decision, and it went the way this section
 expected. `getmetatable` and `getregistry` between them defeat every scheme that
@@ -2838,6 +2840,34 @@ back with `DV_FLAG_UNSAFE_DEBUG`. That is a supported configuration, not a
 loophole — but it restores all three escapes, and `dv_check` asserts that it does,
 so a host learns the cost from a test rather than from production.
 
+**The correction, and it matters more than anything above it.** This profile used to
+say the `debug` library was the one item between a deployment and running programs it
+did not write. That was wrong, and wrong in the direction that costs something:
+`dv_new` called `luaL_openlibs`, so an instance had **every** standard library —
+`os.execute`, `io.popen`, `io.open`, `package.loadlib`, `dofile`, `loadfile`. A
+program that can start a process has no need to forge an endpoint reference, so the
+item this section spent its length on was not the one in front.
+
+Narrowing `debug` makes the **capability layer** a boundary: no forged references, no
+switching off a budget. `DV_FLAG_SEALED` is what makes the **instance** one: it
+leaves out `io`, `os` and `package`, and `dofile`/`loadfile` with them. The two are
+separate switches because they do separate jobs and neither implies the other, and
+profile B needs both.
+
+Sealing removes rather than narrows, which is the opposite of the choice made for
+`debug` function by function. There is no useful line inside those three: `os.time`
+and `os.clock` are harmless, but §8.3 says the host owns the clock, so the pieces
+worth keeping are pieces this design says should arrive by message anyway. What is
+left is the language, the queues, coroutines and the codec — asserted, so that
+"sealed" does not quietly come to mean "unusable".
+
+Nothing in this document ever decided the standard library surface. §8.5 fixes the
+signature of a permission check and calls the token model separate work; no section
+says which libraries a guest gets. It was inherited from `luaL_openlibs` and never
+looked at, which is why it took writing a release note that claimed profile B was
+reachable to notice. The evidence is `doc/audit/M0-M7.md` under **Found since the
+sweep**, S1.
+
 **Profile C — hibernation at scale.** Adds `u2.funcidx`, real field-validation
 coverage, the host-identity stamp, budget re-arming on wake, and endpoint survival
 across a snapshot. Ten of the ~24 defects live here, including three of the six
@@ -2857,9 +2887,19 @@ number (`doc/audit/M0-M7.md`) beside each. Nothing here is a survey: each line i
 something a session can finish, and the ones with a design decision in them say so.
 
 **Profiles A and B are done, and so is everything that was on neither.** Twenty-nine
-of the thirty-five confirmed findings are fixed. What is left is profile C entire —
-the six findings 0, 1, 5, 12, 14 and 25 — which means the remaining work is no
-longer a list of unrelated defects but one question with a yes or no answer.
+of the thirty-five confirmed findings are fixed. What is left from the audit is
+profile C entire — the six findings 0, 1, 5, 12, 14 and 25 — plus one decision that
+the audit never raised because nothing in this document had decided it.
+
+- [ ] **Decide whether an instance is sealed by default** (audit S1). `DV_FLAG_SEALED`
+      exists and is opt-in, so today a host that does not know about it gets `io`,
+      `os` and `package` in its guest — which is to say the unsafe configuration is
+      the one you get by not reading. Sealing by default is the safer answer and a
+      breaking change for any embedder whose guest calls `os.time`; the flag would
+      invert to something like `DV_FLAG_HOST_ACCESS`. This is a compatibility call
+      rather than a technical one, which is why it is here rather than done. Note it
+      cannot be deferred quietly: profile B's correctness depends on which way it
+      goes, and the default is what most deployments will run.
 
 **The question, and it is the next release's headline.** Does this project support
 hibernation at scale? 18.2 says a deployment that keeps agent state at the

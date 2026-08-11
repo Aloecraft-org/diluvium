@@ -152,9 +152,66 @@ static int db_openrestricted (lua_State *L) {
 }
 
 
+/* ======================================================================
+** Sealing
+** ====================================================================== */
+
+/*
+** `io`, `os` and `package` are the three standard libraries that reach outside
+** this state's own memory, and an instance gets them because 'luaL_openlibs'
+** opens everything. That is the right default for the CLI and was never a
+** decision for instances -- doc/Messaging.md does not discuss the standard
+** library surface anywhere, and 18.2's profile B named only `debug`.
+**
+** It matters because those three are not a smaller version of the same problem
+** that `debug` was. Narrowing `debug` stops a program forging an endpoint or
+** switching off its budget: it makes the *capability layer* a boundary. It does
+** nothing about `os.execute`, `io.popen`, `io.open` or `package.loadlib`, and a
+** program that can start a process does not need to forge a reference.
+**
+** So sealing is a separate switch and not the same one. A host that loads a
+** program it did not write wants both.
+**
+** Removing them rather than narrowing them, which is the opposite of the choice
+** made for `debug` one function at a time. The reason is that there is no
+** useful line inside them: `os.time` and `os.clock` are harmless, but 8.3 says
+** the host owns the clock and a program that needs one should be told it
+** through a queue -- so the pieces worth keeping are pieces the model says
+** should arrive by message anyway. `print` is unaffected; it is in the base
+** library and writes through 'lua_writestring' rather than through `io`.
+**
+** A snapshot does not cross this switch, and that is correct rather than a
+** limitation: the permanents fingerprint (10.4) covers the names in the module
+** tables, so a sealed instance and an open one disagree -- and a program
+** captured holding `io.open` has nowhere to land in a state that has no
+** `io.open`. The refusal names the permanents set. Contrast
+** DV_FLAG_UNSAFE_DEBUG, which a snapshot does cross, because there the names
+** are all still there.
+*/
+/*
+** The two the library mask cannot reach. 'dofile' and 'loadfile' open a path and
+** run it, and they are in the *base* library, so dropping `io`, `os` and
+** `package` leaves them behind -- which the test found before this line existed,
+** and is the reason it enumerates rather than checking the three module names.
+**
+** Not 'load'. It compiles bytes the program already holds and reaches nothing;
+** that it accepts a binary chunk by default is a real question, but it is
+** DV_FLAG_TEXT_ONLY's question and not this flag's.
+*/
+static void seal_base (lua_State *L) {
+  lua_pushnil(L);
+  lua_setglobal(L, "dofile");
+  lua_pushnil(L);
+  lua_setglobal(L, "loadfile");
+}
+
+
 LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags) {
+  int load = ~0;
+  if (flags & DILUVIUM_GUEST_SEALED)
+    load &= ~(LUA_IOLIBK | LUA_OSLIBK | LUA_LOADLIBK);
   if (flags & DILUVIUM_GUEST_FULL_DEBUG) {
-    luaL_openlibs(L);
+    luaL_openselectedlibs(L, load, 0);
   }
   else {
     /* Everything but 'debug', and then 'debug' as the narrowed table. Opening
@@ -162,9 +219,11 @@ LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags) {
        is not what this does: it would leave a window in which the wide table is
        the value in 'package.loaded', and a future caller between the two steps
        would find it. */
-    luaL_openselectedlibs(L, ~0 & ~LUA_DBLIBK, 0);
+    luaL_openselectedlibs(L, load & ~LUA_DBLIBK, 0);
     luaL_requiref(L, LUA_DBLIBNAME, db_openrestricted, 1);
     lua_pop(L, 1);
   }
+  if (flags & DILUVIUM_GUEST_SEALED)
+    seal_base(L);
   diluvium_openlibs(L);
 }
