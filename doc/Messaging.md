@@ -2894,5 +2894,9 @@ without checking anything, which is worse than an absent check:
       is why it is here rather than under a profile.
 
 The one thing not on this list is anything about `diluvium lab`, the REPL or the
-debugger. That is `doc/Lab.md`, which is a design brief rather than a checklist
-because those features do not exist yet.
+debugger. That is `doc/Lab.md`, which is a design brief rather than a checklist because
+those features do not exist yet. Its central question is now settled by execution rather
+than by reading: a breakpoint that parks a program **works** (a C hook may yield, and the
+parked frame's locals are readable by name from outside), and an all-guest debugger
+**cannot** be built (a Lua hook is not yieldable), so that work grows the `dv_` ABI
+rather than sitting on top of it.
