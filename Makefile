@@ -216,9 +216,26 @@ _wasm_build_step3: _wasm_build_compiler_obj
 #
 # `grep -q` now, so a missing symbol is the failure rather than a quiet pass,
 # and the file names are the ones the build writes.
+# Step 1 is the one that has never passed, and this is its second attempt.
+#
+# It ran for the first time in the 5.5.1_build4 release run and failed: the
+# disassembly of onelua_wasi.o contains neither "longjmp" nor "setjmp".
+# The build is fine -- the same run executed the WASI module under wasmtime and
+# the JS integration test's error/traceback case against real wasm, which is
+# exactly the unwinding path sjlj lowering exists for. So the check was wrong,
+# not the artifact.
+#
+# The likely reason is that the check inherited its premise along with its wrong
+# file names: `llvm-objdump -d` disassembles function bodies, while the helpers
+# the WebAssembly backend emits for sjlj (__wasm_setjmp and friends) are symbol
+# table entries. `llvm-nm` is where to look for a symbol by name.
+#
+# STILL UNVERIFIED. There is no podman here, so this is reasoning rather than a
+# run, and it must not go back on the release path until it has passed once
+# somewhere -- putting a never-executed check there is what broke that release.
 _wasm_verify_step1:
 	@echo '=== Verify 1: setjmp/longjmp lowered onto exception handling ==='
-	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-objdump -d /data/onelua_wasi.o | grep -qE "longjmp|setjmp"
+	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/onelua_wasi.o | grep -qiE "setjmp|longjmp"
 
 _wasm_verify_step2:
 	@echo '=== Verify 2: the stubs define the host calls they stand in for ==='

@@ -2992,6 +2992,15 @@ switch exists:
 - [ ] Enforce §10.7's precondition 4, or strike it (**14**). Nested coroutines are
       captured rather than refused, and one of those two is the answer.
 
+**Owed, and it has now failed once.** A workflow that runs `make verify_wasm`. Its
+four wrong file names and its swallowed exit status are fixed (**29**), and it was
+put on `build.yml` — where its first-ever execution failed the 5.5.1_build4 release
+run. The artifact was fine; the check was wrong, and `objdump -d` has been replaced
+with `llvm-nm` on reasoning rather than on a run. It is off the release path again
+until it has passed once somewhere, because **a check that has never executed does
+not belong on the release-critical path on its first run** — which is the general
+lesson and is worth more than the fix.
+
 The one thing not on this list is anything about `diluvium lab`, the REPL or the
 debugger. That is `doc/Lab.md`, which is a design brief rather than a checklist because
 those features do not exist yet. Two things about it are worth carrying forward against

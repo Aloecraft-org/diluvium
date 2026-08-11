@@ -87,15 +87,6 @@ jobs:
       - name: Build WASM
         run: make build_wasm
 
-      # Audit finding 29. This target existed and no workflow called it, which
-      # is how it came to name four files no target produces -- onelua.o rather
-      # than onelua_wasi.o, and so on -- while its first step swallowed its own
-      # exit status through `| head` and could not fail. Both are fixed; this is
-      # the half that keeps them fixed. It runs here rather than in its own job
-      # because the artifacts it inspects are in .data/ from the step above.
-      - name: Verify the WASM artifacts
-        run: make verify_wasm
-
       # The browser target is not currently exercised by any release, so treat
       # it as advisory: a regression here should be visible but must not block
       # shipping the other artifacts. Make it blocking once it has been green.
