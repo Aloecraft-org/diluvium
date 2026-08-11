@@ -76,10 +76,8 @@ handler instance that lives and dies, per-process replay is plausibly enough.
 There is no hostcall ABI yet. When there is one, these fall out of the model rather than
 needing separate design, and one of them is a decision that gets expensive to defer:
 
-- **Reserve a "pending" status in the result encoding before the first hostcall ships.**
-  If a hostcall can only ever answer "done", adding an async one later is a version
-  break; if it can answer "pending + token", it never is. This is the cheap
-  forward-compatibility move, and the only item here with a deadline.
+- **Reserve a correlation token in the request encoding before the first hostcall ships.**
+  See the section below, which corrects what this line used to say.
 - **A hostcall is synchronous from the guest's view and need not block the host.** The
   guest yields a request; the scheduler performs it and resumes with the result. If the
   host cannot answer immediately it leaves the actor blocked exactly as an empty receive
@@ -97,6 +95,74 @@ needing separate design, and one of them is a decision that gets expensive to de
   subscriber. The prototype builds the second in four lines on the first. Bundling them
   produces a primitive that is wrong for both.
 
+## The shape a hostcall should take, and the correction that produced it
+
+**A hostcall needs no ABI at all.** It is a message on a queue the host drains, and an
+answer on a queue the host pushes to. Everything below follows from that, and it was
+arrived at by being wrong first, which is worth recording because the wrong version is
+the intuitive one.
+
+**The claim that was wrong.** A queue-shaped hostcall was described as the *cheap*
+option, on the grounds that it "makes every hostcall a park, so `os.time` costs a full
+host round-trip" — and that this argued for a synchronous C handler beside
+`dv_set_endpoint_handler`, which could answer inline without parking.
+
+That reasoning assumed the guest asks and then immediately needs the answer, which is
+what a function call looks like and not what an actor does. Queues are unidirectional:
+asking is a `queue.push`, which returns; the answer arrives later, like anything else on
+a queue. **Nothing forces a block between the two.**
+
+**Measured, against this tree, with no new mechanism.** A guest declares a request and a
+reply queue, pushes `{call = 'time', tok = 1}`, does 500,500 iterations of arithmetic
+*without parking*, and then parks once on `{inbox, reply}` — the park it was going to do
+anyway, since an actor's loop ends by waiting on its inbox. The host drains the request
+during that park and pushes the answer; the guest wakes on the reply queue with the
+value. One park, which the program had already budgeted for, and zero round-trips added.
+
+So the queue shape is not the cheap approximation of a hostcall. It is the right one:
+
+- **It costs no ABI.** No new entry point, no handler registration, no new park machinery.
+- **It gets replay for free.** Requests and answers are ordinary messages, so they are
+  already in the log the replay claim above depends on. A synchronous C handler would
+  have been a second path *out* of the log — the exact defect that
+  `DV_FLAG_UNSAFE_STDLIB` exists to scaffold over.
+- **It puts the blocking decision where it belongs.** A program that has other work does
+  it; a program that has none parks. `queue.wait` already takes a list, so one park
+  covers the inbox and every outstanding answer at once.
+- **It makes backpressure visible.** A request queue is bounded like any other, so a host
+  that stops draining is a full queue the program can see rather than a silent stall.
+  Declare it `reject` rather than `block`, or asking becomes the park this whole section
+  is about avoiding.
+
+The one thing that genuinely forces a park is a *synchronous-looking API* — `local t =
+os.time()` means "I need this now" and has nowhere to go but a wait. That is an argument
+about what to name the guest-side call, not about the mechanism underneath it, and an
+actor-shaped program sidesteps it by asking at the top of its loop and reading the answer
+when it wakes.
+
+### What must be reserved before the first hostcall ships
+
+The deadline is real; what it applies to changed.
+
+**A correlation token, in the request and echoed in the reply.** This is the item with the
+deadline now. Under the queue shape a guest may have several requests outstanding — that
+is the point of not blocking — and replies arrive on one queue in whatever order the host
+answers. Without a token in the encoding from the first hostcall, matching a reply to its
+request means either one-outstanding-at-a-time or a version break to add one. The probe
+above carried `tok = 1` by hand; that field has to be part of the format, not a
+convention.
+
+**"Pending" is a synchronous-handler concern, and this shape does not have one.** The
+earlier advice — reserve a `"pending"` status so that adding an async hostcall later is
+not a version break — was written assuming a handler that returns a result inline. Under
+the queue shape every hostcall is already asynchronous, and "the answer has not arrived"
+is the ordinary state of an empty queue rather than a status code. Keep the status field
+extensible regardless: a reply says what happened (`ok`, an error, a refusal), and the
+set of those will grow.
+
+**Metering still needs deciding, and is now easier to place.** If a hostcall is a message,
+the natural charge is per message and per byte, which is a rule the queue layer is already
+positioned to apply — rather than a separate accounting path only hostcalls use.
 ## How it maps onto what exists
 
 The prototype's vocabulary and the tree's have converged without either knowing:

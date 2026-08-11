@@ -384,10 +384,12 @@ releases:
         a clock or a file has `DV_FLAG_UNSAFE_STDLIB` and nothing better, which
         is exactly why that flag is scaffolding rather than a configuration.
 
-        `doc/Determinism.md` has the design and one deadline worth knowing
-        about: a `"pending"` status must be reserved in the hostcall result
-        encoding before the first hostcall ships, or adding an async one later
-        is a version break.
+        `doc/Determinism.md` carries the design, and it needs no ABI: a
+        hostcall is a message on a queue the host drains and an answer on a
+        queue it pushes to, which is measured working against this tree today
+        with no new machinery. The one thing with a deadline is reserving a
+        correlation token in the request encoding before the first hostcall
+        ships, since a guest may have several outstanding at once.
 
       - |
         `DV_FLAG_UNSAFE_DEBUG` is a real hole, deliberately.

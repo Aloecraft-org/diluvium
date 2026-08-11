@@ -2454,6 +2454,19 @@ Settled during design. Do not relitigate during implementation.
 Recorded because the reasons generalize, and because this document is the handoff
 artifact between sessions that do not share context.
 
+- **A hostcall was reasoned about as a function call, so it looked like it had to
+  block.** The claim was that a queue-shaped hostcall "makes every hostcall a park, so
+  `os.time` costs a full host round-trip", and that this argued for a synchronous C
+  handler beside `dv_set_endpoint_handler`. Queues are unidirectional: asking is a
+  `queue.push`, which returns, and the answer arrives later like any other message.
+  Nothing forces a block between the two. Measured against this tree: a guest asks, does
+  500,500 iterations without parking, then parks once on `{inbox, reply}` — the park an
+  actor's loop performs anyway — and the answer arrives during it. Zero round-trips
+  added, and no ABI. The general error is the one §8.2 and the `pcall` entry below name
+  from a different direction: reasoning about a shape from the API it resembles rather
+  than from the tree. Here it would have cost a second path out of the message log —
+  exactly the defect `DV_FLAG_UNSAFE_STDLIB` exists to scaffold over — in the name of
+  avoiding a cost that was not there. `doc/Determinism.md` carries the corrected design.
 - **`pcall` was listed as non-yieldable.** It is not, and has not been since Lua
   5.2. The error came from generalizing backward from the hibernate constraint to
   the yield constraint via a shared diagnostic; the two sets are different. M3's
@@ -2921,13 +2934,17 @@ What it leaves behind is the real item:
 
 - [ ] **Make the flag unnecessary: a hostcall for what a program needs from outside.**
       Sealing closes the second boundary; it does not give a sealed program a way to ask
-      the time. `queue.wait` already has the exact shape — yield a request, the host
-      answers, resume — so the mechanism exists and what is missing is a general
-      request/response over it. `doc/Determinism.md` has the design and one deadline:
-      **reserve a `"pending"` status in the result encoding before the first hostcall
-      ships**, or adding an async hostcall later is a version break. Until this exists,
-      a program that genuinely needs a clock has only `DV_FLAG_UNSAFE_STDLIB`, which is
-      why that flag is scaffolding rather than a configuration.
+      the time. The mechanism needs no ABI — a hostcall is a message on a queue the host
+      drains and an answer on a queue it pushes to, which is measured working against
+      this tree today with no new machinery, and which gets replay for free because
+      requests and answers are then already in the log. `doc/Determinism.md` carries the
+      design, the measurement, and the one thing with a deadline: **reserve a
+      correlation token in the request encoding before the first hostcall ships**, since
+      a guest may have several outstanding and replies arrive in whatever order the host
+      answers. (The earlier "reserve a `pending` status" was shaped by assuming a
+      synchronous handler; see §17.) Until this exists, a program that genuinely needs a
+      clock has only `DV_FLAG_UNSAFE_STDLIB`, which is why that flag is scaffolding
+      rather than a configuration.
 
 **The question, and it is the next release's headline.** Does this project support
 hibernation at scale? 18.2 says a deployment that keeps agent state at the
