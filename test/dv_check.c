@@ -697,6 +697,64 @@ static void endpoint_preauthorised (void) {
 
 
 /*
+** Bind, destroy, bind again. Audit finding 11.
+**
+** Not on any profile's path, and here rather than under one because it is
+** reachable by accident: 'endpoint.bind' and 'queue.destroy' are both in the
+** guest table, and a program that finishes with a peer and tidies up is doing
+** the ordinary thing. The token-to-handle map had no way for an entry to leave
+** it, so the second bind returned the destroyed handle and said it had
+** succeeded; every push through it raised, and the token stayed unusable for the
+** life of the instance. The host saw it too -- 'dv_endpoint_queue' went on
+** naming a dead handle as the buffer to drain.
+**
+** The program pushes through the rebound handle rather than only inspecting it,
+** because "bind returned something" was true of the broken version as well.
+*/
+static void a_destroyed_endpoint_can_be_bound_again (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local out = queue.declare('log', {exported = true}) "
+    "local _, ref = queue.wait({inb}) "
+    "local first = endpoint.bind(ref, 'peer') "
+    "queue.destroy(first) "
+    "local ok, second = pcall(endpoint.bind, ref, 'peer') "
+    "if not ok then queue.push(out, 'rebind failed: ' .. tostring(second)) "
+    "  return 0 end "
+    "local okp, err = pcall(queue.push, second, 'through the new handle') "
+    "queue.push(out, tostring(okp) .. '|' .. tostring(second ~= first) "
+    "  .. '|' .. tostring(err)) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox, log;
+  uint8_t ref[3], buf[128];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  dv_endpoint_allow(inst, (const uint8_t *)"9", 1, 42);
+  inbox = dv_queue_lookup(inst, "inbox");
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  ref_message(ref, '9');
+  dv_queue_push(inst, inbox, ref, sizeof(ref));
+  eq_st(dv_resume(inst, inbox), DV_DONE,
+        "a program can destroy an endpoint queue and bind the token again");
+  log = dv_queue_lookup(inst, "log");
+  if (dv_queue_pop(inst, log, buf, sizeof(buf), &n) == DV_OK && n > 1) {
+    char text[128];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strstr(msg, "true|true|") == msg,
+       "and the handle it gets back is a new, live one it can push through");
+    if (strstr(msg, "true|true|") != msg) printf("      (%s)\n", msg);
+  }
+  else ok(0, "and the handle it gets back is a new, live one it can push through");
+  /* And the host is told the truth about which buffer to drain. */
+  ok(dv_endpoint_queue(inst, 42) != 0,
+     "and the host's endpoint handle names the live queue, not the dead one");
+  dv_free(inst);
+}
+
+
+/*
 ** A real reference, and a host that binds nothing.
 **
 ** This lives here rather than in test_endpoint.lua because it needs a genuine
@@ -1773,6 +1831,7 @@ int main (void) {
   endpoint_refusals();
   endpoint_preauthorised();
   endpoint_with_no_host_binding();
+  a_destroyed_endpoint_can_be_bound_again();
   a_guest_cannot_mint_a_reference();
   a_reference_survives_being_forwarded();
   a_forged_ext_is_not_a_reference();
