@@ -88,6 +88,54 @@ sandbox should never pay for. Three options, in the order I would consider them:
    the CLI false. If you choose this, correct §4.1 in the same commit rather than
    leaving the document ahead of the tree.
 
+### The same decision, again, for wasm
+
+The three options above are about the *native* binary. The wasi target
+needs the question asked separately, and it is the more urgent of the two
+— because it has already been answered, by default, and nobody chose the
+answer.
+
+`libdiluvium_wasi.wasm` is linked from `onelua.o + wasm_stubs.o +
+analyze.o + diluvium_api.o` (`Makefile:199`). `dvs.c` is in none of them.
+So the browser build has no swarm layer, and that follows from this
+section's first sentence rather than from anything anyone weighed.
+
+It is worth deciding deliberately now, because the wasi artifact stopped
+being a REPL toy at `5.5.1_build3`: it carries all 27 `dv_*` exports and
+registers `queue`, `endpoint` and `msgpack` as guest globals. A browser
+host can already run budgeted instances and drain queues. The swarm layer
+is the *only* missing tier, and it is missing for a reason that is
+nowhere written down.
+
+**A wasm host cannot supply `dvs_host`'s three function pointers from
+JavaScript.** In wasm a function pointer is a table index — the same
+problem that produced `dv_endpoint_allow`, recorded under §13 with the
+note that it "was found by writing the wasmtime binding". So the host has
+to be C, compiled in, exactly as `test/dvs_check.c:102` already is.
+Concretely, in `wasm_stubs.c` beside `init_lua` and `run_lua`:
+
+```
+swarm_start(const char *code)  -> dvs_new + dvs_root
+swarm_step(void)               -> dvs_step; returns whether anything ran
+swarm_next_event(void)         -> drain one system/events record as
+                                  msgpack or JSON; the caller frees it
+```
+
+plus `dvs.c` on the wasi compile line. That is the same forty lines this
+section already prices for the CLI, with a three-function door instead of
+a command.
+
+`doc/Messaging.md` §12.1 already plans a separate
+`diluvium-swarm-<version>-<triple>.wasm`, which is option 1 in wasm form
+and keeps §4.1's boundary intact. If that is the answer, say so here, so
+that the browser build's silence stops reading as an oversight.
+
+**There is a consumer waiting.** `diluvium-lab` renders `system/events`
+records in §9.2's exact shape — `event`, `id`, `detail` — and on
+`build3` it feeds that renderer from a real `queue.declare`/`push`/`pop`
+loop. What it cannot do is make anything spawn. Whichever option is
+chosen, the transport changes there and nothing else does.
+
 ### Where the command goes
 
 `collectargs` (`src/lua.c:437`) switches on `argv[i][1]`, and its `-` case carries a
@@ -359,8 +407,12 @@ Two further consequences, both **read rather than run**, and flagged as such:
 
 In this order, because each answer constrains the next:
 
-1. **Which binary carries the swarm layer** (§1). Everything else in `lab` sits on top
-   of a host, and this decides whether `lab` is a target, a flag, or the default.
+1. **Which binary carries the swarm layer** (§1) — and, separately,
+   **which wasm artifact does**. Same question, two platforms, and the
+   wasm one has been answered by accident since before anyone asked it.
+   Everything else in `lab` sits on top of a host, so this decides
+   whether `lab` is a target, a flag, or the default — on each of the two
+   platforms that now has a real consumer.
 
 2. ~~**Guest-side or host-side debugger.**~~ **Settled by §3.4, and not by preference:**
    a Lua hook cannot yield, and `dv.h` exposes no `lua_State`, so the debugger lives

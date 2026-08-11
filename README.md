@@ -265,13 +265,47 @@ the editor's keys do. Set `NO_COLOR` to turn highlighting off.
 Line editing is built in — Diluvium links no readline and depends on
 nothing but libc.
 
-## Embedding a REPL
+## The WASM build
 
 `doc/repl-reference.html` is a working Diluvium REPL in a browser
 terminal, and the reference for driving the WASM build: load
 `libdiluvium_wasi.wasm`, call `__wasm_call_ctors`, then `repl_eval` for
 evaluation (it reports whether input is merely unfinished) and
 `repl_complete` for completion.
+
+**What the artifact contains changed at `5.5.1_build3`, and nothing said
+so.** `src/onelua.c` gained `dqueue.c`, `dendpoint.c`, `dmsgpack.c` and
+`dv.c`, and `src/wasm_stubs.c` began calling `diluvium_openlibs`. Those
+three edits landed in one release and took the browser build from plain
+Lua to carrying the instance ABI and the guest messaging libraries.
+
+| in `libdiluvium_wasi.wasm` | 5.4.7_release | 5.5.1_build1 | _build2 | _build3 |
+|---|:---:|:---:|:---:|:---:|
+| `repl_eval`, `repl_complete` | yes | yes | yes | yes |
+| `dv_*` — the instance ABI, 27 exports | — | — | — | **yes** |
+| `queue`, `endpoint`, `msgpack` as guest globals | — | — | — | **yes** |
+| `dvs_*` — the swarm layer | — | — | — | — |
+
+Measured rather than inferred: each published artifact was downloaded,
+read with `WebAssembly.Module.exports`, and then asked `type(queue)` in a
+running state.
+
+The `dv_*` set is the whole of `dv.h` — `dv_new`, `dv_load`, `dv_run`,
+`dv_resume`, `dv_snapshot`, `dv_restore`, the `dv_queue_*` and
+`dv_endpoint_*` families, `dv_set_budget`, `dv_usage`, `dv_exceeded`,
+`dv_waitset_get`, `dv_layout`, `dv_register_code`. So a browser host can
+run sandboxed instances under an instruction budget and drain their
+queues, which is what `doc/Messaging.md` §12.3's npm sketch describes. In
+an ordinary `run_lua` state, `queue.declare`, `push`, `len`, `capacity`
+and the non-blocking `pop` all work; only the blocking `queue.wait` needs
+a host that resumes, which a bare state is not.
+
+`dvs_*` is in no published artifact and will stay that way until somebody
+decides otherwise. `dvs.c` is deliberately outside the amalgamation and
+the wasi link line is `onelua.o + wasm_stubs.o + analyze.o +
+diluvium_api.o` (`Makefile:199`), so the browser has every tier except
+the swarm. That is not a decision about wasm — it is a side effect of one
+about the amalgamation. See `doc/Lab.md` §1.
 
 ## Compiler Features
 
