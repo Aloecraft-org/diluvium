@@ -77,11 +77,13 @@ with a quote or a newline in it cannot break out of the string and become code.
 Without it this function would be an injection hole with extra steps.
 ]]
 local function handler_for (name, want, nat)
-  local src = HANDLER_SRC
-  src = src:gsub('@CLIENT@', function () return ('%q'):format(name) end)
-  src = src:gsub('@WANT@',   function () return ('%q'):format(want) end)
-  src = src:gsub('@NAT@',    function () return ('%q'):format(nat) end)
-  return src
+  -- One pass, deliberately: see the README.
+  local subs = {CLIENT = name, WANT = want, NAT = nat}
+  return (HANDLER_SRC:gsub('@(%u+)@', function (k)
+    local v = subs[k]
+    if v == nil then return nil end     -- leave unknown placeholders alone
+    return ('%q'):format(v)
+  end))
 end
 
 local function admit (c)
@@ -110,6 +112,14 @@ local function admit (c)
   })
 end
 
+-- All state for one instance; every lifecycle event that ends one runs it.
+local function forget (id)
+  local name = byid[id]
+  byid[id] = nil
+  if name then idof[name] = nil end
+  for k, v in pairs(waiting) do if v.id == id then waiting[k] = nil end end
+end
+
 local function kill (id)
   queue.push(sys, {op = 'kill', id = id})
 end
@@ -130,20 +140,19 @@ while true do
       end
 
     elseif m.event == 'exceeded' then
-      idof[byid[m.id] or ''] = nil
       -- The runaway client. Its handler burned its instruction budget and was
       -- stopped; the coordinator is told, and the rest of the swarm is unaffected.
       say(('handler %d (%s) blew its budget and was stopped -- %s'):format(
           m.id, tostring(byid[m.id]), oneline(m.detail)))
-      byid[m.id] = nil
+      forget(m.id)
 
     elseif m.event == 'faulted' then
       say(('handler %d (%s) faulted: %s'):format(
           m.id, tostring(byid[m.id]), oneline(m.detail)))
-      byid[m.id] = nil
+      forget(m.id)
 
     elseif m.event == 'exited' then
-      byid[m.id] = nil
+      forget(m.id)
 
     elseif m.event == 'denied' then
       say(('a request was denied: %s'):format(tostring(m.detail)))

@@ -44,18 +44,27 @@
 ** a legitimate step and not a stall -- the instance simply stays parked, which at
 ** scale is where almost every instance is.
 */
+/*
+** Per-instance host state. 'next' is a rotation offset into the waitset, so a
+** parked instance does not always get its first ready queue delivered.
+*/
+typedef struct slot_ctx { dvs_id id; uint32_t next; } slot_ctx;
+
 static int host_drive (void *ud, dvs_id id, dv_instance *inst, void *ctx) {
+  slot_ctx *sc = (slot_ctx *)ctx;
   dv_waitset ws;
   dv_status st;
-  (void)ud; (void)id; (void)ctx;
+  (void)ud; (void)id;
   memset(&ws, 0, sizeof(ws));
   st = dv_waitset_get(inst, &ws);
   if (st == DV_OK && ws.n > 0) {
-    uint32_t i;
-    for (i = 0; i < ws.n; i++) {
+    uint32_t k;
+    for (k = 0; k < ws.n; k++) {
+      uint32_t i = (sc != NULL) ? (sc->next + k) % ws.n : k;
       dv_queue_info info;
       memset(&info, 0, sizeof(info));
       if (dv_queue_state(inst, ws.ids[i], &info) == DV_OK && info.len > 0) {
+        if (sc != NULL) sc->next = (i + 1) % ws.n;
         st = dv_resume(inst, ws.ids[i]);
         return (st == DV_IDLE);
       }
@@ -84,13 +93,11 @@ static int total_created = 0, total_destroyed = 0, peak_live = 0;
 ** zero and is never asserted. If you want 'destroy' as a lifecycle notification
 ** rather than only as context cleanup, you must return something.
 */
-typedef struct slot_ctx { dvs_id id; } slot_ctx;
-
 static void *host_create (void *ud, dvs_id id, dv_instance *inst) {
   slot_ctx *c = (slot_ctx *)malloc(sizeof(slot_ctx));
   (void)ud; (void)inst;
   total_created++;
-  if (c != NULL) c->id = id;
+  if (c != NULL) { c->id = id; c->next = 0; }
   printf("  [host] instance %u created\n", (unsigned)id);
   return c;
 }
@@ -200,12 +207,13 @@ static char *slurp (const char *path, size_t *len) {
 ** worth noticing, since it is the whole vocabulary a host needs to talk to a
 ** program.
 */
-static void put_str (char **p, char *end, const char *s) {
+static int put_str (char **p, char *end, const char *s) {
   size_t n = strlen(s);
-  if (n > 31 || (size_t)(end - *p) < n + 1) return;   /* fixstr only; toy */
+  if (n > 31 || (size_t)(end - *p) < n + 1) return 0; /* fixstr only; toy */
   *(*p)++ = (char)(0xa0 | n);
   memcpy(*p, s, n);
   *p += n;
+  return 1;
 }
 
 /*
@@ -233,10 +241,12 @@ static size_t str_msg (char *buf, size_t cap, const char *s, size_t len) {
 static size_t client_msg (char *buf, size_t cap, const char *name,
                           const char *want, const char *nat) {
   char *p = buf, *end = buf + cap;
+  int ok = 1;
   *p++ = (char)(0x80 | 3);
-  put_str(&p, end, "client"); put_str(&p, end, name);
-  put_str(&p, end, "want");   put_str(&p, end, want);
-  put_str(&p, end, "nat");    put_str(&p, end, nat);
+  ok = ok && put_str(&p, end, "client") && put_str(&p, end, name);
+  ok = ok && put_str(&p, end, "want")   && put_str(&p, end, want);
+  ok = ok && put_str(&p, end, "nat")    && put_str(&p, end, nat);
+  if (!ok) return 0;
   return (size_t)(p - buf);
 }
 
@@ -254,10 +264,10 @@ static const struct arrival ARRIVALS[] = {
   { 4,  "carol",  "go",     "cone"      },
   { 6,  "dave",   "go",     "cone"      },
   { 7,  "erin",   "shogi",  "cone"      },
+  { 8,  "runaway","chess",  "spin"      },   /* its handler loops forever */
   /* The coordinator will ask for a wider capability than it holds for this one,
      to show 9.3 refusing an attempt to widen a grant. */
   { 9,  "greedy",  "chess",  "cone"      },
-  { 8,  "runaway","chess",  "spin"      },   /* its handler loops forever */
   { 0, NULL, NULL, NULL }
 };
 
@@ -343,7 +353,10 @@ int main (int argc, char **argv) {
         size_t n = str_msg(msg, handler_len + 8, handler_src, handler_len);
         if (n > 0 && dvs_push(sw, coordinator, "code", msg, n) == DVS_OK) {
           sent_handler_src = 1;
-          arrival_base = step;    /* clients start arriving after this */
+          /* Set once. Clearing sent_handler_src on a coordinator restart used to
+             re-origin this, replaying every arrival against the new instance. */
+          if (arrival_base == 0)
+            arrival_base = step;
           printf("  [host] handed the coordinator the handler template\n");
         }
         free(msg);
@@ -360,10 +373,15 @@ int main (int argc, char **argv) {
           char msg[128];
           size_t n = client_msg(msg, sizeof(msg), ARRIVALS[i].name,
                                 ARRIVALS[i].want, ARRIVALS[i].nat);
-          dvs_status st = dvs_push(sw, coordinator, "clients", msg, n);
-          printf("  [host] %s arrives (wants %s, nat %s) -> %s\n",
-                 ARRIVALS[i].name, ARRIVALS[i].want, ARRIVALS[i].nat,
-                 dvs_status_name(st));
+          if (n == 0) {
+            printf("  [host] %s does not fit in an arrival message; dropped\n",
+                   ARRIVALS[i].name);
+          } else {
+            dvs_status st = dvs_push(sw, coordinator, "clients", msg, n);
+            printf("  [host] %s arrives (wants %s, nat %s) -> %s\n",
+                   ARRIVALS[i].name, ARRIVALS[i].want, ARRIVALS[i].nat,
+                   dvs_status_name(st));
+          }
         }
       }
     }

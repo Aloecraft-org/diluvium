@@ -127,6 +127,50 @@ destroy callback with `sl->ctx != NULL`. So a host that wants `destroy` as a
 *lifecycle notification* rather than only as context cleanup has to return something
 non-NULL. This host allocates a one-field struct for exactly that reason.
 
+## Four bugs and a cliff
+
+Found by review, after this example was already being treated as a readiness
+fixture for real work. They are recorded because each is a class rather than an
+incident, and because the fixture could not have caught any of them.
+
+**The arrival origin was rewritten on a coordinator restart.** `sent_handler_src`
+is cleared when a new coordinator appears, so the next step reassigned
+`arrival_base = step` and replayed every arrival against the new instance —
+clients that had already arrived arrived again. It fired on exactly the path this
+README invites you to test. `arrival_base` is now set once.
+
+**The match table was never reconciled against instance death.** `idof` leaked on
+`faulted` and `exited`, and `waiting` leaked on all three. A client parked waiting
+for a peer whose handler then faulted left a stale entry holding a dead id, so the
+next client wanting the same thing matched a corpse and `kill()` fired at a dead
+handle. One `forget()` now runs on every lifecycle event that ends an instance.
+Note the scenario never triggered it — the runaway dies before reporting ready —
+which made it *less* visible, not less real.
+
+**Sequential `gsub` re-substituted.** `handler_for` ran one pass per placeholder,
+so a client named `@WANT@` had its own quoted literal rewritten by the next pass.
+`%q` stops a quote breaking out; it does not stop a later `gsub` reaching in. One
+pass over `@(%u+)@` closes it.
+
+**`put_str` failed silently.** A name longer than 31 bytes wrote nothing while
+`client_msg` still emitted a map header promising three pairs: malformed msgpack,
+no error. It reports now, and a truncated arrival is dropped rather than pushed.
+
+**And the cliff, which is not a bug but is the thing most likely to bite.**
+`coordinator.lua` is a *spawn payload*, and `drain()` in `dvs.c` reads a request
+into an 8192-byte stack buffer. The file was 7791 bytes. Adding four lines of
+comment to it during this fix pushed the request over the limit, and the only
+symptom was `event: denied id=0 (the request is too large)` at run time — the
+swarm came up with one instance instead of eight. There is no build-time check and
+no warning band. If you grow this coordinator, watch its byte count; if you build a
+real one, do not send source as a spawn payload without deciding what happens at
+the limit.
+
+**None of this turned the fixture red**, because `swarmd` returns 0 unconditionally
+and `make run` only checks that the process did not crash. That is the same defect
+the audit calls "a check that reports success without checking" — worth fixing
+before this example is trusted to gate anything.
+
 ## What is not here, and what it would take
 
 **No hibernation.** Every instance in this example is resident, which is release
