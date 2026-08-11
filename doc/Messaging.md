@@ -2983,9 +2983,13 @@ switch exists:
       `dv_run`, and a woken instance can never re-enter it (`dv_run` refuses a
       started instance), so this needs a call inside `dv_restore` or a new `dv_`
       entry point. Without carrying `insn_used`, a budget becomes per-residency.
-- [ ] Give the snapshot fuzzer real field-validation coverage (**5**). Recompute the
-      payload digest after mutating, or mutate before the digest is taken;
-      §10.10's "0 crashes" is currently true and proves less than it appears to.
+- [x] **Done, and it found two.** The snapshot fuzzer has real field-validation
+      coverage (**5**): it re-seals the payload digest after mutating, so mutants
+      reach the layer the digest used to refuse them in front of. 409 refused / 20
+      accepted / 0 crashed became **335 / 92 / 2**, and the two crashes are audit
+      **S2** — malformed snapshots that abort on a `lua_assert` instead of being
+      refused, which means a release build with assertions compiled out takes the
+      same input somewhere undefined. Fixing those is the next item here.
 - [ ] Stamp host identity on the swarm layer's own snapshots (**25**).
 - [ ] Make an endpoint reference survive a snapshot (**12**), and fix the false
       statement `bind` makes when it does not.
