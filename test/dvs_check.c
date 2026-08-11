@@ -177,6 +177,65 @@ static void hibernation_is_off_unless_asked_for (void) {
 
 
 /*
+** 10.10's host-identity stamp, at the swarm layer (audit finding 25).
+**
+** The four quadrants, in one swarm, by moving the identity between hibernate
+** and wake -- which is exactly how "a different host" looks to a cached
+** snapshot. The recovery steps matter as much as the refusals: waking again
+** once the identity is back proves the refusal was the stamp's, not some
+** other layer's.
+*/
+static void snapshots_carry_the_host_identity (void) {
+  dvs_swarm *sw = swarm_with_hibernation(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "queue:work" };
+  static const char *src = "local q = queue.declare('work', {cap = 4}) "
+                           "queue.wait({q})";
+  if (sw == NULL) { ok(0, "a swarm"); return; }
+  ok(dvs_set_host_identity(sw, "dvs-check/host-a") == DVS_OK,
+     "a swarm takes an identity");
+  if (dvs_root(sw, src, strlen(src), caps, 1, 0, 0, &root) != DVS_OK) {
+    ok(0, "a program starts");
+    dvs_free(sw);
+    return;
+  }
+  dvs_step(sw);                 /* park it, so the snapshot is takeable */
+  /* Stamped and woken under the same identity: the stamp is invisible. */
+  ok(dvs_hibernate(sw, root) == DVS_OK, "a stamped snapshot is taken");
+  ok(dvs_wake(sw, root) == DVS_OK, "and wakes under the identity it carries");
+  /* A foreign stamp is refused. */
+  ok(dvs_hibernate(sw, root) == DVS_OK, "cached again for the foreign case");
+  ok(dvs_set_host_identity(sw, "dvs-check/host-b") == DVS_OK,
+     "the identity changes under the cache");
+  ok(dvs_wake(sw, root) != DVS_OK, "a foreign stamp is refused");
+  {
+    const char *e = dvs_last_error(sw);
+    ok(e != NULL && strstr(e, "host identity stamp") != NULL,
+       "and the refusal names the stamp");
+  }
+  /* A stamped snapshot is refused by an unstamped host, or stamping would end
+     at the first process that never bothered to set an identity. */
+  ok(dvs_set_host_identity(sw, NULL) == DVS_OK, "the identity clears");
+  ok(dvs_wake(sw, root) != DVS_OK,
+     "an unstamped host refuses a stamped snapshot");
+  /* Recovery: the right identity, and the same bytes wake. */
+  ok(dvs_set_host_identity(sw, "dvs-check/host-a") == DVS_OK,
+     "the identity comes back");
+  ok(dvs_wake(sw, root) == DVS_OK, "and the same snapshot wakes");
+  /* The reverse asymmetry: a stamped host refuses an unstamped snapshot. */
+  ok(dvs_set_host_identity(sw, "") == DVS_OK, "\"\" clears like NULL");
+  ok(dvs_hibernate(sw, root) == DVS_OK, "an unstamped snapshot is taken");
+  ok(dvs_set_host_identity(sw, "dvs-check/host-a") == DVS_OK,
+     "the host gains an identity under the cache");
+  ok(dvs_wake(sw, root) != DVS_OK,
+     "a stamped host refuses an unstamped snapshot");
+  ok(dvs_set_host_identity(sw, NULL) == DVS_OK && dvs_wake(sw, root) == DVS_OK,
+     "unstamped host, unstamped snapshot: restores anywhere");
+  dvs_free(sw);
+}
+
+
+/*
 ** The payload of a msgpack string message, NUL-terminated.
 **
 ** Read through the cursor rather than by skipping a header byte. Skipping one is
@@ -1697,6 +1756,7 @@ int main (void) {
 
   printf("\n=== the snapshot cache and wake_on_message (8.4, 9.5) ===\n");
   hibernation_is_off_unless_asked_for();
+  snapshots_carry_the_host_identity();
   a_denied_hibernate_does_not_make_a_clean_exit_a_fault();
   flags_attenuate_through_a_spawn();
   pushing_to_a_dead_instance_is_gone();

@@ -132,6 +132,7 @@ struct dvs_swarm {
   uint32_t spawn_rate;
   uint32_t spawns_this_step;
   int allow_hibernation;        /* off by default: see dvs.h */
+  char *host_identity;          /* the stamp for 10.10; NULL = unstamped */
   uint32_t unsafe_stdlib;       /* DV_FLAG_UNSAFE_STDLIB, or 0. See dvs.h. */
   char error[512];
 };
@@ -241,6 +242,7 @@ void dvs_free (dvs_swarm *sw) {
       release(sw, &sw->slots[i]);
   }
   free(sw->slots);
+  free(sw->host_identity);
   free(sw);
 }
 
@@ -670,6 +672,29 @@ void dvs_allow_hibernation (dvs_swarm *sw, int allow) {
 }
 
 
+dvs_status dvs_set_host_identity (dvs_swarm *sw, const char *identity) {
+  char *copy = NULL;
+  if (sw == NULL)
+    return DVS_ERROR;
+  if (identity != NULL && identity[0] != '\0') {
+    size_t n = strlen(identity) + 1;
+    copy = (char *)malloc(n);
+    if (copy == NULL) {
+      /* Refused rather than silently unstamped: a stamp that quietly failed
+         to apply is the advisory stamping 10.10 exists to rule out. */
+      set_error(sw, "no memory to hold the host identity");
+      return DVS_ERROR;
+    }
+    memcpy(copy, identity, n);
+  }
+  free(sw->host_identity);
+  sw->host_identity = copy;     /* NULL when clearing: "" and NULL both mean
+                                   unstamped, and the header writes "" for
+                                   either, so one spelling is stored */
+  return DVS_OK;
+}
+
+
 void dvs_allow_unsafe_stdlib (dvs_swarm *sw, int allow) {
   if (sw != NULL)
     sw->unsafe_stdlib = allow ? DV_FLAG_UNSAFE_STDLIB : 0u;
@@ -703,7 +728,7 @@ dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id) {
   ** value graph -- a guess large enough for the common case is a guess that fails on
   ** the agent that matters.
   */
-  if (dv_snapshot(sl->inst, NULL, NULL, 0, &need) != DV_OK) {
+  if (dv_snapshot(sl->inst, sw->host_identity, NULL, 0, &need) != DV_OK) {
     set_error(sw, "instance %u will not hibernate: %s", (unsigned)id,
               dv_last_error(sl->inst) ? dv_last_error(sl->inst) : "not parked");
     return DVS_ERROR;
@@ -713,7 +738,7 @@ dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id) {
     set_error(sw, "no memory for a %lu-byte snapshot", (unsigned long)need);
     return DVS_ERROR;
   }
-  if (dv_snapshot(sl->inst, NULL, buf, need, &sl->snaplen) != DV_OK) {
+  if (dv_snapshot(sl->inst, sw->host_identity, buf, need, &sl->snaplen) != DV_OK) {
     set_error(sw, "instance %u will not hibernate: %s", (unsigned)id,
               dv_last_error(sl->inst) ? dv_last_error(sl->inst) : "?");
     free(buf);
@@ -763,7 +788,7 @@ dvs_status dvs_wake (dvs_swarm *sw, dvs_id id) {
      that had a budget must not come back without one. */
   if (sl->instructions != 0 || sl->memory_kb != 0)
     dv_set_budget(inst, sl->instructions, sl->memory_kb);
-  if (dv_restore(inst, NULL, sl->snap, sl->snaplen) != DV_OK) {
+  if (dv_restore(inst, sw->host_identity, sl->snap, sl->snaplen) != DV_OK) {
     set_error(sw, "instance %u will not restore: %s", (unsigned)id,
               dv_last_error(inst) ? dv_last_error(inst) : "?");
     dv_free(inst);

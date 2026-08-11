@@ -202,6 +202,27 @@ void dvs_allow_hibernation (dvs_swarm *sw, int allow);
 
 
 /*
+** Give this swarm an identity, and every snapshot it takes carries it.
+**
+** 10.10's stamp at the swarm layer. With an identity set, 'dvs_hibernate' stamps
+** what it caches and 'dvs_wake' will restore only a snapshot stamped the same:
+** a foreign stamp is refused, and so is no stamp at all, because a stamp that
+** tolerated unstamped snapshots would be advisory (the instance ABI's 'host'
+** argument has the same asymmetry, and this is that argument, plumbed). Without
+** one -- the default -- snapshots are unstamped and restore anywhere, which is
+** the right shape for a single process moving its own state.
+**
+** The identity is read when a snapshot is taken and when one is woken, so set it
+** once, right after 'dvs_new', before anything hibernates: a snapshot cached
+** unstamped is refused by the same swarm the moment it gains an identity, which
+** is the asymmetry above doing its job, not a defect to work around. NULL or ""
+** clears it. The only refusal is no memory to hold the copy, and it leaves the
+** previous identity in place -- refused rather than silently unstamped.
+*/
+dvs_status dvs_set_host_identity (dvs_swarm *sw, const char *identity);
+
+
+/*
 ** Let this swarm's instances have `io`, `os` and `package` -- DV_FLAG_UNSAFE_STDLIB
 ** on the instance ABI, and the same scaffolding it is there.
 **
