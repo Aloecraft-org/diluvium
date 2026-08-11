@@ -527,7 +527,27 @@ LUA_API int diluvium_shim_restore (lua_State *co,
     ci->func.p = co->stack.p + (f->func_index - 1);
     ci->top.p = co->stack.p + (f->top_index - 1);
     ci->callstatus = cast(l_uint32, f->callstatus);
-    ci->u2.funcidx = f->funcidx;
+    /*
+    ** 'u2.funcidx' is reconstructed rather than read from the record, because
+    ** the record has never carried it (audit finding 0). For a CIST_YPCALL
+    ** frame it is savestack() of the callee's function slot -- the next frame's
+    ** -- which is exactly what 'lapi.c' stored when the pcall was made, so the
+    ** two agree by construction and a derived value cannot be a lie the way one
+    ** read from untrusted input can.
+    **
+    ** Restoring 0 here, which is what happened before, made 'finishpcallk' close
+    ** from the stack base. A pcall frame with no callee cannot have been
+    ** suspended inside its own call, so it is refused rather than guessed at.
+    */
+    if (f->callstatus & CIST_YPCALL) {
+      if (i + 1 >= n)
+        return 0;                       /* a pcall frame with no callee */
+      ci->u2.funcidx = cast_int((char *)(co->stack.p + (frames[i + 1].func_index - 1))
+                                - (char *)co->stack.p);
+    }
+    else {
+      ci->u2.funcidx = f->funcidx;
+    }
     if (f->is_c) {
       ci->u.c.k = (ks != NULL) ? ks[i] : NULL;
       ci->u.c.ctx = cast(lua_KContext, f->ctx);

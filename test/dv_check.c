@@ -1935,6 +1935,81 @@ static void a_snapshot_does_not_cross_the_seal (void) {
 }
 
 
+/*
+** A restored program that raises an error. Audit finding 0.
+**
+** The test that had never existed, which is why the defect was green: nothing in
+** the tree resumed a *restored* thread into an error. Every snapshot test drove
+** the success path.
+**
+** What it did before the fix, measured rather than reasoned about: the release
+** build **hung forever**, and the same binary under ASan finished with the wrong
+** error ("attempt to call a nil value"). Two symptoms from one defect, decided by
+** memory layout, which is what undefined behaviour looks like from outside. Note
+** which way round that is -- the sanitizer build was the one that did *not*
+** reproduce it, so "clean under asan+ubsan" was never going to catch this.
+**
+** The mechanism, off a live backtrace of the hang:
+**
+**   lua_resume -> precover -> unroll -> finishCcall -> finishpcallk (ldo.c:813)
+**     -> luaF_close -> prepcallclosemth (lfunc.c:161) -> callclosemethod
+**     -> luaD_call -> luaD_precall -> tryfuncTM -> luaG_callerror
+**
+** 'finishpcallk' reads 'ci->u2.funcidx', which the thread record never carried,
+** so it is 0 -- the stack base. 'luaF_close' then closes from there, '__close' is
+** called on something that is not a function, and that error re-enters 'precover'
+** and closes from the base again. The loop is the livelock.
+**
+** The traceback is still missing from the restored error and present in the fresh
+** one: 'old_errfunc' and 'L->errfunc' are absent from the thread record too, so
+** dv's message handler does not run at the throw point. That is a separate and
+** much smaller gap -- a worse message, not a broken program -- and 10.2 already
+** calls it out of scope.
+*/
+static void a_restored_program_can_raise (void) {
+  static const char *src =
+    "local q = queue.declare('work', {cap = 2})\n"
+    "queue.wait({q})\n"
+    "error('boom after waking')\n";
+  dv_instance *a = dv_new(NULL), *b;
+  uint8_t *buf;
+  size_t need = 0, got = 0;
+  if (a == NULL || !park_on_queue(a, src)) { ok(0, "an agent parks"); dv_free(a); return; }
+  if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0) {
+    ok(0, "it snapshots"); dv_free(a); return;
+  }
+  buf = (uint8_t *)malloc(need);
+  if (buf == NULL) { ok(0, "room"); dv_free(a); return; }
+  dv_snapshot(a, NULL, buf, need, &got);
+  dv_free(a);
+  b = dv_new(NULL);
+  if (b == NULL) { ok(0, "a fresh instance"); free(buf); return; }
+  if (dv_restore(b, NULL, buf, got) != DV_OK) {
+    printf("      (%s)\n", dv_last_error(b));
+    ok(0, "it restores");
+    dv_free(b); free(buf); return;
+  }
+  {
+    dv_queue_id q = dv_queue_lookup(b, "work");
+    static const uint8_t one[] = { 0x01 };
+    dv_status st;
+    dv_queue_push(b, q, one, sizeof(one));
+    /* Before the fix this call did not return. */
+    st = dv_resume(b, q);
+    eq_st(st, DV_ERROR, "a restored program that raises reports the error");
+    {
+      const char *m = dv_last_error(b);
+      ok(m != NULL && strstr(m, "boom after waking") != NULL,
+         "and it is the program's own error, not one from unwinding");
+      if (m != NULL && strstr(m, "boom after waking") == NULL)
+        printf("      (%s)\n", m);
+    }
+  }
+  dv_free(b);
+  free(buf);
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -1989,6 +2064,7 @@ int main (void) {
   the_host_stamp_is_enforced_through_the_abi();
   garbage_is_refused_not_crashed_on();
   a_registered_prototype_shrinks_a_snapshot();
+  a_restored_program_can_raise();
 
   printf("\n%d checks, %d failed\n", checks, failures);
   return failures != 0;

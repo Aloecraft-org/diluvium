@@ -2920,7 +2920,7 @@ something a session can finish, and the ones with a design decision in them say 
 
 **Profiles A and B are done, and so is everything that was on neither.** Twenty-nine
 of the thirty-five confirmed findings are fixed. What is left from the audit is
-profile C entire — the six findings 0, 1, 5, 12, 14 and 25 — plus one decision that
+most of profile C — findings 1, 5, 12, 14 and 25, with 0 now fixed — plus one decision that
 the audit never raised because nothing in this document had decided it.
 
 **Sealing is decided and done** (audit S1). An instance is sealed by default;
@@ -2966,7 +2966,7 @@ refuse `dv_restore` by default rather than only documenting it.
 **Profile C — hibernation at scale.** In this order; the first is the reason the
 switch exists:
 
-- [ ] Carry `u2.funcidx` in the thread record (**0**). Eleven frame words instead of
+- [x] **Done.** Carry `u2.funcidx` in the thread record (**0**). Eleven frame words instead of
       ten, or reconstruct it in `ds_buildthread` for every `CIST_YPCALL` frame as the
       `savestack` of the next frame's function slot — the two agree by construction —
       and validate it in `diluvium_shim_checkframes` the way `func_index` already is.
