@@ -175,6 +175,19 @@ static void de_push_ref (lua_State *L, const char *data, size_t len) {
 }
 
 
+/*
+** The reference metatable, for the snapshot layer to name as a permanent
+** ("dendpoint.refmt"). Identity is what a reference *is* -- 'de_ref_bytes'
+** answers with rawequal against this table -- so a snapshot that copied it by
+** content restored references that failed their own identity test (audit
+** finding 12). Same shape as 'diluvium_queue_pushmark', and valid before
+** 'luaopen_dendpoint' runs, because the table is built on first ask.
+*/
+LUA_API void diluvium_endpoint_pushrefmt (lua_State *L) {
+  de_ref_mt(L);
+}
+
+
 /* The bytes inside a reference, or NULL when the value is not one. */
 static const char *de_ref_bytes (lua_State *L, int idx, size_t *len) {
   const char *s = NULL;
@@ -259,9 +272,15 @@ static int de_bind (lua_State *L) {
   lua_Integer id, existing;
 
   if (ref == NULL) {
-    return luaL_error(L, "endpoint.bind: the first argument is not an endpoint "
-                         "reference. A program receives one in a message and "
-                         "never builds one; see 7.3.");
+    /* Worded for what is actually checked. The old text told a program its
+       value "is not an endpoint reference", which was false whenever the value
+       was a genuine reference that had merely lost its identity crossing a
+       snapshot (audit finding 12) -- an error message that misdescribes its
+       own test costs exactly the afternoon it cost the audit. */
+    return luaL_error(L, "endpoint.bind: the first argument does not carry "
+                         "this runtime's reference identity, so it is not a "
+                         "live endpoint reference here (7.3: a program "
+                         "receives one in a message and never builds one)");
   }
   /* A pre-authorised reference first: a host that already knows what its
      references mean needs no call out, and for a host reaching the ABI through
@@ -294,8 +313,42 @@ static int de_bind (lua_State *L) {
   }
 
   id = diluvium_queue_declare(L, name, 0, 0 /* reject */, 0, 1 /* endpoint */);
-  if (id == 0)
+  if (id == 0) {
+    /*
+    ** The name exists. When it names an endpoint queue that no token claims,
+    ** this is a woken instance re-binding the endpoint it bound before it
+    ** hibernated: the queue travels through a snapshot -- flag, contents and
+    ** the integer handle the program still holds -- but the token map is host
+    ** state and does not, so without adoption the host's drain path
+    ** ('dv_endpoint_queue') could never come back after a wake. Adopt it:
+    ** record the token against the existing handle and hand that handle back,
+    ** which also keeps 'bind' idempotent across residencies.
+    **
+    ** A queue some token still claims stays refused: two tokens onto one
+    ** queue would have the host draining one buffer for two far ends, and a
+    ** plain queue stays refused because binding does not commandeer.
+    */
+    lua_Integer held = diluvium_queue_find(L, name);
+    if (held != 0 && diluvium_queue_is_endpoint(L, held)) {
+      int claimed = 0;
+      de_tokens(L);
+      lua_pushnil(L);
+      while (lua_next(L, -2) != 0) {
+        if (lua_tointeger(L, -1) == held)
+          claimed = 1;
+        lua_pop(L, 1);
+      }
+      if (!claimed) {
+        lua_pushinteger(L, held);
+        lua_rawseti(L, -2, (lua_Integer)token);
+        lua_pop(L, 1);
+        lua_pushinteger(L, held);
+        return 1;
+      }
+      lua_pop(L, 1);
+    }
     return luaL_error(L, "endpoint.bind: '%s' is already declared", name);
+  }
   de_tokens(L);
   lua_pushinteger(L, id);
   lua_rawseti(L, -2, (lua_Integer)token);

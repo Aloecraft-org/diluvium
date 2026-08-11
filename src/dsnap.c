@@ -15,6 +15,7 @@
 #include "lua.h"
 
 #include "lauxlib.h"
+#include "dendpoint.h"
 #include "dhash.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
@@ -256,6 +257,20 @@ LUA_API void diluvium_snap_permanents (lua_State *L) {
   */
   diluvium_queue_pushmark(L);
   ds_perm_put(L, nameidx, validx, "dqueue.parkmark");
+
+  /*
+  ** The endpoint reference metatable. A reference is a table wearing this as a
+  ** *private* metatable, and wearing it is what a reference is --
+  ** 'endpoint.bind' answers the identity question with rawequal against it. So
+  ** it must substitute by reference across a snapshot: copied by content, a
+  ** restored reference failed its own identity test and 'bind' refused the one
+  ** shape 7.3 promises a program can hold (audit finding 12). Registered here
+  ** rather than in 'luaopen_dendpoint', because this builder's set is cached
+  ** on first use and a registration racing that cache split the fingerprint on
+  ** timing -- run-verified, not hypothetical.
+  */
+  diluvium_endpoint_pushrefmt(L);
+  ds_perm_put(L, nameidx, validx, "dendpoint.refmt");
 
   /* The string metatable. Reachable from any string through '__index', so a
      program that keeps 'getmetatable("")' would otherwise serialize a table full
@@ -559,7 +574,7 @@ LUA_API const char *diluvium_snap_why (int code) {
              "half-loaded";
     case DILUVIUM_SNAP_PERMANENTS_MISMATCH:
       return "the snapshot's permanents set differs from this runtime's, so a "
-             "C function in it could not be resolved to the same thing";
+             "named value in it could not be resolved to the same thing";
     case DILUVIUM_SNAP_CAPABILITY_MISMATCH:
       return "the snapshot was taken under a different capability set";
     case DILUVIUM_SNAP_HOST_MISMATCH:

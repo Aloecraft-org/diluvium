@@ -2121,6 +2121,149 @@ static void a_nested_coroutine_refuses_the_snapshot (void) {
 
 
 /*
+** Finding 12, first half: a reference held across a hibernate is still a
+** reference. Its identity is a private metatable, and before that table was
+** a permanent the snapshot copied it by content -- so the woken program held
+** a value that looked exactly like its reference and failed the rawequal
+** test 'bind' answers the identity question with, refused with a message
+** asserting the program had built the value itself. The reference is
+** delivered, *held unbound* across the snapshot, and bound only after the
+** wake, so what this proves is the identity's survival and nothing else's.
+*/
+static void a_reference_survives_hibernation (void) {
+  static const char *src =
+    "local inb = queue.lookup('inbox')\n"
+    "local _, ref = queue.wait({inb})\n"
+    "local work = queue.declare('work', {cap = 2})\n"
+    "queue.wait({work})\n"
+    "local okb, ep = pcall(endpoint.bind, ref, 'peer')\n"
+    "local out = queue.declare('log', {exported = true})\n"
+    "queue.push(out, okb and endpoint.status(ep) or tostring(ep))\n"
+    "return 0\n";
+  dv_instance *a = load(src, 0), *b;
+  dv_waitset ws;
+  uint8_t refmsg[3], buf[256];
+  uint8_t *snap;
+  size_t need = 0, got = 0, n = 0;
+  if (a == NULL) { ok(0, "load"); return; }
+  dv_endpoint_allow(a, (const uint8_t *)"7", 1, 7);
+  if (dv_run(a, &ws) != DV_IDLE) { ok(0, "it waits for a reference"); dv_free(a); return; }
+  ref_message(refmsg, '7');
+  dv_queue_push(a, dv_queue_lookup(a, "inbox"), refmsg, sizeof(refmsg));
+  if (dv_resume(a, dv_queue_lookup(a, "inbox")) != DV_IDLE) {
+    ok(0, "it parks holding the reference"); dv_free(a); return;
+  }
+  if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0 ||
+      (snap = (uint8_t *)malloc(need)) == NULL) {
+    printf("      (%s)\n", dv_last_error(a));
+    ok(0, "it snapshots holding the reference"); dv_free(a); return;
+  }
+  dv_snapshot(a, NULL, snap, need, &got);
+  dv_free(a);
+  b = dv_new(NULL);
+  if (b == NULL) { ok(0, "a fresh instance"); free(snap); return; }
+  /* The authorisation is host state and does not travel; re-supplying it is
+     the host's half of the wake. */
+  dv_endpoint_allow(b, (const uint8_t *)"7", 1, 7);
+  if (dv_restore(b, NULL, snap, got) != DV_OK) {
+    printf("      (%s)\n", dv_last_error(b));
+    ok(0, "it restores"); dv_free(b); free(snap); return;
+  }
+  {
+    dv_queue_id work = dv_queue_lookup(b, "work");
+    static const uint8_t one[] = { 0x01 };
+    dv_queue_push(b, work, one, sizeof(one));
+    eq_st(dv_resume(b, work), DV_DONE, "the woken program binds and finishes");
+    dv_queue_pop(b, dv_queue_lookup(b, "log"), buf, sizeof(buf), &n);
+    ok(n == 5 && memcmp(buf + 1, "live", 4) == 0,
+       "the restored reference bound: identity survived the snapshot");
+    if (!(n == 5 && memcmp(buf + 1, "live", 4) == 0) && n > 1) {
+      buf[n < sizeof(buf) ? n : sizeof(buf) - 1] = '\0';
+      printf("      (log said: %s)\n", buf + 1);
+    }
+    ok(dv_endpoint_queue(b, 7) != 0,
+       "and the host's drain path is back under the re-supplied token");
+  }
+  dv_free(b);
+  free(snap);
+}
+
+
+/*
+** Finding 12, second half: the endpoint a program *bound before* hibernating.
+** The queue travels -- flag, contents and the integer handle the program
+** still holds -- but the token map is host state and does not, so before
+** adoption a woken program re-binding its own endpoint was told the name was
+** already declared, by the queue it had declared, and the host's drain path
+** had no way back at all. 'bind' now adopts an endpoint queue no token
+** claims. The message pushed before the hibernate coming out after it is the
+** point of the whole exercise.
+*/
+static void a_woken_program_rebinds_its_endpoint (void) {
+  static const char *src =
+    "local inb = queue.lookup('inbox')\n"
+    "local _, ref = queue.wait({inb})\n"
+    "local ep = endpoint.bind(ref, 'peer')\n"
+    "queue.push(ep, 'before')\n"
+    "local work = queue.declare('work', {cap = 2})\n"
+    "queue.wait({work})\n"
+    "local ep2 = endpoint.bind(ref, 'peer')\n"
+    "local out = queue.declare('log', {exported = true})\n"
+    "queue.push(out, tostring(ep2 == ep))\n"
+    "queue.push(ep2, 'after')\n"
+    "return 0\n";
+  dv_instance *a = load(src, 0), *b;
+  dv_waitset ws;
+  uint8_t refmsg[3], buf[256];
+  uint8_t *snap;
+  size_t need = 0, got = 0, n = 0;
+  if (a == NULL) { ok(0, "load"); return; }
+  dv_endpoint_allow(a, (const uint8_t *)"7", 1, 7);
+  if (dv_run(a, &ws) != DV_IDLE) { ok(0, "it waits for a reference"); dv_free(a); return; }
+  ref_message(refmsg, '7');
+  dv_queue_push(a, dv_queue_lookup(a, "inbox"), refmsg, sizeof(refmsg));
+  if (dv_resume(a, dv_queue_lookup(a, "inbox")) != DV_IDLE) {
+    printf("      (%s)\n", dv_last_error(a));
+    ok(0, "it binds, pushes, and parks"); dv_free(a); return;
+  }
+  if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0 ||
+      (snap = (uint8_t *)malloc(need)) == NULL) {
+    printf("      (%s)\n", dv_last_error(a));
+    ok(0, "it snapshots with an endpoint bound"); dv_free(a); return;
+  }
+  dv_snapshot(a, NULL, snap, need, &got);
+  dv_free(a);
+  b = dv_new(NULL);
+  if (b == NULL) { ok(0, "a fresh instance"); free(snap); return; }
+  dv_endpoint_allow(b, (const uint8_t *)"7", 1, 7);
+  if (dv_restore(b, NULL, snap, got) != DV_OK) {
+    printf("      (%s)\n", dv_last_error(b));
+    ok(0, "it restores"); dv_free(b); free(snap); return;
+  }
+  {
+    dv_queue_id work = dv_queue_lookup(b, "work");
+    dv_queue_id drain;
+    static const uint8_t one[] = { 0x01 };
+    dv_queue_push(b, work, one, sizeof(one));
+    eq_st(dv_resume(b, work), DV_DONE, "the woken program re-binds and finishes");
+    dv_queue_pop(b, dv_queue_lookup(b, "log"), buf, sizeof(buf), &n);
+    ok(n == 5 && memcmp(buf + 1, "true", 4) == 0,
+       "adoption returns the very handle the program still held");
+    drain = (dv_queue_id)dv_endpoint_queue(b, 7);
+    ok(drain != 0, "and the host's drain path is back");
+    dv_queue_pop(b, drain, buf, sizeof(buf), &n);
+    ok(n == 7 && memcmp(buf + 1, "before", 6) == 0,
+       "the message pushed before the hibernate comes out after it");
+    dv_queue_pop(b, drain, buf, sizeof(buf), &n);
+    ok(n == 6 && memcmp(buf + 1, "after", 5) == 0,
+       "ahead of the one pushed after, so ordering held");
+  }
+  dv_free(b);
+  free(snap);
+}
+
+
+/*
 ** Finding 1: the test that never existed. The count hook was armed in exactly
 ** one place, inside 'dv_run', and a restored instance cannot reach 'dv_run',
 ** so a woken agent kept a readable budget and lost its enforcement -- the one
@@ -2249,6 +2392,8 @@ int main (void) {
   a_restored_program_can_raise();
   a_restored_pcall_still_guards_and_still_hands_back();
   a_nested_coroutine_refuses_the_snapshot();
+  a_reference_survives_hibernation();
+  a_woken_program_rebinds_its_endpoint();
   a_woken_instance_is_still_budgeted();
 
   printf("\n%d checks, %d failed\n", checks, failures);

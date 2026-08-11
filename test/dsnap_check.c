@@ -68,6 +68,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 
+#include "dendpoint.h"
 #include "dlibs.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
@@ -432,6 +433,32 @@ static void a_self_metatable_survives (lua_State *L) {
   if (copy == 0) return;
   ok(lua_getmetatable(L, copy), "the self-metatable table has a metatable");
   ok(same_table(L, copy, -1), "and it is itself");
+  lua_settop(L, base);
+}
+
+
+/*
+** Finding 12's identity property, at the layer that owns it: the endpoint
+** reference metatable is a permanent, so it substitutes by reference and a
+** round-tripped table wearing it wears the *same* table -- rawequal, which is
+** the exact test 'endpoint.bind' answers the is-this-a-reference question
+** with. Copied by content, as it was before the permanent existed, the copy
+** failed that test and every restored reference was refused.
+*/
+static void the_reference_metatable_keeps_its_identity (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  lua_createtable(L, 1, 0);
+  lua_pushliteral(L, "refbytes");
+  lua_rawseti(L, -2, 1);
+  diluvium_endpoint_pushrefmt(L);
+  lua_setmetatable(L, -2);
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  ok(lua_getmetatable(L, copy), "the reference-shaped table has a metatable");
+  diluvium_endpoint_pushrefmt(L);
+  ok(lua_rawequal(L, -1, -2),
+     "and it is the reference metatable itself, by identity");
   lua_settop(L, base);
 }
 
@@ -2350,6 +2377,7 @@ int main (void) {
   a_metatable_with_a_metatable(L);
   a_self_metatable_survives(L);
   mode_comes_along_with_the_metatable(L);
+  the_reference_metatable_keeps_its_identity(L);
 
   printf("\n=== snapshot graph: refusals ===\n");
   light_userdata_is_refused(L);

@@ -91,4 +91,12 @@ LUA_API lua_Integer diluvium_endpoint_queue (lua_State *L, unsigned int token);
 */
 LUA_API int diluvium_endpoint_setlive (lua_State *L, lua_Integer id, int live);
 
+/*
+** Push the reference metatable, so the snapshot layer can name it as a
+** permanent. A reference's identity IS this table -- see the definition -- so
+** it has to substitute by reference across a snapshot or a restored reference
+** fails the identity test it must pass to be one (audit finding 12).
+*/
+LUA_API void diluvium_endpoint_pushrefmt (lua_State *L);
+
 #endif
