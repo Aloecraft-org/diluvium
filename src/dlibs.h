@@ -42,12 +42,13 @@ LUA_API void diluvium_openlibs (lua_State *L);
 #define DILUVIUM_GUEST_FULL_DEBUG	0x1u
 
 /*
-** Leave out `io`, `os` and `package` as well: the three libraries that reach
-** anything outside this state's own memory. What is left is the language, the
-** queues, and whatever the host pushes into them -- which is the model 7.1
-** describes, made true rather than assumed.
+** Put `io`, `os` and `package` back: the three libraries that reach anything
+** outside this state's own memory. Off by default, because the model is that a
+** guest reaches outside only by yielding a request its host answers. Mirrors
+** DV_FLAG_UNSAFE_STDLIB rather than inverting it, so no layer has to hold a
+** negative in its head.
 */
-#define DILUVIUM_GUEST_SEALED		0x2u
+#define DILUVIUM_GUEST_UNSAFE_STDLIB	0x2u
 
 LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags);
 

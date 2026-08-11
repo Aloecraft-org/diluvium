@@ -340,34 +340,59 @@ against it alone, which is how that stays true.
 
 ### What an instance is, and is not, allowed to reach
 
-**A default instance can still start a process.** Measured by *calling* each one rather
-than testing whether it exists — the narrowing below replaces a function with a stub
-that refuses and names a reason, so a `~= nil` check gets the wrong answer:
+**An instance reaches nothing outside itself unless you ask.** Measured by *calling*
+each one rather than testing whether it exists — the `debug` narrowing replaces a
+function with a stub that refuses and names a reason, so a `~= nil` check gets the
+wrong answer there:
 
 | `cfg.flags` | `os.execute` | `io.popen` | `debug.getregistry` | `debug.sethook` |
 |---|---|---|---|---|
-| `0` (the default) | **ALLOWED** | **ALLOWED** | refused | refused |
-| `DV_FLAG_SEALED` | refused | refused | refused | refused |
-| `DV_FLAG_UNSAFE_DEBUG` | ALLOWED | ALLOWED | ALLOWED | ALLOWED |
+| `0` (the default) | refused | refused | refused | refused |
+| `DV_FLAG_UNSAFE_STDLIB` | **ALLOWED** | **ALLOWED** | refused | refused |
+| `DV_FLAG_UNSAFE_DEBUG` | refused | refused | **ALLOWED** | **ALLOWED** |
 
-Two switches, because they do different jobs. Narrowing `debug` — **on by default** —
-makes the *capability layer* a boundary: no forged endpoint references, and no program
-switching off its own instruction budget by taking the one `lua_sethook` slot.
-`DV_FLAG_SEALED` makes the *instance* a boundary by leaving `io`, `os` and `package`
-out. Neither implies the other, and a host running code it did not write wants both:
+The default is the whole model: **an instance reaches outside itself by yielding a
+request its host answers.** `queue.wait` is the only thing that implements it today,
+and `doc/Determinism.md` calls the general form a hostcall. A program that needs the
+time, a file, or anything else from the machine should be handed it through a queue —
+§8.3 already says the host owns the clock.
+
+Both flags undo part of that, and both are spelled `UNSAFE` for the same reason.
+
+`DV_FLAG_UNSAFE_STDLIB` puts back `io`, `os` and `package` (and `dofile`/`loadfile`).
+**It is scaffolding for programs that predate the sealed default, not a supported
+configuration.** Three things stop being true:
+
+- **The instruction budget stops meaning anything.** §9.4 charges VM instructions, and a
+  subprocess started by `os.execute` costs none of them — so a program can burn an hour
+  of machine time while `dv_usage` reports a few thousand instructions.
+- **Replay stops working.** `doc/Determinism.md`'s claim is that a swarm replays because
+  every input arrives through the message log. `os.time` and `io.read` do not, and they
+  do not cross the seam the analyzer watches — so the swarm is not replayable and
+  nothing reports that it is not.
+- **The instance stops being a boundary**, which is the obvious reading and the least
+  interesting of the three.
 
 ```c
 dv_config cfg;
 memset(&cfg, 0, sizeof(cfg));
-cfg.flags = DV_FLAG_SEALED;          /* debug is already narrowed */
+cfg.flags = 0;                       /* sealed, and debug already narrowed */
 dv_instance *inst = dv_new(&cfg);
 ```
 
-**Set `DV_FLAG_SEALED` whenever the program is not one you wrote.** It is opt-in, so the
-default is not a sandbox — whether it should be is an open decision on §18.3's
-checklist. `print` still works either way; it is in the base library. A sealed program
-that needs a clock or a file should be handed it through a queue, which is where §8.3
-already puts the clock.
+`DV_FLAG_UNSAFE_DEBUG` hands back the whole `debug` library, for when the program is
+your own and you are debugging it.
+
+A snapshot does not cross `DV_FLAG_UNSAFE_STDLIB`: the permanents fingerprint covers the
+module tables, so a sealed instance and an unsealed one disagree and `dv_restore`
+refuses — a program captured holding `io.open` cannot wake somewhere there is none. It
+*does* cross `DV_FLAG_UNSAFE_DEBUG`, because there the names are all still present.
+
+**In a swarm, flags attenuate.** `dvs_allow_unsafe_stdlib` sets the ceiling for the
+whole swarm, off by default; the root takes it, and a child inherits its parent's set. A
+spawn request carrying `sealed = true` drops the flag for that child — so a supervisor
+that needs `os.time` itself can still hand its workers an instance without it. There is
+no way to widen, which is §9.3's rule applied to flags.
 
 What an instance gives you unconditionally is **isolation between instances**: separate
 `lua_State`s, separate heaps, a budget on each, and a kill that takes the subtree. That
@@ -379,27 +404,26 @@ fingerprint covers the module tables, so a sealed instance and an open one disag
 `dv_restore` refuses — a program captured holding `io.open` cannot wake somewhere there
 is none.
 
-**From a binding.** All three expose the same two switches, because a host that cannot
-set them has no way to run a program it did not write — and until they did, this section
-described something only a C host could do:
+**From a binding.** All three seal by default too, and all three expose the same escape
+hatches — a host that cannot set them has no way to run legacy code at all:
 
 ```rust
 // Rust: a builder, so the switches are not positional booleans.
-let inst = diluvium::Config::new().sealed(true).load_source(src, "=untrusted")?;
+let inst = diluvium::Config::new().unsafe_stdlib(true).load_source(src, "=legacy")?;
 ```
 ```python
-# Python: keyword-only, and they default to the same thing C does.
-inst = diluvium.Instance.from_source(src, "=untrusted", sealed=True)
+# Python: keyword-only, defaulting to the same thing C does.
+inst = diluvium.Instance.from_source(src, "=legacy", unsafe_stdlib=True)
 ```
 ```js
 // JavaScript: options on the existing load call.
-const inst = await Diluvium.load(wasm, src, { name: "=untrusted", sealed: true });
+const inst = await Diluvium.load(wasm, src, { name: "=legacy", unsafeStdlib: true });
 ```
 
 Each also takes the `debug` switch — `unsafe_debug` in Rust and Python, `unsafeDebug`
-in JavaScript. Note that sealing takes away `os.time` and `os.clock`, which is worth
-knowing for the wasm build specifically: its WASI shim implements `clock_time_get`
-mainly to serve those two.
+in JavaScript. Note for the wasm build specifically: its WASI shim implements
+`clock_time_get` mainly to serve `os.time` and `os.clock`, so without `unsafeStdlib`
+that shim has nothing to serve.
 
 ```c
 #include "dv.h"
@@ -626,18 +650,23 @@ Behind the same switch: a woken instance's instruction budget is not re-armed, t
 swarm layer stamps no host identity on its own snapshots, and endpoints do not survive
 a snapshot.
 
-**A default instance is not a boundary around the program in it — you have to ask.**
-`debug` is narrowed by default, which closes endpoint-reference forgery and stops a
-program taking the hook slot its budget lives in. But `io`, `os` and `package` are
-present unless you pass `DV_FLAG_SEALED`, so a default instance can run `os.execute`.
-See part 6 for the measured table.
+**A default instance is a boundary, but not one that has been attacked.** `debug` is
+narrowed and `io`/`os`/`package` are absent, both by default, so a program reaches
+nothing outside itself without the host asking. See part 6 for the measured table.
 
-**So pass `DV_FLAG_SEALED` for any program you did not write**, and understand what
-remains even then: attenuation, subtree kill and budgets constrain what a program is
-*given*, and sealing constrains what it can *reach*, but neither has been adversarially
-tested against a determined guest. Profile B in §18.2 is now largely true rather than
-aspirational; treat it as a boundary you have reason to trust, not one that has been
-attacked. Whether sealing should be the default is an open item on §18.3.
+Understand what that is and is not worth: attenuation, subtree kill and budgets
+constrain what a program is *given*, and sealing constrains what it can *reach*, but
+neither has been adversarially tested against a determined guest. Profile B in §18.2 is
+true rather than aspirational; treat it as a boundary you have reason to trust, not one
+that has survived an attack.
+
+**`DV_FLAG_UNSAFE_STDLIB` is scaffolding, and using it costs more than it looks.** It
+exists for programs written before the sealed default. Beyond putting `os.execute` back,
+it makes §9.4's instruction budget approximate — a subprocess costs no VM instructions —
+and it makes the swarm non-replayable, because inputs stop arriving through the message
+log. The intended end state is that it has no users: a program that needs the time asks
+its host, which is also what makes the answer fakeable and therefore what makes replay
+work. `doc/Determinism.md` is where that goes.
 
 **Two smaller edges.** Rebinding an endpoint token whose queue was destroyed returns
 the destroyed handle and poisons the token permanently — do not `destroy` a bound

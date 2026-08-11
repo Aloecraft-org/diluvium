@@ -195,7 +195,7 @@ class Instance:
         source: str,
         name: str = "=(program)",
         *,
-        sealed: bool = False,
+        unsafe_stdlib: bool = False,
         unsafe_debug: bool = False,
     ) -> "Instance":
         """Compile Lua source into a fresh instance.
@@ -203,25 +203,26 @@ class Instance:
         `name` appears in error messages and tracebacks; give it something a
         human can act on.
 
-        `sealed` leaves `io`, `os` and `package` out of the instance, along with
-        `dofile` and `loadfile`. **Set it whenever the program is not one you
-        wrote**: without it a program can call `os.execute`. What is left is the
-        language, the queues, coroutines and the codec, so a program that needs
-        a clock or a file should be handed it through a queue.
+        An instance is sealed: it has no `io`, `os` or `package`, and reaches
+        outside itself only by yielding a request its host answers. What is left
+        is the language, the queues, coroutines and the codec, so a program that
+        needs a clock or a file should be handed it through a queue.
+
+        `unsafe_stdlib` puts those libraries back. **Scaffolding, not a
+        supported configuration**: it costs the instruction budget its meaning,
+        because a subprocess started by `os.execute` costs no VM instructions,
+        and it costs the swarm its replayability, because inputs then arrive
+        somewhere other than the message log.
 
         `unsafe_debug` opens the whole `debug` library rather than the narrowed
         one, which restores the endpoint-forgery route and lets the program
         switch off its own instruction budget. Only for programs you wrote.
-
-        Note that `sealed` defaults to False, which is not a sandbox. Whether
-        that default should invert is an open decision; see section 18.3 of
-        `doc/Messaging.md`.
         """
         return cls._load(
             source.encode("utf-8"),
             name,
             text_only=True,
-            sealed=sealed,
+            unsafe_stdlib=unsafe_stdlib,
             unsafe_debug=unsafe_debug,
         )
 
@@ -231,7 +232,7 @@ class Instance:
         code: bytes,
         name: str = "=(program)",
         *,
-        sealed: bool = False,
+        unsafe_stdlib: bool = False,
         unsafe_debug: bool = False,
     ) -> "Instance":
         """Load a program that may be precompiled bytecode.
@@ -244,14 +245,14 @@ class Instance:
             bytes(code),
             name,
             text_only=False,
-            sealed=sealed,
+            unsafe_stdlib=unsafe_stdlib,
             unsafe_debug=unsafe_debug,
         )
 
     # dv.h's flags. Kept together so the mapping is one place.
     _FLAG_TEXT_ONLY = 0x1
     _FLAG_UNSAFE_DEBUG = 0x2
-    _FLAG_SEALED = 0x4
+    _FLAG_UNSAFE_STDLIB = 0x4
 
     @classmethod
     def _load(
@@ -260,7 +261,7 @@ class Instance:
         name: str,
         *,
         text_only: bool,
-        sealed: bool = False,
+        unsafe_stdlib: bool = False,
         unsafe_debug: bool = False,
     ) -> "Instance":
         library = library_abi_version()
@@ -273,7 +274,7 @@ class Instance:
         cfg.abi_version = ABI_VERSION
         cfg.flags = (
             (cls._FLAG_TEXT_ONLY if text_only else 0)
-            | (cls._FLAG_SEALED if sealed else 0)
+            | (cls._FLAG_UNSAFE_STDLIB if unsafe_stdlib else 0)
             | (cls._FLAG_UNSAFE_DEBUG if unsafe_debug else 0)
         )
         raw = lib.dv_new(cfg)

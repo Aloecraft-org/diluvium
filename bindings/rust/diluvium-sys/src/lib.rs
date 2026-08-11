@@ -20,9 +20,11 @@ pub const DV_FLAG_TEXT_ONLY: u32 = 0x1;
 /// instruction budget. For hosts whose programs are their own.
 pub const DV_FLAG_UNSAFE_DEBUG: u32 = 0x2;
 
-/// Leave `io`, `os` and `package` out of the instance, with `dofile` and
-/// `loadfile`. What is left is the language, the queues and the codec.
-pub const DV_FLAG_SEALED: u32 = 0x4;
+/// Put `io`, `os` and `package` back, with `dofile` and `loadfile`.
+///
+/// Scaffolding for programs that predate the sealed default. It costs the
+/// instruction budget its meaning and the swarm its replayability.
+pub const DV_FLAG_UNSAFE_STDLIB: u32 = 0x4;
 
 pub type dv_status = c_int;
 

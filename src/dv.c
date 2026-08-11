@@ -274,7 +274,7 @@ dv_instance *dv_new (const dv_config *cfg) {
   diluvium_openguestlibs(
     inst->L,
     ((inst->flags & DV_FLAG_UNSAFE_DEBUG) ? DILUVIUM_GUEST_FULL_DEBUG : 0u) |
-    ((inst->flags & DV_FLAG_SEALED) ? DILUVIUM_GUEST_SEALED : 0u));
+    ((inst->flags & DV_FLAG_UNSAFE_STDLIB) ? DILUVIUM_GUEST_UNSAFE_STDLIB : 0u));
   /*
   ** Name this library's own C function, per 10.4: the message handler sits in the
   ** driver's frame on every instance's thread, so without a name no parked

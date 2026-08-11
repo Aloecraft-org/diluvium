@@ -165,7 +165,6 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// One Diluvium program, with its own heap, queues and fate.
 /// What a program loaded into an instance is allowed to reach.
 ///
 /// [`Instance::from_source`] and [`Instance::from_bytecode`] cover the common
@@ -175,23 +174,21 @@ impl std::error::Error for Error {}
 ///
 /// ```no_run
 /// # use diluvium::Config;
-/// // A program from somewhere else: no `io`, no `os`, no `package`, no
-/// // bytecode, and a `debug` library that cannot forge a capability.
+/// // A program you wrote yourself, that predates the sealed default and still
+/// // calls `os.time`. Nothing else needs this.
 /// let inst = Config::new()
-///     .sealed(true)
-///     .load_source("return 1 + 1", "=untrusted")?;
+///     .unsafe_stdlib(true)
+///     .load_source("return os.time()", "=legacy")?;
 /// # Ok::<(), diluvium::Error>(())
 /// ```
 ///
-/// `Default` is what `from_source` uses. **It is not a sandbox**: today an
-/// instance gets `io`, `os` and `package` unless [`Config::sealed`] says
-/// otherwise, so a program can call `os.execute`. Whether that default should
-/// invert is an open decision -- see §18.3 of `doc/Messaging.md` -- and this
-/// type is where it would change, in one place, for every Rust host.
+/// `Default` is what `from_source` uses, and it is sealed: an instance has no
+/// `io`, `os` or `package`, and reaches outside itself only by yielding a
+/// request its host answers.
 #[derive(Clone, Copy, Debug)]
 pub struct Config {
     text_only: bool,
-    sealed: bool,
+    unsafe_stdlib: bool,
     unsafe_debug: bool,
 }
 
@@ -201,7 +198,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             text_only: false,
-            sealed: false,
+            unsafe_stdlib: false,
             unsafe_debug: false,
         }
     }
@@ -222,15 +219,20 @@ impl Config {
         self
     }
 
-    /// Leave `io`, `os` and `package` out, with `dofile` and `loadfile`.
+    /// Put `io`, `os` and `package` back, with `dofile` and `loadfile`.
     ///
-    /// Set this whenever the program is not one you wrote. What is left is the
-    /// language, the queues, coroutines and the codec -- a program that needs a
-    /// clock or a file should be handed it through a queue. Note that a
-    /// snapshot does not cross this switch: the permanents fingerprint covers
-    /// names, so a sealed instance's snapshot restores only into another one.
-    pub fn sealed(mut self, yes: bool) -> Self {
-        self.sealed = yes;
+    /// **Scaffolding, not a supported configuration.** An instance is sealed by
+    /// default and reaches outside itself by yielding a request its host
+    /// answers. Setting this costs two things beyond the obvious: the
+    /// instruction budget stops meaning anything, because a subprocess started
+    /// by `os.execute` costs no VM instructions; and the swarm stops being
+    /// replayable, because inputs arrive somewhere other than the message log.
+    ///
+    /// A snapshot does not cross this switch -- the permanents fingerprint
+    /// covers names -- so a sealed instance's snapshot restores only into
+    /// another sealed one.
+    pub fn unsafe_stdlib(mut self, yes: bool) -> Self {
+        self.unsafe_stdlib = yes;
         self
     }
 
@@ -248,8 +250,8 @@ impl Config {
         if self.text_only {
             f |= sys::DV_FLAG_TEXT_ONLY;
         }
-        if self.sealed {
-            f |= sys::DV_FLAG_SEALED;
+        if self.unsafe_stdlib {
+            f |= sys::DV_FLAG_UNSAFE_STDLIB;
         }
         if self.unsafe_debug {
             f |= sys::DV_FLAG_UNSAFE_DEBUG;
@@ -273,6 +275,7 @@ impl Config {
     }
 }
 
+/// One Diluvium program, with its own heap, queues and fate.
 pub struct Instance {
     raw: *mut sys::dv_instance,
     /// `!Sync`: see the threading note in the crate docs.

@@ -192,22 +192,24 @@ const check = (cond, what) => {
 {
   const inst = await Diluvium.load(
     wasm,
-    "assert(os and io and package) return 1",
-    { name: "open" }
+    `assert(os == nil and io == nil and package == nil)
+     assert(dofile == nil and loadfile == nil)
+     return 1`,
+    { name: "sealed-default" }
   );
-  check(inst.run().done, "a default instance is not sealed");
+  check(inst.run().done, "a default instance is sealed");
   inst.close();
 }
 
 {
+  // The escape hatch, and the only way a JS host gets `os` at all -- which is
+  // also what the WASI shim's clock_time_get exists to serve.
   const inst = await Diluvium.load(
     wasm,
-    `assert(os == nil and io == nil and package == nil)
-     assert(dofile == nil and loadfile == nil)
-     return 1`,
-    { name: "sealed", sealed: true }
+    "assert(os.execute and io.popen and package.loadlib) return 1",
+    { name: "legacy", unsafeStdlib: true }
   );
-  check(inst.run().done, "a sealed instance reaches nothing outside itself");
+  check(inst.run().done, "unsafeStdlib puts os, io and package back");
   inst.close();
 }
 
@@ -218,7 +220,7 @@ const check = (cond, what) => {
     `local q = queue.declare("out", {exported = true})
      queue.push(q, ("x"):rep(3) .. tostring(math.floor(2.5)))
      return 1`,
-    { name: "sealed-works", sealed: true }
+    { name: "sealed-works" }
   );
   check(inst.run().done, "and a sealed instance still runs");
   check(

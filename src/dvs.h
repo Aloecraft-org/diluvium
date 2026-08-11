@@ -200,6 +200,29 @@ dvs_status dvs_kill (dvs_swarm *sw, dvs_id id);
 */
 void dvs_allow_hibernation (dvs_swarm *sw, int allow);
 
+
+/*
+** Let this swarm's instances have `io`, `os` and `package` -- DV_FLAG_UNSAFE_STDLIB
+** on the instance ABI, and the same scaffolding it is there.
+**
+** Off by default, so every instance in a swarm is sealed. The root takes whatever
+** this sets, and a child inherits its parent's set: 9.3 says a grant may only
+** narrow, and flags were the one authority in this layer that ignored that rule.
+** Before it was fixed, 'build' zeroed the config and never read the parent at all,
+** so a sealed supervisor spawned unsealed children.
+**
+** A child may narrow. A spawn request carrying `sealed = true` drops the flag for
+** that child however the parent is configured, which is the shape a supervisor
+** that needs `os.time` itself but wants sealed workers should use. There is no way
+** to widen, and adding one would mean a child holding authority its parent did
+** not.
+**
+** Turning this on costs the swarm its replayability and makes 9.4's budget
+** approximate; see DV_FLAG_UNSAFE_STDLIB in dv.h for why, and doc/Determinism.md
+** for what replaces it.
+*/
+void dvs_allow_unsafe_stdlib (dvs_swarm *sw, int allow);
+
 /* Swap an instance out to the cache. It must be parked; a running or already
    non-resident instance is refused rather than forced. Refused outright unless
    'dvs_allow_hibernation' was called -- see above. */

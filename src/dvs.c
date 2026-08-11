@@ -89,6 +89,10 @@ typedef struct dvs_slot {
   size_t ncaps;
   uint64_t instructions;
   uint64_t memory_kb;
+  /* The dv_config flags this instance was built with. Carried on the slot
+     because 9.3's attenuation applies to them like everything else: a child
+     inherits its parent's set and may narrow it, never widen it. */
+  uint32_t flags;
   int wake_on_message;
   int alive;
   int started;
@@ -110,6 +114,7 @@ struct dvs_swarm {
   uint32_t spawn_rate;
   uint32_t spawns_this_step;
   int allow_hibernation;        /* off by default: see dvs.h */
+  uint32_t unsafe_stdlib;       /* DV_FLAG_UNSAFE_STDLIB, or 0. See dvs.h. */
   char error[512];
 };
 
@@ -353,6 +358,11 @@ static dvs_status build (dvs_swarm *sw, dvs_slot *sl, const dvs_spawn *req) {
   dv_config cfg;
   memset(&cfg, 0, sizeof(cfg));
   cfg.abi_version = DV_ABI_VERSION;
+  /* The slot's own set, which the caller has already attenuated against its
+     parent's. Before this the config was zeroed here and the parent's flags were
+     never consulted at all, so a sealed supervisor spawned unsealed children --
+     the one authority in this layer that did not narrow. */
+  cfg.flags = sl->flags;
   sl->inst = dv_new(&cfg);
   if (sl->inst == NULL) {
     set_error(sw, "could not create an instance");
@@ -406,6 +416,7 @@ dvs_status dvs_root (dvs_swarm *sw, const char *code, size_t code_len,
   req.instructions = instructions;
   req.memory_kb = memory_kb;
   sl->parent = 0;               /* the root has none, so its set is the ceiling */
+  sl->flags = sw->unsafe_stdlib;
   st = build(sw, sl, &req);
   if (st != DVS_OK) {
     release(sw, sl);
@@ -641,6 +652,12 @@ void dvs_allow_hibernation (dvs_swarm *sw, int allow) {
 }
 
 
+void dvs_allow_unsafe_stdlib (dvs_swarm *sw, int allow) {
+  if (sw != NULL)
+    sw->unsafe_stdlib = allow ? DV_FLAG_UNSAFE_STDLIB : 0u;
+}
+
+
 dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id) {
   dvs_slot *sl = find(sw, id);
   size_t need = 0;
@@ -714,6 +731,10 @@ dvs_status dvs_wake (dvs_swarm *sw, dvs_id id) {
   }
   memset(&cfg, 0, sizeof(cfg));
   cfg.abi_version = DV_ABI_VERSION;
+  /* The same set it was captured under. A snapshot does not cross
+     DV_FLAG_UNSAFE_STDLIB anyway -- the permanents fingerprint differs -- so
+     waking into a different set would turn a wake into a refusal. */
+  cfg.flags = sl->flags;
   inst = dv_new(&cfg);
   if (inst == NULL) {
     set_error(sw, "could not create an instance to wake into");
@@ -1022,6 +1043,12 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
   req.instructions = insns;
   req.memory_kb = mem;
   req.wake_on_message = field_bool(msg, len, "wake_on_message");
+  /* 9.3 for flags: inherit the parent's set, and let the request drop
+     DV_FLAG_UNSAFE_STDLIB but never add it. A supervisor that needs `os` itself
+     can still hand its workers an instance that does not. */
+  sl->flags = parent->flags;
+  if (field_bool(msg, len, "sealed"))
+    sl->flags &= ~(uint32_t)DV_FLAG_UNSAFE_STDLIB;
   if (build(sw, sl, &req) != DVS_OK) {
     dvs_id gone = sl->id;
     release(sw, sl);
