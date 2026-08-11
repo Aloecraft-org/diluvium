@@ -319,6 +319,15 @@ lines, read its own locals with `debug.getlocal`, and push a record to a queue. 
 cannot **pause**. That is a tracer, which is worth having and is about twenty lines of
 Lua, but it is not a debugger and it does not remove the need for C.
 
+**And as of `5.5.1_build4` a guest cannot even trace without being allowed to.**
+`debug.sethook` is one of the twelve functions narrowed out of an instance, and the
+reason given in `src/dlibs.c` is §3.3's hazard exactly: "a `lua_State` has one hook slot
+and 9.4's instruction budget is in it, so setting a hook here would switch the budget
+off". So the tracer needs `DV_FLAG_UNSAFE_DEBUG`, which is the right shape — a program
+being traced is a program you own — but it means the tracer is a debugging *mode* rather
+than something an agent can do to itself in production. The upside: §3.3's hazard is now
+half-solved for free, since no guest can take the slot.
+
 **And a host cannot install a hook at all through the public ABI.** `src/dv.h` contains
 zero occurrences of `lua_State` — deliberately, since that self-containment is the
 header's central claim and the contract tests exist to keep it true. There is no

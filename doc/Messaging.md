@@ -1755,8 +1755,18 @@ nothing; floats always float64; the empty table as a map; forced shapes; a
 cyclic table raising with "cycle" in the message; a non-encodable value naming
 its type and its key path (`a.b[1]`); the decode offset chain; every reserved
 ext code failing by name, with 0x01 saying decQuad specifically; ext 0x02
-decoding opaquely with no resolver installed; and every single byte plus every
-truncation of a valid encoding refused without a crash.
+decoding opaquely with no resolver installed; each of the 256 single bytes
+decoding exactly when it is a whole encoding, which 166 of them are; and every
+proper prefix of a valid encoding refused.
+
+That last pair used to read "every single byte plus every truncation of a valid
+encoding refused without a crash", and both halves of it were wrong. 166 single
+bytes are complete values — every fixint, and six one-byte constants — so
+"refused" was never the property to want; and the assertions behind the sentence
+counted `pcall(...) == nil`, which cannot happen, so they were 0 by construction
+and held whatever the decoder did (audit finding 9). Crash detection was never
+the counter's job either: a decoder that reads off the end of a string takes the
+process with it and fails the run on its own.
 
 Stripped size 13.0 KB of text at `-O3` on linux-x86_64, against a 25 KB budget.
 Not yet measured on musl or wasm, which 3.2 asks for.
@@ -1838,7 +1848,10 @@ Accepted on `test/dv_check.c` (73 checks, written against `dv.h` alone — which
 is also a check that the header suffices on its own) and 16 Rust tests plus a
 doctest and an example host. Between them: the version refused at `dv_new`;
 errors crossing with a traceback that names the failing frame; a guest queue
-invisible until the program declares it; every row of 6.4 from the host side;
+invisible until the program declares it; every row of 6.4 from the host side —
+true of seven rows when this was written and of all eight since, because
+`disabled` had no host-side assertion and deleting the enabled check in
+`diluvium_queue_push_bytes` turned nothing red (audit finding 10);
 `DV_BUFFER_TOO_SMALL` leaving the message in place so a host can size a buffer
 and retry; the peek/release zero-copy path with its registry anchor; export
 notifications firing for exported queues and not for private ones; parking,
@@ -2755,7 +2768,7 @@ Grouped, deduplicated, and ordered by what a caller would hit first.
 
 | Defect | Consequence |
 |---|---|
-| References can still be forged, two ways | The trust gate added earlier was incomplete. **The laundering route is now closed** and the other is not. Laundering was: decode `\xd4\x02` plus a name into an inert opaque ext, push it onto a queue, and let the trusted delivery path decode it again into a genuine reference. Closed at the encoder — a reserved ext code cannot be written to the wire at all — so the bytes never leave the state that made them up (`the_laundering_route_is_closed`). **Still open:** the "hidden" metatable is reachable through `debug.getmetatable`, and the registry through `debug.getregistry`, so a guest holding one real reference can mint a reference to any peer name it can guess. That defeats `__metatable` generally and not only here, no registry-side scheme fixes it while the `debug` library is open, and restricting that library is a profile B requirement rather than a patch. §7.3's unforgeability claim remains false. |
+| ~~References can still be forged, two ways~~ **Both fixed.** | The trust gate added earlier was incomplete, in two places. Laundering was: decode `\xd4\x02` plus a name into an inert opaque ext, push it onto a queue, and let the trusted delivery path decode it again into a genuine reference. Closed at the encoder — a reserved ext code cannot be written to the wire at all — so the bytes never leave the state that made them up (`the_laundering_route_is_closed`). The second was the registry: the "hidden" metatable is reachable through `debug.getmetatable`, and everything else through `debug.getregistry`, so a guest holding one real reference could mint one to any peer name it could guess. **Closed by narrowing the `debug` library for instances**, which is what profile B asked for — no registry-side scheme survives while that library is open, including the weak-keyed provenance set the skeptic preferred, because the guest reaches that table too and adds itself to it. §7.3's unforgeability claim is true of an instance again, and false again for one created with `DV_FLAG_UNSAFE_DEBUG`. |
 | ~~A guest cannot pass a reference in a message~~ **Fixed.** | It encoded as a plain one-element array, so §7.4's store-and-forward did not round-trip the thing it forwards, and a router could use an endpoint but never hand one on. The resolver seam (§4.2) already had an `encode` hook for exactly this and nothing implemented it. Now: a table carrying a metatable is offered to the resolver before it is encoded as a map or an array, and `dendpoint.c` returns the same ext `0x02` and the same payload it would resolve. Asserted on the wire and end to end through two instances (`a_reference_survives_being_forwarded`). The hook's contract changed while doing it — it returns a code and a payload rather than appending to the encode in progress, so no registry slot holds a pointer into a buffer that an error mid-encode unwinds past. |
 | Rebinding a destroyed token returns the destroyed handle | And poisons the token permanently. |
 | ~~A guest can mint reserved ext codes~~ **Fixed.** | The encoder trusted the wrapper's `code` field. `msgpack.ext` refuses a reserved code, but the wrapper it returns is an ordinary table: `w = msgpack.ext(0x10, s)` and then `w[3] = 0x02` produced exactly what the constructor had just refused. Verified by hand before fixing — the bytes came out `d4 02`. The check now runs where the bytes are written, because a constructor cannot vouch for a value that stays mutable. This is also what closes the laundering route above, which is why a finding filed as tidiness turned out to be the security one. |
@@ -2800,15 +2813,60 @@ thousand agents is 41 MB and ten thousand is 410 MB. That is the number this pro
 lives or dies by, since dropping hibernation means nothing is swapped out.
 
 **Profile B — untrusted or generated programs.** Adds the whole capability layer as a
-boundary. Reserved ext codes are now refused on encode and the laundering route is
-closed, so what remains is: **the `debug` library removed or restricted for guest
-instances**, and budgets enforced through the documented path (done — §9.1's nested
-`budget` reaches the child). The `debug` item is the one that carries a design
-decision rather than a patch: `getmetatable` and `getregistry` between them defeat
-every scheme that keeps a reference's identity in the runtime, so either that library
-narrows for guests or a reference's authority stops being something a table can
-carry. It is also the first thing to do, because it is the only remaining forgery
-route and everything else in this profile is already true.
+boundary. **Done, and it was not the whole story** — see the correction at the end of
+this profile, which is the more important half. Reserved ext codes are refused on
+encode, the laundering route is closed, budgets are enforced through the documented
+path (§9.1's nested `budget` reaches the child), and the `debug` library is narrowed
+for instances.
+
+That last one carried the design decision, and it went the way this section
+expected. `getmetatable` and `getregistry` between them defeat every scheme that
+keeps a reference's identity in the runtime — including the weak-keyed provenance
+set the audit's skeptic preferred to a userdata, because a guest that can read the
+registry can find that table and add itself to it. So the library narrows: twelve
+of its sixteen functions are refusals that name what they would have defeated, and
+`getinfo`, `getlocal`, `gethook` and `traceback` stay. The line is that a program
+may read its own frames and may not write anything or reach outside itself.
+
+Narrowing it also closed something the audit did not find. A `lua_State` has one
+hook slot and §9.4's instruction budget is a count hook in it, so `debug.sethook()`
+— the documented way to clear a hook — switched the budget off: an instance limited
+to 200,000 instructions ran three million and reported `insn_used` of nought. That
+is the defect §18.1 records twice on the host side, reachable from the guest side in
+one line, and it needed no setup and no authorised peer.
+
+A host whose programs are its own takes profile A and can have the whole library
+back with `DV_FLAG_UNSAFE_DEBUG`. That is a supported configuration, not a
+loophole — but it restores all three escapes, and `dv_check` asserts that it does,
+so a host learns the cost from a test rather than from production.
+
+**The correction, and it matters more than anything above it.** This profile used to
+say the `debug` library was the one item between a deployment and running programs it
+did not write. That was wrong, and wrong in the direction that costs something:
+`dv_new` called `luaL_openlibs`, so an instance had **every** standard library —
+`os.execute`, `io.popen`, `io.open`, `package.loadlib`, `dofile`, `loadfile`. A
+program that can start a process has no need to forge an endpoint reference, so the
+item this section spent its length on was not the one in front.
+
+Narrowing `debug` makes the **capability layer** a boundary: no forged references, no
+switching off a budget. `DV_FLAG_SEALED` is what makes the **instance** one: it
+leaves out `io`, `os` and `package`, and `dofile`/`loadfile` with them. The two are
+separate switches because they do separate jobs and neither implies the other, and
+profile B needs both.
+
+Sealing removes rather than narrows, which is the opposite of the choice made for
+`debug` function by function. There is no useful line inside those three: `os.time`
+and `os.clock` are harmless, but §8.3 says the host owns the clock, so the pieces
+worth keeping are pieces this design says should arrive by message anyway. What is
+left is the language, the queues, coroutines and the codec — asserted, so that
+"sealed" does not quietly come to mean "unusable".
+
+Nothing in this document ever decided the standard library surface. §8.5 fixes the
+signature of a permission check and calls the token model separate work; no section
+says which libraries a guest gets. It was inherited from `luaL_openlibs` and never
+looked at, which is why it took writing a release note that claimed profile B was
+reachable to notice. The evidence is `doc/audit/M0-M7.md` under **Found since the
+sweep**, S1.
 
 **Profile C — hibernation at scale.** Adds `u2.funcidx`, real field-validation
 coverage, the host-identity stamp, budget re-arming on wake, and endpoint survival
@@ -2828,42 +2886,53 @@ Every open item, in the order a session should pick them up, with the audit find
 number (`doc/audit/M0-M7.md`) beside each. Nothing here is a survey: each line is
 something a session can finish, and the ones with a design decision in them say so.
 
-**Profile A is done.** The four items it needed are fixed, and four more went with
-them. What remains under A is not defect work:
+**Profiles A and B are done, and so is everything that was on neither.** Twenty-nine
+of the thirty-five confirmed findings are fixed. What is left from the audit is
+profile C entire — the six findings 0, 1, 5, 12, 14 and 25 — plus one decision that
+the audit never raised because nothing in this document had decided it.
 
-- [ ] A `dvs_check` test for the parent-visible symptom of the sticky-error fix
-      (**15**, **19**). The fix is asserted at the ABI level; no swarm-level test
-      reproduces what a supervisor actually sees, because that needs a step in which
-      the swarm sets an error on an instance that then exits cleanly. Finding 19's
-      refused-hibernate route is the most likely shape.
-- [ ] Publish the release. `CHANGELOG.yaml`'s build3 entry is written and validates;
-      publishing means `status: released`, a date, `latest: true`, `mirror: true`,
-      regenerate, tag, and a GitHub release.
+- [ ] **Decide whether an instance is sealed by default** (audit S1). `DV_FLAG_SEALED`
+      exists and is opt-in, so today a host that does not know about it gets `io`,
+      `os` and `package` in its guest — which is to say the unsafe configuration is
+      the one you get by not reading. Sealing by default is the safer answer and a
+      breaking change for any embedder whose guest calls `os.time`; the flag would
+      invert to something like `DV_FLAG_HOST_ACCESS`. This is a compatibility call
+      rather than a technical one, which is why it is here rather than done. Note it
+      cannot be deferred quietly: profile B's correctness depends on which way it
+      goes, and the default is what most deployments will run.
 
-**Profile B — the capability layer as a boundary.** One item, and it is a design
-decision:
+**The question, and it is the next release's headline.** Does this project support
+hibernation at scale? 18.2 says a deployment that keeps agent state at the
+application level and spawns fresh instances per unit of work never enters profile C
+and pays little for it. If that is the answer, say so here and strike the six —
+`dv_snapshot` and `dv_restore` stay as they are, documented as a single-residency
+facility, and `dvs_allow_hibernation` stays off with the reason written beside it.
+If the answer is yes, the six below are the work, and finding 0 is first because it
+is the reason the switch exists.
 
-- [ ] Narrow the `debug` library for guest instances, or stop keeping a reference's
-      authority in a table (**6**). `debug.getmetatable` reaches the private
-      metatable and `debug.getregistry` reaches everything else, so a program holding
-      one real reference can mint one to any peer name it can guess. No registry-side
-      scheme survives while that library is open. Decide which way before writing
-      code: `luaL_openlibs` opens `debug` for every state through `linit.c`, and the
-      CLI and the upstream test suite both use it, so "remove it" means "remove it
-      for instances", which is a fork in the library set rather than a deletion.
-- [ ] Make the malformed-input assertions in `test_msgpack.lua` able to fail
-      (**9**). `pcall` never returns nil, so the comparison is against a value that
-      cannot occur. Cheap, and it is a test that currently certifies nothing.
-- [ ] Assert the two rows of §6.4 that only the guest side covers (**10**).
+One thing to weigh before answering, which was not clear when 18.2 was written:
+**finding 0 is reachable through the instance ABI, which has no switch.**
+`dvs_allow_hibernation` gates the swarm layer, but `dv_restore` is a public call a
+host may make directly, and finding 0 says any error raised in any restored program
+unwinds from the stack base. So "hibernation is off" is true of the swarm layer and
+not of the ABI underneath it, and a release that answers no should probably also
+refuse `dv_restore` by default rather than only documenting it.
 
-**Profile C — hibernation at scale.** The largest block, and the one a deployment can
-decline. Do them in this order; the first is the reason the switch exists:
+**Profile C — hibernation at scale.** In this order; the first is the reason the
+switch exists:
 
 - [ ] Carry `u2.funcidx` in the thread record (**0**). Eleven frame words instead of
       ten, or reconstruct it in `ds_buildthread` for every `CIST_YPCALL` frame as the
       `savestack` of the next frame's function slot — the two agree by construction —
       and validate it in `diluvium_shim_checkframes` the way `func_index` already is.
-      `old_errfunc` is absent from the same record and should go in with it.
+      Reconstruction looks the better of the two: it needs no format bump, so no
+      snapshot is invalidated, and a derived value cannot be a lie the way a value
+      read from untrusted input can. Cross-check it at *capture* time, where the real
+      one is still in hand, and refuse rather than restore if a `CIST_YPCALL` frame
+      has no callee frame to derive from. `old_errfunc` cannot be reconstructed and
+      would need the format bump; §10.2 already calls it out of scope, so it is a
+      separate decision and a smaller one — a missing traceback rather than memory
+      corruption.
 - [ ] Re-arm the instruction budget on wake, and carry `insn_used` through the
       snapshot (**1**). The count hook is armed in exactly one place, inside
       `dv_run`, and a woken instance can never re-enter it (`dv_run` refuses a
@@ -2878,25 +2947,21 @@ decline. Do them in this order; the first is the reason the switch exists:
 - [ ] Enforce §10.7's precondition 4, or strike it (**14**). Nested coroutines are
       captured rather than refused, and one of those two is the answer.
 
-**Not on any profile's path**, but each is a test or a script that reports success
-without checking anything, which is worse than an absent check:
-
-- [ ] `make verify_wasm` names four files no target produces, and its first step
-      reports success regardless because `| head` discards the pipeline status (**29**).
-- [ ] `patch_series.sh check` exits 0 having checked nothing when the fork point is
-      unreachable (**30**).
-- [ ] `dsnap_check`'s "every header refusal code has its own sentence" checks
-      neither distinctness nor the last two codes (**18**).
-- [ ] The `include_skipped` workflow input's description names tests that are no
-      longer skipped (**31**), unverified since the skip reasons were rewritten.
-- [ ] Rebinding a token whose endpoint queue was destroyed returns the destroyed
-      handle and poisons the token permanently (**11**). Reachable by accident, which
-      is why it is here rather than under a profile.
-
 The one thing not on this list is anything about `diluvium lab`, the REPL or the
 debugger. That is `doc/Lab.md`, which is a design brief rather than a checklist because
-those features do not exist yet. Its central question is now settled by execution rather
-than by reading: a breakpoint that parks a program **works** (a C hook may yield, and the
-parked frame's locals are readable by name from outside), and an all-guest debugger
-**cannot** be built (a Lua hook is not yieldable), so that work grows the `dv_` ABI
-rather than sitting on top of it.
+those features do not exist yet. Two things about it are worth carrying forward against
+this release.
+
+Its central question is settled by execution rather than by reading: a breakpoint that
+parks a program **works** (a C hook may yield, and the parked frame's locals are readable
+by name from outside), and an all-guest debugger **cannot** be built (a Lua hook is not
+yieldable). So that work grows the `dv_` ABI rather than sitting on top of it — which
+this release reinforces from the other direction, since `dv.h` exposes no `lua_State` and
+therefore no host can reach `lua_sethook` at all.
+
+And its one-hook-slot hazard is now half-answered. An instance no longer lets a *program*
+take the slot — `debug.sethook` is one of the twelve refusals — so a guest can no longer
+switch its own budget off. What remains is the host-side question of how `diluvium lab`
+installs one, and the answer "dispatch to both, or refuse and say why" is unchanged. The
+same refusal also costs Lab.md's guest-side *tracer*, which now needs
+`DV_FLAG_UNSAFE_DEBUG`.

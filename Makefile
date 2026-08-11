@@ -205,15 +205,29 @@ _wasm_build_step3: _wasm_build_compiler_obj
 	@cp .data/libdiluvium_wasi.wasm dist/libdiluvium_wasi.wasm
 	@cp .data/luac_wasi.wasm dist/diluvium_compiler_wasi.wasm
 
+# Audit finding 29. Every path here named a file no target produces -- onelua.o
+# for onelua_wasi.o, wasm_stubs.o for wasm_stubs_wasi.o, diluvium.wasm and
+# libdiluvium.wasm for their _wasi forms -- and steps 1 and 3 ended in
+# `| head -n 5`, so the recipe's status was head's. llvm-objdump failing on a
+# file that does not exist, and a grep matching nothing, both exited 0. Step 1
+# was a check that could not fail; the target as a whole then died at step 2,
+# whose grep had no `head` to swallow it, so the only signal it ever gave a
+# developer was a failure about the wrong thing.
+#
+# `grep -q` now, so a missing symbol is the failure rather than a quiet pass,
+# and the file names are the ones the build writes.
 _wasm_verify_step1:
-	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-objdump -d /data/onelua.o | grep -E "longjmp|setjmp" | head -n 5
+	@echo '=== Verify 1: setjmp/longjmp lowered onto exception handling ==='
+	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-objdump -d /data/onelua_wasi.o | grep -qE "longjmp|setjmp"
 
 _wasm_verify_step2:
-	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/wasm_stubs.o | grep system
+	@echo '=== Verify 2: the stubs define the host calls they stand in for ==='
+	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/wasm_stubs_wasi.o | grep -q system
 
 _wasm_verify_step3:
-	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/diluvium.wasm | grep -E "luaL_newstate|lua_close" | head -n 5
-	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/libdiluvium.wasm | grep -E "luaL_newstate|lua_close" | head -n 5
+	@echo '=== Verify 3: both wasm artifacts export the C API ==='
+	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/diluvium_wasi.wasm | grep -qE "luaL_newstate|lua_close"
+	$(PODMAN_RUN_WASM) /opt/wasi-sdk/bin/llvm-nm /data/libdiluvium_wasi.wasm | grep -qE "luaL_newstate|lua_close"
 
 build_wasm: _wasm_build_step0 _wasm_build_step1 _wasm_build_step2 _wasi_static_lib _wasm_build_step3
 

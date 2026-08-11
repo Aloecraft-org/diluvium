@@ -1052,16 +1052,50 @@ static void queue_names_travel_in_the_header (lua_State *L) {
 }
 
 
+/*
+** Audit finding 18: this checked neither of the two things its name claims.
+**
+** It walked to DILUVIUM_SNAP_HOST_MISMATCH, which was the last code when it was
+** written, so BAD_PAYLOAD and CORRUPT -- the two the 10.10 two-layer correction
+** added, and the two most likely to be reached by a hostile snapshot -- were
+** never inspected. And "its own" was never tested: each sentence was compared
+** against the "unknown reason" fallback and against nothing else, so two codes
+** returning the same string passed. Both mutations were confirmed green before
+** this rewrite: deleting the CORRUPT arm from 'diluvium_snap_why', and making
+** CORRUPT return BAD_PAYLOAD's sentence verbatim.
+**
+** A refusal a host cannot tell apart from another refusal is the failure this
+** guards against: 10.10 makes restore untrusted input, and a host deciding
+** whether it has been handed a snapshot from the wrong build or one that was
+** altered in transit needs those to read differently.
+*/
 static void every_refusal_has_its_own_sentence (lua_State *L) {
-  int c, distinct = 1;
+  const char *unknown = diluvium_snap_why(DILUVIUM_SNAP_LAST + 100);
+  int a, b, bad;
   (void)L;
-  for (c = 0; c <= DILUVIUM_SNAP_HOST_MISMATCH; c++) {
-    const char *r = diluvium_snap_why(c);
-    if (r == NULL || *r == '\0' ||
-        strcmp(r, diluvium_snap_why(DILUVIUM_SNAP_HOST_MISMATCH + 50)) == 0)
-      distinct = 0;
+  bad = 0;
+  for (a = 0; a <= DILUVIUM_SNAP_LAST; a++) {
+    const char *r = diluvium_snap_why(a);
+    if (r == NULL || *r == '\0' || strcmp(r, unknown) == 0) {
+      printf("      (code %d falls through to the fallback)\n", a);
+      bad = 1;
+    }
   }
-  ok(distinct, "every header refusal code has its own sentence");
+  ok(!bad, "every header refusal code has a sentence");
+  bad = 0;
+  for (a = 0; a <= DILUVIUM_SNAP_LAST; a++) {
+    for (b = a + 1; b <= DILUVIUM_SNAP_LAST; b++) {
+      if (strcmp(diluvium_snap_why(a), diluvium_snap_why(b)) == 0) {
+        printf("      (codes %d and %d share one)\n", a, b);
+        bad = 1;
+      }
+    }
+  }
+  ok(!bad, "and no two codes share one");
+  /* The bound itself. Without this, adding a code and forgetting to move
+     DILUVIUM_SNAP_LAST would narrow both loops above and neither would say so. */
+  ok(strcmp(diluvium_snap_why(DILUVIUM_SNAP_LAST + 1), unknown) == 0,
+     "and DILUVIUM_SNAP_LAST really is the last code with one");
 }
 
 

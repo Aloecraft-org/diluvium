@@ -270,21 +270,55 @@ do
     refused("\xa5ab", "a fixstr longer than the input")
     refused("\xcf\xff\xff\xff\xff\xff\xff\xff\xff",
             "a uint64 too large for a Lua integer")
-    -- Every single byte on its own: none may crash the interpreter, and this
-    -- is the cheap version of the fuzzing the loader gets.
-    local crashed = 0
+    -- Every single byte on its own.
+    --
+    -- What used to stand here counted `pcall(...) == nil`, which cannot
+    -- happen: pcall's first result is a boolean in every case, so the counter
+    -- was 0 by construction and the assertion after it held whatever the
+    -- decoder did. Crash detection was never the counter's job either -- a
+    -- decoder that reads off the end of a string takes the process with it and
+    -- fails the run on its own.
+    --
+    -- The property worth asserting is which bytes are *whole values*. 166 of
+    -- the 256 are complete encodings by themselves and must decode; the other
+    -- 90 are headers whose payload is missing and must be refused. The set is
+    -- written out from the spec rather than recorded from a run, so this
+    -- disagrees with the decoder rather than describing it.
+    local function whole(b)
+        return b <= 0x7f            -- positive fixint
+            or b >= 0xe0            -- negative fixint
+            or b == 0x80            -- empty map
+            or b == 0x90            -- empty array
+            or b == 0xa0            -- empty string
+            or b == 0xc0            -- nil
+            or b == 0xc2 or b == 0xc3   -- false, true
+    end
+    local disagreed, whole_count = {}, 0
     for b = 0, 255 do
-        local okk = pcall(msgpack.decode, string.char(b))
-        if okk == nil then crashed = crashed + 1 end
+        local decoded = pcall(msgpack.decode, string.char(b))
+        if whole(b) then whole_count = whole_count + 1 end
+        if decoded ~= whole(b) then
+            disagreed[#disagreed + 1] = string.format("%02x", b)
+        end
     end
-    eq(crashed, 0, "no single byte crashes the decoder")
+    eq(table.concat(disagreed, " "), "",
+       "each single byte decodes exactly when it is a whole encoding")
+    -- The same fact by the format's own arithmetic: 128 positive fixints, 32
+    -- negative, and six one-byte values. If this and the loop above ever
+    -- disagree, the table is what changed.
+    eq(whole_count, 166, "and 166 of the 256 single bytes are whole encodings")
     -- Truncations of a real encoding, which is where length prefixes bite.
+    -- Every proper prefix must be refused: none of them is a complete value.
     local full = msgpack.encode({a = {1, 2, "three"}, b = {c = 4.5}})
+    local accepted = {}
     for i = 1, #full - 1 do
-        local okk = pcall(msgpack.decode, full:sub(1, i))
-        if okk == nil then crashed = crashed + 1 end
+        if pcall(msgpack.decode, full:sub(1, i)) then
+            accepted[#accepted + 1] = tostring(i)
+        end
     end
-    eq(crashed, 0, "nor any truncation of a valid encoding")
+    eq(table.concat(accepted, " "), "",
+       "nor is any truncation of a valid encoding accepted")
+    ok(#full - 1 == 25, "and there were 25 truncations to check")
 end
 
 print("-- map keys")

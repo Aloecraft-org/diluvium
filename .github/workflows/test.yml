@@ -19,7 +19,15 @@ on:
         required: false
         default: ''
       include_skipped:
-        description: 'Also run the normally-skipped tests (api, attrib, big, heavy, literals, main)'
+        # The list here is checkable: ./test/run_tests.sh --list-skipped prints
+        # it. It used to name api, attrib and literals as well, which were
+        # recovered in c39649c and have run ever since -- so an operator reading
+        # it was told three tests would start running that had never stopped.
+        # The guard caveat matters for the same reason: a guard is a
+        # precondition evaluated at run time, so it still skips under this
+        # toggle, and a green run with it set is not evidence that a
+        # platform-guarded test passed.
+        description: 'Also run the normally-skipped tests (big, heavy, main). Guarded tests still skip when their precondition is absent.'
         type: boolean
         required: false
         default: false
@@ -30,6 +38,7 @@ on:
         required: false
         default: ''
       include_skipped:
+        description: 'Also run the normally-skipped tests (big, heavy, main). Guarded tests still skip when their precondition is absent.'
         type: boolean
         required: false
         default: false
