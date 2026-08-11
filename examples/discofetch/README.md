@@ -29,12 +29,16 @@ make -C examples/discofetch run
                  │  restart policy              │  ← a program, not a type
                  └───────────┬──────────────────┘
                              │ spawn
-                 ┌───────────▼──────────────────┐
-                 │ coordinator                  │  caps: lifecycle, queue:client/*
-                 │  matchmaking                 │  holds: name, want, instance id
-                 └──┬────────┬────────┬─────────┘
-                    │ spawn  │        │
-              ┌─────▼──┐ ┌───▼────┐ ┌─▼──────┐
+                 │            │ spawn (on request)
+                 │            └──────────────┬──────────────┐
+                 ▼                           │              │
+                 ┌──────────────────────────┐│              │
+                 │ coordinator              ││ asks         │
+                 │  matchmaking only        │┘              │
+                 │  caps: queue:client/*    │  no lifecycle │
+                 └──┬────────┬────────┬─────┘               │
+                    │ asks   │        │                     │
+              ┌─────▼──┐ ┌───▼────┐ ┌─▼──────┐  ◀───────────┘
               │ alice  │ │  bob   │ │ carol  │  caps: queue:client/<name>
               │handler │ │handler │ │handler │  holds: that client's candidates
               └────────┘ └────────┘ └────────┘  ← and nothing else, anywhere
@@ -46,7 +50,7 @@ Four files:
 |---|---|
 | `swarmd.c` | The host. ~350 lines, and deliberately stupid: it creates the swarm, steps it, moves bytes between queues, and prints. It knows nothing about clients or matching. |
 | `supervisor.lua` | The root program. Spawns the coordinator, restarts it up to three times, gives up after that. |
-| `coordinator.lua` | Matchmaking. Generates a handler program per client, spawns it, pairs clients, kills both handlers on a match. |
+| `coordinator.lua` | Matchmaking, and nothing else. Generates a handler program per client and *asks* the supervisor to spawn it; pairs clients; asks for both handlers to be released on a match. Holds no lifecycle capability. |
 | `handler.lua` | A template. One client's session: gathers toy ICE candidates, reports ready, then parks. |
 
 ## The four things worth watching in the output
@@ -170,6 +174,41 @@ the limit.
 and `make run` only checks that the process did not crash. That is the same defect
 the audit calls "a check that reports success without checking" — worth fixing
 before this example is trusted to gate anything.
+
+## Why handlers hang off the supervisor, not the coordinator
+
+They used to be the coordinator's children, which read well on a diagram and was
+wrong for two reasons, both from one fact: **when an instance stops, the swarm
+layer kills its whole subtree.**
+
+A coordinator crash took every session with it — not its memory of the sessions,
+the sessions. Matchmaking is the most exposed program here: it touches every
+arrival and parses every message. So the riskiest program was also the one holding
+everyone's life in its hands.
+
+And there could only ever be one. A coordinator that owns its handlers cannot be
+sharded, so one request that stalls it for three seconds blocks every arrival
+behind it — head-of-line blocking in the one place a matchmaker cannot afford it.
+
+Now the coordinator holds no lifecycle capability at all. It asks; the supervisor
+spawns. That costs a message round trip per admission and buys crash isolation and
+the ability to run coordinators in parallel, each caching whatever addressing it
+likes, none of them owning a session.
+
+**And it moved a guarantee out of the runtime, which is the part to read twice.**
+While the coordinator spawned its own children, §9.3 was enforced against *its*
+capabilities: holding `queue:client/*`, it could not grant more, and no bug in it
+could widen a grant. Now the swarm layer checks the request against the caps of
+whoever calls spawn — the supervisor, which holds the root's ceiling. So a
+coordinator can ask for anything up to `lifecycle, queue:*` and the runtime will
+allow it.
+
+That is measured, not reasoned about: before the supervisor validated requests,
+the `greedy` client's handler really was created holding `lifecycle`. The check now
+lives in `supervisor.lua`, in a program, which is strictly weaker than having the
+runtime do it — a bug in that dozen lines is a privilege escalation, where before
+it was impossible. It is the price of crash isolation and sharding, and it is worth
+knowing you are paying it.
 
 ## The fixture can fail now
 

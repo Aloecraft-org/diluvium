@@ -419,7 +419,17 @@ int main (int argc, char **argv) {
     for (id = 1; id <= 64; id++) {
       dv_instance *inst = dvs_instance(sw, id);
       dv_queue_id q;
-      uint8_t buf[4096];
+      /*
+      ** Big enough for a spawn request, which carries a program.
+      **
+      ** It was 4096, and the handler template is 4118 bytes -- so once the
+      ** coordinator started asking the supervisor to spawn rather than spawning
+      ** itself, every request was silently dropped. 'dv_queue_pop' answers
+      ** DV_BUFFER_TOO_SMALL and leaves the message in place, and the loop below
+      ** used to read any non-DV_OK as "nothing left", so a message too big to
+      ** read looked exactly like an empty queue. It is checked by name now.
+      */
+      uint8_t buf[DVS_MAX_REQUEST_BYTES];
       size_t n;
       if (inst == NULL)
         continue;
@@ -432,18 +442,33 @@ int main (int argc, char **argv) {
             printf("  [%u] %s\n", (unsigned)id, line);
             if (strstr(line, "MATCH #") != NULL) saw_match++;
             if (strstr(line, "blew its budget") != NULL) saw_budget_stop++;
-            if (strstr(line, "denied") != NULL &&
+            if (strstr(line, "refused") != NULL &&
                 strstr(line, "queue:*") != NULL) saw_denied_grant++;
           }
         }
       }
 
+      /*
+      ** Routing, and the whole of it. Handlers report to the coordinator; the
+      ** coordinator asks the supervisor for lifecycle it no longer holds; the
+      ** supervisor answers. Three rules, by instance id, and the host reads none
+      ** of the bytes it moves.
+      */
       q = dv_queue_lookup(inst, "outbox");
-      if (q != 0 && coordinator != 0) {
-        while (dv_queue_pop(inst, q, buf, sizeof(buf), &n) == DV_OK) {
-          if (id != coordinator)
+      if (q != 0) {
+        dv_status pst;
+        while ((pst = dv_queue_pop(inst, q, buf, sizeof(buf), &n)) == DV_OK) {
+          if (id == coordinator)
+            dvs_push(sw, root, "inbox", buf, n);
+          else if (id == root && coordinator != 0)
+            dvs_push(sw, coordinator, "inbox", buf, n);
+          else if (coordinator != 0)
             dvs_push(sw, coordinator, "inbox", buf, n);
         }
+        if (pst == DV_BUFFER_TOO_SMALL)
+          printf("  [host] instance %u has an outbox message of %lu bytes, "
+                 "larger than this host will move\n",
+                 (unsigned)id, (unsigned long)n);
       }
 
       /*
@@ -539,7 +564,7 @@ int main (int argc, char **argv) {
     CHECK(saw_budget_stop >= 1,
           "the runaway handler was stopped by its instruction budget");
     CHECK(saw_denied_grant >= 1,
-          "a spawn asking to widen a grant was refused (9.3)");
+          "a spawn asking to widen a grant was refused");
 #undef CHECK
     if (bad) {
       printf("\nthis run did not demonstrate what the README says it does\n");

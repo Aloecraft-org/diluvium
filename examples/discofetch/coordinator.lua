@@ -12,20 +12,29 @@ candidates are not in a table in a shared process that someone might read or fai
 to clear. They are in a Lua state that only alice's handler can reach, and the
 state is gone when the handler is.
 
-The coordinator holds "lifecycle" too, so it spawns its own children. That makes
-the handlers *its* subtree -- so if the coordinator dies, its handlers die with it
-(9.5's subtree default), and the supervisor restarting it starts from an empty
-world rather than adopting orphans.
+The coordinator holds NO lifecycle capability. It cannot spawn, it cannot kill,
+and it is not any handler's parent -- it asks the supervisor, which owns every
+instance. That costs a message round trip per admission and buys two things:
+
+  A crash here no longer takes the sessions with it. When an instance stops, the
+  swarm layer kills its subtree, so while handlers were this program's children,
+  a fault in matchmaking destroyed every live pairing session.
+
+  And there can be more than one of these. A coordinator that owned its handlers
+  could not be sharded, so one request that stalled it stalled every arrival
+  behind it. Nothing here is a session's owner any more, so a second coordinator
+  is a second copy of this file and nothing else.
+
+What is left in this file is only policy: who should be paired with whom.
 ]]
 
-local sys     = queue.declare('system/lifecycle', {capacity = 32})
-local ev      = queue.declare('system/events',    {capacity = 64})
 local log     = queue.declare('log',     {capacity = 64, exported = true})
 local clients = queue.declare('clients', {capacity = 16})   -- host pushes arrivals
 -- 'inbox' and 'outbox' already exist: 6.6 reserves them per instance and declares
 -- them exported, so the zero-configuration case needs no code. Declaring one again
 -- is an error rather than a silent reconfigure, which is how this was found.
-local inbox   = queue.lookup('inbox')                       -- host routes replies here
+local inbox   = queue.lookup('inbox')    -- handler reports, and supervisor news
+local out     = queue.lookup('outbox')   -- requests to the supervisor
 local codeq   = queue.declare('code',    {capacity = 2})
 
 local function say (s) queue.push(log, s) end
@@ -98,18 +107,25 @@ local function admit (c)
   say(('%s wants %s (nat %s) -> spawning a handler as %s'):format(
       c.client, c.want, c.nat, c.label))
   pending[#pending + 1] = c
-  queue.push(sys, {
-    op   = 'spawn',
+  queue.push(out, {
+    op   = 'need_handler',
+    client = c.client,
+    label  = c.label,
     code = handler_for(c.client, c.want, c.nat, c.label),
     --[[
     Narrower again: one queue name, for this client only, and *no* lifecycle. A
     handler therefore cannot spawn anything -- it may declare system/lifecycle and
     push to it, and nothing will ever read it.
 
-    The 'greedy' case asks for 'queue:*', which is WIDER than the 'queue:client/*'
-    this coordinator holds. 9.3 admits no exceptions, so the swarm layer refuses
-    the spawn outright and says which capability it refused. Nothing is created --
-    a denied spawn costs nothing and leaves nothing behind.
+    The 'greedy' case asks for 'queue:*', wider than the 'queue:client/*' this
+    program holds -- and the refusal now comes from the *supervisor* rather than
+    from the runtime, which is the price of not spawning our own children. The
+    swarm layer checks a grant against the caps of whoever calls spawn, and that
+    is the supervisor now, which holds the root's ceiling. See the long comment
+    in supervisor.lua: it was measured, and greedy's handler really was created
+    holding 'lifecycle' before that check existed.
+
+    Nothing is created: a refused spawn costs nothing and leaves nothing behind.
     ]]
     caps = (c.client == 'greedy') and { 'queue:*' }
                                   or  { 'queue:client/' .. c.client },
@@ -133,86 +149,72 @@ local function forget (id)
   for k, v in pairs(waiting) do if v.id == id then waiting[k] = nil end end
 end
 
+-- Only an ancestor may kill, and this program is nobody's ancestor now. It asks.
 local function kill (id)
-  queue.push(sys, {op = 'kill', id = id})
+  queue.push(out, {op = 'release', ids = {id}})
 end
 
 while true do
-  local q, m = queue.wait({clients, inbox, ev})
+  -- No 'system/events' here any more. Events go to an instance's parent, and this
+  -- program is nobody's parent -- the supervisor gets them and forwards what
+  -- matters. So everything except a client arrival comes through 'inbox'.
+  local q, m = queue.wait({clients, inbox})
 
   if q == clients then
     admit(m)
 
-  elseif q == ev then
-    if m.event == 'spawned' then
-      local c = table.remove(pending, 1)
-      if c then
-        byid[m.id] = c.client
-        idof[c.client] = m.id
-        labels[m.id] = c.label
-        say(('handler %d is %s, label %s'):format(m.id, c.client, c.label))
-      end
-
-    elseif m.event == 'exceeded' then
-      -- The runaway client. Its handler burned its instruction budget and was
-      -- stopped; the coordinator is told, and the rest of the swarm is unaffected.
-      say(('handler %d (%s) blew its budget and was stopped -- %s'):format(
-          m.id, tostring(byid[m.id]), oneline(m.detail)))
-      forget(m.id)
-
-    elseif m.event == 'faulted' then
-      say(('handler %d (%s) faulted: %s'):format(
-          m.id, tostring(byid[m.id]), oneline(m.detail)))
-      forget(m.id)
-
-    elseif m.event == 'exited' then
-      forget(m.id)
-
-    elseif m.event == 'denied' then
-      -- A denied spawn leaves a 'pending' entry that no 'spawned' will ever pop,
-      -- so without this the *next* successful spawn is attributed to the wrong
-      -- client. 'greedy' is last in the arrival table, which hid it.
-      --
-      -- Popping the front is order-correlation, and order-correlation is exactly
-      -- what breaks here: it is right only while one request is outstanding and
-      -- every 'denied' belongs to a spawn. The real answer is the one
-      -- doc/Determinism.md reaches for hostcalls -- a correlation token in the
-      -- request, echoed in the event -- and 9.2's events do not carry one.
-      local c = table.remove(pending, 1)
-      if c then
-        say(('a spawn was denied (%s); label %s was never issued'):format(
-            tostring(m.detail), tostring(c.label)))
-      else
-        say(('a request was denied: %s'):format(tostring(m.detail)))
-      end
-
-    elseif m.event == 'throttled' then
-      -- 9.5's rate limit as a rate rather than a filter: the request stays queued
-      -- and arrives over the next few steps. Nothing to do but notice.
-      say('spawns are being throttled; the queue will drain')
+  elseif m.op == 'handler' then
+    -- The supervisor spawned what we asked for and is telling us which id it is.
+    local c = table.remove(pending, 1)
+    if c then
+      byid[m.id] = c.client
+      idof[c.client] = m.id
+      labels[m.id] = c.label
+      say(('handler %d is %s, label %s'):format(m.id, c.client, c.label))
     end
 
-  else  -- inbox: a handler reported, routed here by the host
-    if m.kind == 'ready' then
-      local me = idof[m.client]
-      local other = waiting[m.want]
-      if other and other.client ~= m.client and me then
-        matches = matches + 1
-        waiting[m.want] = nil
-        say(('MATCH #%d on %s: %s <-> %s'):format(
-            matches, m.want, other.client, m.client))
-        -- In the real thing, each side is handed the other's candidates here and
-        -- the two clients talk directly. The point of the toy is what happens
-        -- next: both handlers are killed, and with them goes every byte either
-        -- client sent. Nothing is retained to be leaked later.
-        say(('  both handlers (%d, %d) are killed; their state goes with them')
-            :format(other.id, me))
-        kill(other.id)
-        kill(me)
-      else
-        waiting[m.want] = {client = m.client, id = me}
-        say(('%s is waiting for a peer on %s'):format(m.client, m.want))
-      end
+  elseif m.op == 'refused' then
+    -- The runtime refused the spawn. Pop the matching request, or every later
+    -- handler is attributed to the wrong client -- which is order-correlation,
+    -- and it is right only while one request is outstanding. A real one wants a
+    -- token in the request that the answer echoes; 9.2's events carry none.
+    local c = table.remove(pending, 1)
+    say(('spawn for %s was refused (%s); label %s was never issued'):format(
+        tostring(m.client), tostring(m.detail),
+        tostring(c and c.label)))
+
+  elseif m.op == 'gone' then
+    -- A handler stopped, whatever the reason. This is the news that used to
+    -- arrive as a lifecycle event when handlers were this program's children.
+    if m.event == 'exceeded' then
+      say(('handler %d (%s) blew its budget and was stopped -- %s'):format(
+          m.id, tostring(m.client), oneline(m.detail)))
+    elseif m.event == 'faulted' then
+      say(('handler %d (%s) faulted: %s'):format(
+          m.id, tostring(m.client), oneline(m.detail)))
+    end
+    forget(m.id)
+
+  elseif m.kind == 'ready' then
+    -- A handler reporting for itself, routed here by the host.
+    local me = idof[m.client]
+    local other = waiting[m.want]
+    if other and other.client ~= m.client and me then
+      matches = matches + 1
+      waiting[m.want] = nil
+      say(('MATCH #%d on %s: %s <-> %s'):format(
+          matches, m.want, other.client, m.client))
+      -- In the real thing, each side is handed the other's candidates here and
+      -- the two clients talk directly. The point of the toy is what happens
+      -- next: both handlers are killed, and with them goes every byte either
+      -- client sent. Nothing is retained to be leaked later.
+      say(('  both handlers (%d, %d) are killed; their state goes with them')
+          :format(other.id, me))
+      kill(other.id)
+      kill(me)
+    else
+      waiting[m.want] = {client = m.client, id = me}
+      say(('%s is waiting for a peer on %s'):format(m.client, m.want))
     end
   end
 end
