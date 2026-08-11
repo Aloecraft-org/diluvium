@@ -204,7 +204,8 @@ make -C examples/discofetch run
 The rest of `doc/` is about building Diluvium rather than using it:
 `doc/Messaging.md` is the messaging and swarm design (and §18 the known defects),
 `doc/ROADMAP.md` the language and compiler state, `doc/Lab.md` the brief for a REPL
-and debugger, and `doc/audit/` the evidence behind §18.
+and debugger, `doc/Determinism.md` an open design for a replayable scheduler, and
+`doc/audit/` the evidence behind §18.
 
 ## Installation Instructions
 
