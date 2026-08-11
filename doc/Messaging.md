@@ -2907,11 +2907,6 @@ switch exists:
 - [ ] Enforce §10.7's precondition 4, or strike it (**14**). Nested coroutines are
       captured rather than refused, and one of those two is the answer.
 
-**Owed, and on no profile's path.** A job that runs `make verify_wasm`. Its four file
-names and its swallowed exit status are fixed (**29**), but no workflow calls it,
-which is how it came to name files no target produced without anyone noticing. It
-belongs beside the wasm build.
-
 The one thing not on this list is anything about `diluvium lab`, the REPL or the
 debugger. That is `doc/Lab.md`, which is a design brief rather than a checklist
 because those features do not exist yet. Its third finding is worth re-reading
