@@ -10,6 +10,230 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build4] - unreleased (prerelease)
+
+`v5.5.1_build4` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**The capability layer becomes a boundary.**
+
+5.5.1_build3 shipped as a pre-release for two stated reasons:
+hibernation was switched off, and the capability layer was a
+structuring device rather than a security boundary, because a program
+could reach past it through the `debug` library. This release closes
+the second one. A program loaded into an instance can no longer forge
+an endpoint reference, read the runtime's registry, walk past a
+protected metatable, or switch off the instruction budget it was given.
+
+That last one was not on anyone's list. A `lua_State` has one hook slot
+and the instruction budget is a count hook in it, so `debug.sethook()`
+-- the documented way to clear a hook, one line, no setup -- disarmed
+it: an instance limited to 200,000 instructions ran three million and
+reported nought used. It was found while closing the forgery route and
+is closed by the same change.
+
+**Still a pre-release, and now for one reason rather than two.**
+Hibernation is off by default and should stay off; the defect behind
+that switch is unchanged and is described under **Known issues**. Every
+other confirmed finding from the M0-M7 audit that is not part of
+hibernation is now fixed -- twenty-nine of thirty-five, and the six
+that remain are hibernation entire.
+
+What that means for a deployment: **profile B of `doc/Messaging.md`
+18.2 is now available.** A host may load a program it did not write,
+provided it does not set `DV_FLAG_UNSAFE_DEBUG` and does not turn
+hibernation on. Profile A -- every program the operator's own -- is
+unchanged and may keep the whole `debug` library by asking for it.
+
+Beyond that: four checks that reported success without checking
+anything, and a defect where destroying an endpoint queue made its
+token permanently unusable.
+
+### Added
+
+- `DV_FLAG_UNSAFE_DEBUG` in `dv_config.flags`: open the whole `debug`
+  library in this instance rather than the narrowed one. For profile A
+  hosts, whose programs are their own. See **Upgrading**.
+
+### Fixed
+
+- Destroying an endpoint queue no longer makes its token permanently
+  unusable.
+
+  Nothing removed an entry from the token-to-handle map, and `bind`
+  short-circuits on it, so binding the same reference again returned
+  the destroyed handle and reported success. Pushing through it raised
+  "handle 4 has been destroyed", and the host's `dv_endpoint_queue`
+  went on naming the dead handle as the buffer to drain. Reachable by
+  accident rather than by trying: `endpoint.bind` and `queue.destroy`
+  are both in the guest table. Audit finding 11.
+- Four checks that reported success without checking anything, which is
+  worse than an absent check because an absent check is visibly absent.
+
+  `dsnap_check`'s "every header refusal code has its own sentence"
+  walked to the code that was last when it was written, so the two
+  added since -- the two most likely to be reached by a hostile
+  snapshot -- were never inspected, and it compared each sentence only
+  against the fallback, so two codes could share one. `make
+  verify_wasm` named four files no target produces and swallowed its
+  own exit status through `| head`, so its first step could not fail
+  and the target only ever failed for the wrong reason.
+  `patch_series.sh check` exited 0 having examined nothing when the
+  fork point was unreachable, which a shallow clone does.
+  `test.yml`'s `include_skipped` named six tests when three are
+  skipped, three of them recovered a release ago.
+
+  Audit findings 18, 29, 30 and 31. Each is now confirmed to fail
+  against the mutation it was supposed to catch.
+- Two assertions that could not fail, and a row of section 6.4 that
+  nothing checked from the host side.
+
+  `test_msgpack.lua`'s malformed-input loops counted
+  `pcall(...) == nil`, which cannot happen, so both were tautologies:
+  the decoder could have returned a partially built value for every
+  truncated input and the file would still have printed "0 failed".
+  They now assert the property -- each single byte decodes exactly when
+  it is a whole encoding, and every proper prefix of a real encoding is
+  refused. And `disabled` was the one row of 6.4 with no host-side
+  assertion: deleting the enabled check in `diluvium_queue_push_bytes`
+  made a host push into a queue the program had disabled succeed
+  silently, and nothing turned red. Audit findings 9 and 10.
+- The parent-visible half of build3's sticky-error fix now has a test.
+
+  The fix was in and asserted at the ABI level; what no test reproduced
+  was what a *supervisor* is told. A supervisor that spawns a worker
+  and asks for it to be hibernated in the same batch -- "start it
+  asleep" -- had the hibernate correctly denied, and the refusal was
+  left on the child, so when the child finished its work it was
+  reported as `faulted` and a restart policy restarted it. Audit
+  findings 15 and 19.
+
+### Security
+
+- **An endpoint reference can no longer be forged through the
+  registry.**
+
+  A reference is a table wearing a private metatable, and identity was
+  metatable equality. `__metatable = false` hid it from `getmetatable`
+  but not from `debug.getmetatable`, and the metatable itself sat in
+  the registry under its own `__name`, which `debug.getregistry`
+  returns. So a program that had been given nothing could prime the
+  metatable into existence with any table at all, read it back out of
+  the registry, wrap guessed peer bytes in a table wearing it, and get
+  a live endpoint handle to any peer the host had pre-authorised. Every
+  message it pushed arrived.
+
+  Section 7.3's "a reference cannot be forged" was false, and 9.3's
+  attenuation -- which treats a reference as a capability rather than a
+  guessable name -- rested on it. Audit finding 6, reproduced end to
+  end before it was fixed.
+
+  No registry-side scheme fixes this while `debug.getregistry` is open,
+  including keeping a weak-keyed set of the references the runtime
+  actually made: a program that can read the registry finds that table
+  too and adds itself to it. So the library narrows. See **Upgrading**.
+- **A program can no longer switch off its own instruction budget.**
+
+  `debug.sethook()` takes the single hook slot a `lua_State` has, and
+  the budget of section 9.4 is a count hook in it. One line, no setup,
+  no capability required: an instance given 200,000 instructions ran
+  three million to completion, `dv_exceeded` reported false and
+  `dv_usage` reported nought used.
+
+  Not found by the M0-M7 audit. It is the same shape as two defects
+  that audit did find on the host side -- a budget stored, reported by
+  an accessor, and enforced by nothing -- reached from the guest side.
+
+### Known issues
+
+- **Hibernation is switched off by default, and this release still
+  recommends leaving it off.** Unchanged from 5.5.1_build3.
+
+  `dvs_hibernate` refuses unless a host calls `dvs_allow_hibernation`
+  first. The reason is a defect the layer above cannot work around: the
+  thread record does not carry `u2.funcidx`, so an error raised in a
+  *restored* program unwinds from the stack base instead of the frame
+  that raised it, closing every to-be-closed slot in the thread and
+  writing the error object over the driver's own function slot. That is
+  memory corruption, not a wrong answer, and the ordinary
+  wake-then-error path reaches it.
+
+  **Note the switch covers the swarm layer and not the ABI underneath
+  it.** `dv_restore` is a public call with no equivalent gate, so a
+  host driving instances directly can reach the same path. Treat
+  `dv_snapshot` and `dv_restore` as unsupported in this release unless
+  you have read section 18.2 of `doc/Messaging.md` and decided
+  otherwise.
+
+  A deployment that keeps agent state at the application level and
+  spawns a fresh instance per unit of work never enters that path, and
+  pays little for it: `dv_new` plus `dv_load` of a small chunk is
+  comparable to `dv_new` plus `dv_restore` of a value graph. Sizing for
+  that: 42 KB per resident instance (`make footprint`).
+
+  Four smaller snapshot defects sit behind the same switch: a woken
+  instance's instruction budget is not re-armed, the swarm layer passes
+  no host-identity stamp so its own snapshots are not authenticated,
+  endpoints do not survive a snapshot, and the snapshot fuzzer's
+  field-validation coverage is currently hollow -- a digest added later
+  refuses every mutant before the field checks it was built to
+  exercise, so "0 crashes" there is true but proves less than it
+  appears to.
+
+  These six are now the whole of what is open against the M0-M7 audit,
+  and section 18.3 states the decision they amount to: whether this
+  project supports hibernation at scale, or says it does not and
+  strikes them.
+- `DV_FLAG_UNSAFE_DEBUG` is a real hole, deliberately.
+
+  A host that sets it gets the whole `debug` library back and, with it,
+  the endpoint forgery route and the budget escape this release closed.
+  That is profile A's configuration and it is supported -- but the flag
+  is not a convenience toggle, and an instance carrying it should be
+  treated as running trusted code. `dv_check` asserts that a program in
+  such an instance can still switch its own budget off, so the cost is
+  recorded in a test rather than only here.
+- Section 10.7's precondition that a snapshot capture involve a single
+  thread is documented but not enforced: nested coroutines are captured
+  rather than refused. Audit finding 14, and part of the hibernation
+  block above.
+
+### Upgrading
+
+**A program running inside an instance now gets a narrowed `debug`
+library.** This is the one change here that can break working code.
+
+Twelve of its sixteen functions raise instead of running: `debug`,
+`getregistry`, `getmetatable`, `setmetatable`, `getupvalue`,
+`setupvalue`, `upvalueid`, `upvaluejoin`, `getuservalue`,
+`setuservalue`, `sethook` and `setlocal`. Each names what it would have
+defeated, so a program that hits one reports something a human can act
+on rather than "attempt to call a nil value". `getinfo`, `getlocal`,
+`gethook` and `traceback` are unchanged: a program may read its own
+frames.
+
+This applies to instances only -- states created by `dv_new`, which
+includes every child the swarm layer spawns. The `diluvium` and
+`diluvium_compiler` binaries, the browser build and anything embedding
+the runtime through `luaL_openlibs` are unaffected, and the upstream
+test suite still drives the whole library.
+
+A host that wants the old behaviour sets `DV_FLAG_UNSAFE_DEBUG` in
+`dv_config.flags`. Do that only where the program is one you wrote or
+generated yourself: it restores the forgery route, the registry and the
+budget escape together, which is why it is spelled that way.
+
+Snapshots are unaffected. The twelve names are still present -- they
+are refusals, not deletions -- so the permanents fingerprint is
+unchanged and a snapshot taken by 5.5.1_build3 still restores. A
+snapshot also crosses `DV_FLAG_UNSAFE_DEBUG` in both directions, and
+the permanent resolves in the restoring instance, so a program captured
+holding `debug.sethook` wakes with whichever one the instance it wakes
+in is entitled to.
+
+`LUAC_FORMAT` is unchanged at 0x46; chunks compiled by 5.5.1_build3
+load without recompiling.
+
+
 ## [5.5.1_build3] - 2026-08-10 (prerelease)
 
 `v5.5.1_build3` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
