@@ -374,7 +374,12 @@ LUA_API int diluvium_shim_restore (lua_State *co,
 LUA_API int diluvium_shim_reopenupval (lua_State *L, int idx, int n,
                                        lua_State *co, int slot);
 
-/* Mark slot 'slot' of 'co' to-be-closed. Slots must be given in order. */
+/*
+** Mark slot 'slot' of 'co' to-be-closed. Slots must be given in order, and the
+** slot must hold a closable value (one with __close) or a false one -- the
+** same rule the VM enforces when it marks a slot, applied here as a refusal
+** rather than the raise the VM uses (audit S2).
+*/
 LUA_API int diluvium_shim_settbc (lua_State *co, int slot);
 
 #endif

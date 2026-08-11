@@ -220,14 +220,12 @@ def main():
     print("payload digest re-sealed after each mutation, so the field checks "
           "are what refuses (header ends at byte %d)" % at)
 
-    # Known open failures, so a *new* one still fails the run while these two do
-    # not block every release until they are fixed. Audit finding S2: re-sealing
-    # the digest let mutants reach the field-validation layer for the first time,
-    # and it refused 335 of 429 and crashed on these two. They abort on a
-    # lua_assert, which means the assertion is compiled out in a release build
-    # and the same input goes somewhere undefined instead. This list must shrink
-    # to empty; adding to it needs a better reason than a red run.
-    KNOWN = {"bit flip at 951", "bit flip at 1356"}
+    # Known open failures, so a *new* one still fails the run without the known
+    # ones blocking every release until fixed. Empty since audit S2 closed (a
+    # crafted to-be-closed list naming a non-closable slot reached the raise in
+    # 'luaF_newtbcupval'; 'diluvium_shim_settbc' now refuses it first). Adding
+    # an entry needs a better reason than a red run.
+    KNOWN = set()
 
     counts = {"accepted": 0, "refused": 0, "crashed": 0, "timeout": 0}
     bad = []

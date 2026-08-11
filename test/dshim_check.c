@@ -409,6 +409,57 @@ static void tbclist_reports_pending_closes (lua_State *L) {
 
 
 /*
+** Audit S2. The slot list a restore feeds 'settbc' comes from snapshot bytes,
+** so it can name any slot; a slot holding nothing closable must come back as a
+** refusal, not reach the raise inside 'luaF_newtbcupval'. Before the fix this
+** test did not return: the raise escaped the lock convention and the next
+** unlock aborted an assertions build. The closable and false slots ride along
+** so the refusal is the check's, not an over-broad guard's.
+*/
+static void non_closable_tbc_slot_is_refused (lua_State *L) {
+  int base = lua_gettop(L);
+  lua_State *co = lua_newthread(L);
+  int nres, i, used;
+  int slot_t = 0, slot_plain = 0, slot_f = 0;
+  const char *src =
+    "local t = setmetatable({}, {__close = function() end})\n"
+    "local plain = 42\n"
+    "local f = false\n"
+    "coroutine.yield()\n";
+  if (luaL_loadstring(co, src) != LUA_OK) {
+    ok(0, "tbc-refusal chunk loads");
+    lua_settop(L, base);
+    return;
+  }
+  lua_resume(co, L, 0, &nres);
+  /* Locate the three locals by value rather than by hardcoded slot: the chunk
+     and the resume plumbing sit below them, and where is an implementation
+     detail this test has no business asserting. */
+  used = diluvium_shim_stacksize(co);
+  for (i = 1; i <= used; i++) {
+    if (!diluvium_shim_pushslot(co, i, L)) continue;
+    if (lua_type(L, -1) == LUA_TTABLE) slot_t = i;
+    else if (lua_type(L, -1) == LUA_TNUMBER && lua_tonumber(L, -1) == 42)
+      slot_plain = i;
+    else if (lua_type(L, -1) == LUA_TBOOLEAN && !lua_toboolean(L, -1))
+      slot_f = i;
+    lua_pop(L, 1);
+  }
+  ok(slot_t > 1 && slot_plain > slot_t && slot_f > slot_plain,
+     "the three locals are found, in declaration order");
+  ok(!diluvium_shim_settbc(co, slot_plain),
+     "a slot holding a non-closable value is refused, not raised over");
+  ok(diluvium_shim_settbc(co, slot_t),
+     "a slot holding a __close value still marks");
+  ok(diluvium_shim_settbc(co, slot_f),
+     "a false slot is markable; it is never closed, so it needs no __close");
+  ok(!diluvium_shim_settbc(co, slot_t),
+     "order still holds: at or below the last tracked mark is refused");
+  lua_settop(L, base);
+}
+
+
+/*
 ** The precondition pair.
 */
 
@@ -956,6 +1007,7 @@ int main (void) {
   protos_are_shared_by_identity(L);
   secure_functions_are_flagged(L);
   tbclist_reports_pending_closes(L);
+  non_closable_tbc_slot_is_refused(L);
 
   printf("\n=== dshim: capture preconditions (10.7) ===\n");
   fresh_thread_is_capturable(L);

@@ -41,6 +41,7 @@
 #include "lgc.h"
 #include "lobject.h"
 #include "lstate.h"
+#include "ltm.h"
 
 #include "dshim.h"
 
@@ -608,6 +609,21 @@ LUA_API int diluvium_shim_settbc (lua_State *co, int slot) {
   */
   if (co->stack.p + (slot - 1) <= co->tbclist.p)
     return 0;
+  /*
+  ** The value must be closable before 'luaF_newtbcupval' sees it, for the same
+  ** reason as the check above: what the VM handles by raising, this file must
+  ** handle by refusing. A slot the VM marks always holds a __close value or a
+  ** false one, so on that path 'checkclosemth' never fires; here the slot list
+  ** comes from snapshot bytes, and a crafted list can name any slot. Letting
+  ** the raise happen instead of refusing is audit S2: 'luaG_runerror' throws
+  ** without 'lua_lock', so it leaves the lock convention one unlock ahead --
+  ** an abort in an assertions build, an unlock of a lock never taken for an
+  ** embedder whose 'lua_lock' is real. False needs no metamethod because it is
+  ** never closed; 'luaF_newtbcupval' makes the same exception first thing.
+  */
+  if (!l_isfalse(s2v(co->stack.p + (slot - 1))) &&
+      ttisnil(luaT_gettmbyobj(co, s2v(co->stack.p + (slot - 1)), TM_CLOSE)))
+    return 0;
   luaF_newtbcupval(co, co->stack.p + (slot - 1));
   return 1;
 }
@@ -644,7 +660,8 @@ LUA_API const char *diluvium_shim_resreason (int code) {
       return "a C frame below the yield has no continuation, so resume would "
              "walk into it and find nothing";
     case DILUVIUM_RES_TBC:
-      return "a to-be-closed slot is out of range or out of order";
+      return "a to-be-closed slot is out of range, out of order, or holds "
+             "nothing closable";
     default:
       return "unknown reason";
   }
