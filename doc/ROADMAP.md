@@ -639,7 +639,13 @@ images are not, so an unexplained jump is usually one of those moving.
 ## Open
 
 - Contract calling convention, kernel framing, libm embedding — carried
-  from the handoff, all still open.
+  from the handoff, all still open. `doc/swarm.md` is a first design pass
+  at the calling convention: it argues that the swarm messaging model and
+  the hostcall ABI are one design (a hostcall is a yield to a scheduler,
+  the same path `recv` takes), and `doc/swarm-prototype.lua` is a runnable,
+  self-checking sketch of the in-process scheduler. Both are design-stage;
+  nothing is in `src/`. The pivotal open decision is in-process versus
+  distributed sequencing.
 - Float reduction order, needed before any vector work.
 - A dataflow pass over the code (control-flow graph plus a known-table
   lattice), which would let the verifier prove the `OP_SETLIST` invariant
