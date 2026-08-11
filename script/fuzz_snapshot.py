@@ -221,7 +221,7 @@ def main():
           "are what refuses (header ends at byte %d)" % at)
 
     # Known open failures, so a *new* one still fails the run while these two do
-    # not block every release until they are fixed. Audit finding 33: re-sealing
+    # not block every release until they are fixed. Audit finding S2: re-sealing
     # the digest let mutants reach the field-validation layer for the first time,
     # and it refused 335 of 429 and crashed on these two. They abort on a
     # lua_assert, which means the assertion is compiled out in a release build
@@ -249,7 +249,7 @@ def main():
           % (n, counts["refused"], counts["accepted"], counts["crashed"],
              counts["timeout"]))
     if known_hit:
-        print("\n%d known open failure(s), audit finding 33 -- these must be "
+        print("\n%d known open failure(s), audit S2 -- these must be "
               "fixed, not carried:" % len(known_hit))
         for name, state, detail in known_hit:
             print("  %-44s %s %s" % (name, state, detail))

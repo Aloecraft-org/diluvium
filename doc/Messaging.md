@@ -2963,8 +2963,10 @@ unwinds from the stack base. So "hibernation is off" is true of the swarm layer 
 not of the ABI underneath it, and a release that answers no should probably also
 refuse `dv_restore` by default rather than only documenting it.
 
-**Profile C — hibernation at scale.** In this order; the first is the reason the
-switch exists:
+**Profile C — hibernation at scale.** `doc/Hibernate.md` is the working brief for
+this block: it carries the reproduction for each open item, the two instruments that
+now exist, and the three traps this work has already sprung. The list below is the
+index; that file is what to read before starting.
 
 - [x] **Done.** Carry `u2.funcidx` in the thread record (**0**). Eleven frame words instead of
       ten, or reconstruct it in `ds_buildthread` for every `CIST_YPCALL` frame as the
