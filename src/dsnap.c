@@ -1339,9 +1339,15 @@ static lua_KFunction ds_contfunc (const char *name, size_t len) {
 ** inside an ext payload and a self-describing encoding would buy nothing: the
 ** reader is this same runtime, guarded by the header's fingerprint.
 */
-#define DS_THREAD_VERSION	1
-#define DS_THREAD_WORDS		5        /* 32-bit words in the record header */
-#define DS_FRAME_WORDS		10       /* 32-bit words per frame record */
+/*
+** 2: a sixth header word carries the thread's error-handler slot and an
+** eleventh frame word carries each pcall frame's saved one, so a restored
+** program's error runs the handler at the throw point and gets its traceback
+** (audit: old_errfunc). Rides the same release as DILUVIUM_SNAP_FORMAT 2.
+*/
+#define DS_THREAD_VERSION	2
+#define DS_THREAD_WORDS		6        /* 32-bit words in the record header */
+#define DS_FRAME_WORDS		11       /* 32-bit words per frame record */
 
 static void ds_put32 (luaL_Buffer *b, unsigned long v) {
   char four[4];
@@ -1415,6 +1421,7 @@ static int ds_encodethread (lua_State *L, int abs) {
   ds_put32(&b, (unsigned long)n);
   ds_put32(&b, (unsigned long)ntbc);
   ds_put32(&b, (unsigned long)capacity);
+  ds_put32(&b, (unsigned long)diluvium_shim_errfunc(co));
   for (i = 0; i < n; i++) {
     diluvium_frame f;
     if (!diluvium_shim_frame(co, i, &f))
@@ -1430,6 +1437,7 @@ static int ds_encodethread (lua_State *L, int abs) {
     ds_put32(&b, f.callstatus);
     ds_put32(&b, (unsigned long)f.ctx);
     ds_put32(&b, (unsigned long)(f.is_vararg ? 1 : 0));
+    ds_put32(&b, (unsigned long)f.old_errfunc);
   }
   /* Innermost first, which is the order 'tbcnext' walks and the reverse of the
      order a restore must apply them -- the restore reverses, because
@@ -1544,7 +1552,7 @@ static int ds_buildthread (lua_State *L, int thidx) {
   lua_State *co = lua_tothread(L, thidx);
   const unsigned char *data;
   size_t len;
-  unsigned long nslots, nyield, nframes, ntbc;
+  unsigned long nslots, nyield, nframes, ntbc, errfunc;
   diluvium_frame *frames;
   lua_KFunction *ks;
   size_t namepos;
@@ -1563,6 +1571,7 @@ static int ds_buildthread (lua_State *L, int thidx) {
   nyield = ds_get32(data + 5);
   nframes = ds_get32(data + 9);
   ntbc = ds_get32(data + 13);
+  errfunc = ds_get32(data + 21);
   /* Sized from the record, which was length-checked when the thread was made. */
   frames = (diluvium_frame *)lua_newuserdatauv(
              L, nframes * sizeof(diluvium_frame), 0);
@@ -1586,6 +1595,7 @@ static int ds_buildthread (lua_State *L, int thidx) {
     out->nresults = (int)ds_ssigned(ds_get32(f + 24));
     out->callstatus = ds_get32(f + 28);
     out->ctx = ds_ssigned(ds_get32(f + 32));
+    out->old_errfunc = (long)ds_get32(f + 40);
     ks[i] = NULL;
     if (out->is_c && out->has_k) {
       unsigned long nlen;
@@ -1608,11 +1618,17 @@ static int ds_buildthread (lua_State *L, int thidx) {
       namepos += nlen;
     }
   }
-  rc = diluvium_shim_checkframes(co, frames, (int)nframes, (int)nslots, &bad);
-  if (rc != DILUVIUM_RES_OK)
+  rc = diluvium_shim_checkframes(co, frames, (int)nframes, (int)nslots,
+                                 (int)errfunc, &bad);
+  if (rc != DILUVIUM_RES_OK) {
+    if (bad < 0)
+      return luaL_error(L, "snapshot: a thread cannot be restored: %s",
+                        diluvium_shim_resreason(rc));
     return luaL_error(L, "snapshot: frame %d of a thread cannot be restored: %s",
                       bad, diluvium_shim_resreason(rc));
-  if (!diluvium_shim_restore(co, frames, (int)nframes, ks, (int)nyield))
+  }
+  if (!diluvium_shim_restore(co, frames, (int)nframes, ks, (int)nyield,
+                             (int)errfunc))
     return luaL_error(L, "snapshot: a thread's frames would not build");
   /*
   ** The to-be-closed slots are *not* marked here, and that is the one ordering

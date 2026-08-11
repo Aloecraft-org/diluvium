@@ -986,6 +986,106 @@ static void reasons_are_all_worded (lua_State *L) {
 }
 
 
+static void restore_reasons_are_all_worded (lua_State *L) {
+  int c;
+  (void)L;
+  for (c = 0; c <= DILUVIUM_RES_ERRFUNC; c++) {
+    const char *r = diluvium_shim_resreason(c);
+    if (r == NULL || *r == '\0' ||
+        strcmp(r, diluvium_shim_resreason(DILUVIUM_RES_ERRFUNC + 99)) == 0) {
+      ok(0, "every restore-refusal code has its own sentence");
+      return;
+    }
+  }
+  ok(1, "every restore-refusal code has its own sentence");
+}
+
+
+/*
+** The errfunc checks (audit: old_errfunc). The frames come off a real parked
+** thread and check clean, so each refusal below is provably the tampering's.
+** The type check is the load-bearing one: 'luaG_errormsg' asserts the handler
+** slot holds a function, and in a release build a non-function there is
+** "called" through '__call', whose failure re-enters 'luaG_errormsg' with the
+** handler still armed -- recursion with no floor. Refused here instead.
+*/
+static void errfunc_slots_are_validated (lua_State *L) {
+  int base = lua_gettop(L);
+  lua_State *co = lua_newthread(L);
+  int nres, n, i, nslots, bad = -1;
+  diluvium_frame frames[16];
+  int ypcall = -1, plainc = -1, fnslot = 0, numslot = 0;
+  const char *src =
+    "local marker = function() end\n"
+    "local num = 42\n"
+    "pcall(function() coroutine.yield() end)\n";
+  if (luaL_loadstring(co, src) != LUA_OK) {
+    ok(0, "the errfunc fixture loads");
+    lua_settop(L, base);
+    return;
+  }
+  lua_resume(co, L, 0, &nres);
+  n = diluvium_shim_framecount(co);
+  nslots = diluvium_shim_stacksize(co);
+  if (n < 1 || n > 16) {
+    ok(0, "the fixture parks at a sane depth");
+    lua_settop(L, base);
+    return;
+  }
+  for (i = 0; i < n; i++)
+    diluvium_shim_frame(co, i, &frames[i]);
+  for (i = 0; i < n; i++) {
+    if (frames[i].is_c && frames[i].is_ypcall && ypcall < 0) ypcall = i;
+    if (frames[i].is_c && !frames[i].is_ypcall && plainc < 0) plainc = i;
+  }
+  for (i = 2; i <= nslots; i++) {
+    if (!diluvium_shim_pushslot(co, i, L)) continue;
+    if (lua_type(L, -1) == LUA_TNUMBER && lua_tonumber(L, -1) == 42)
+      numslot = i;
+    else if (lua_type(L, -1) == LUA_TFUNCTION && fnslot == 0)
+      fnslot = i;
+    lua_pop(L, 1);
+  }
+  ok(ypcall >= 0 && plainc >= 0 && fnslot >= 2 && numslot >= 2,
+     "the fixture has a pcall frame, a plain C frame, and both slot kinds");
+  ok(diluvium_shim_checkframes(co, frames, n, nslots,
+                               diluvium_shim_errfunc(co), &bad)
+     == DILUVIUM_RES_OK, "the organic chain checks clean");
+  ok(diluvium_shim_checkframes(co, frames, n, nslots, 1, &bad)
+     == DILUVIUM_RES_ERRFUNC,
+     "slot 1 cannot hold a handler: offset 0 is the core's word for none");
+  ok(diluvium_shim_checkframes(co, frames, n, nslots, nslots + 7, &bad)
+     == DILUVIUM_RES_ERRFUNC, "a handler outside the stack is refused");
+  ok(diluvium_shim_checkframes(co, frames, n, nslots, numslot, &bad)
+     == DILUVIUM_RES_ERRFUNC, "a handler slot holding no function is refused");
+  ok(diluvium_shim_checkframes(co, frames, n, nslots, fnslot, &bad)
+     == DILUVIUM_RES_OK,
+     "one holding a function passes, so the type check is the discriminator");
+  {
+    long saved = frames[plainc].old_errfunc;
+    frames[plainc].old_errfunc = fnslot;
+    ok(diluvium_shim_checkframes(co, frames, n, nslots, 0, &bad)
+       == DILUVIUM_RES_ERRFUNC && bad == plainc,
+       "a saved handler on a frame that is not a pcall is refused");
+    frames[plainc].old_errfunc = saved;
+    saved = frames[ypcall].old_errfunc;
+    frames[ypcall].old_errfunc = frames[ypcall].func_index + 1;
+    ok(diluvium_shim_checkframes(co, frames, n, nslots, 0, &bad)
+       == DILUVIUM_RES_ERRFUNC && bad == ypcall,
+       "a saved handler above its own pcall frame is refused");
+    frames[ypcall].old_errfunc = saved;
+    if (fnslot < frames[ypcall].func_index) {
+      frames[ypcall].old_errfunc = fnslot;
+      ok(diluvium_shim_checkframes(co, frames, n, nslots, 0, &bad)
+         == DILUVIUM_RES_OK,
+         "one below the pcall, holding a function, passes");
+      frames[ypcall].old_errfunc = saved;
+    }
+  }
+  lua_settop(L, base);
+}
+
+
 int main (void) {
   lua_State *L = luaL_newstate();
   if (L == NULL) {
@@ -1024,6 +1124,8 @@ int main (void) {
   agent_parked_on_wait_is_capturable(L);
   the_exemption_is_narrow(L);
   reasons_are_all_worded(L);
+  restore_reasons_are_all_worded(L);
+  errfunc_slots_are_validated(L);
 
   lua_close(L);
   printf("\n%d checks, %d failed\n", checks, failures);

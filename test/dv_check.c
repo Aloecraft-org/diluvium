@@ -2001,7 +2001,72 @@ static void a_restored_program_can_raise (void) {
       const char *m = dv_last_error(b);
       ok(m != NULL && strstr(m, "boom after waking") != NULL,
          "and it is the program's own error, not one from unwinding");
+      /* The handler ran at the throw point, which is where a traceback can be
+         attached at all. Until the errfunc carry (audit: old_errfunc) the
+         restored thread had no handler armed, so this line was the visible
+         symptom: the message above arrived correct and bare. */
+      ok(m != NULL && strstr(m, "stack traceback") != NULL,
+         "and it carries a traceback, so the handler ran at the throw point");
       if (m != NULL && strstr(m, "boom after waking") == NULL)
+        printf("      (%s)\n", m);
+    }
+  }
+  dv_free(b);
+  free(buf);
+}
+
+
+/*
+** The other half of the errfunc carry: the handler slot *saved inside a
+** pcall frame*. A guest parked inside its own 'pcall' has the driver's
+** handler displaced -- 'lua_pcallk' saved it in the frame's 'old_errfunc' and
+** armed nothing, which is why a pcall catches plainly -- and 'finishpcallk'
+** re-arms it from that saved slot on the way out. Restore the frame with the
+** slot zeroed, as every restore did before the carry, and the catch still
+** works but everything after the pcall raises bare.
+*/
+static void a_restored_pcall_still_guards_and_still_hands_back (void) {
+  static const char *src =
+    "local q = queue.declare('work', {cap = 2})\n"
+    "local ok2, caught = pcall(function()\n"
+    "  queue.wait({q})\n"
+    "  error('inner boom')\n"
+    "end)\n"
+    "error('outer: ' .. tostring(caught))\n";
+  dv_instance *a = dv_new(NULL), *b;
+  uint8_t *buf;
+  size_t need = 0, got = 0;
+  if (a == NULL || !park_on_queue(a, src)) { ok(0, "an agent parks in a pcall"); dv_free(a); return; }
+  if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0 ||
+      (buf = (uint8_t *)malloc(need)) == NULL) {
+    ok(0, "it snapshots"); dv_free(a); return;
+  }
+  dv_snapshot(a, NULL, buf, need, &got);
+  dv_free(a);
+  b = dv_new(NULL);
+  if (b == NULL) { ok(0, "a fresh instance"); free(buf); return; }
+  if (dv_restore(b, NULL, buf, got) != DV_OK) {
+    printf("      (%s)\n", dv_last_error(b));
+    ok(0, "it restores");
+    dv_free(b); free(buf); return;
+  }
+  {
+    dv_queue_id q = dv_queue_lookup(b, "work");
+    static const uint8_t one[] = { 0x01 };
+    dv_status st;
+    dv_queue_push(b, q, one, sizeof(one));
+    st = dv_resume(b, q);
+    eq_st(st, DV_ERROR, "the outer error still comes out");
+    {
+      const char *m = dv_last_error(b);
+      ok(m != NULL && strstr(m, "inner boom") != NULL,
+         "the restored pcall caught the inner error");
+      ok(m != NULL && strstr(m, "outer:") != NULL,
+         "and handed it to the code after it");
+      ok(m != NULL && strstr(m, "stack traceback") != NULL,
+         "and the handler the pcall displaced came back with the frame");
+      if (m != NULL && (strstr(m, "inner boom") == NULL ||
+                        strstr(m, "stack traceback") == NULL))
         printf("      (%s)\n", m);
     }
   }
@@ -2137,6 +2202,7 @@ int main (void) {
   garbage_is_refused_not_crashed_on();
   a_registered_prototype_shrinks_a_snapshot();
   a_restored_program_can_raise();
+  a_restored_pcall_still_guards_and_still_hands_back();
   a_woken_instance_is_still_budgeted();
 
   printf("\n%d checks, %d failed\n", checks, failures);

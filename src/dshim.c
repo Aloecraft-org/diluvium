@@ -94,7 +94,18 @@ LUA_API int diluvium_shim_frame (lua_State *co, int i, diluvium_frame *out) {
     out->k = ci->u.c.k;
     out->has_k = (ci->u.c.k != NULL) ? 1 : 0;
     out->ctx = cast(long, ci->u.c.ctx);
-    out->old_errfunc = cast(long, ci->u.c.old_errfunc);
+    /*
+    ** Only 'lua_pcallk' writes 'old_errfunc', so it is meaningful only on a
+    ** CIST_YPCALL frame; on any other C frame it holds whatever the last user
+    ** of that recycled CallInfo left there -- measured live as stale garbage
+    ** -- and passing that on would embed nondeterministic bytes in a snapshot.
+    ** Converted from the raw 'savestack' byte offset to a 1-based slot index,
+    ** which is the unit the rest of this struct speaks; 0 stays "none", and
+    ** unambiguously, because the core itself reads offset 0 that way.
+    */
+    out->old_errfunc = (out->is_ypcall && ci->u.c.old_errfunc != 0)
+        ? cast(long, ci->u.c.old_errfunc / (ptrdiff_t)sizeof(*co->stack.p)) + 1
+        : 0;
     out->pc = -1;
     out->is_vararg = 0;
     out->nextraargs = 0;
@@ -193,6 +204,13 @@ LUA_API int diluvium_shim_nyield (lua_State *co) {
   if (co->ci == &co->base_ci)
     return 0;
   return co->ci->u2.nyield;
+}
+
+
+LUA_API int diluvium_shim_errfunc (lua_State *co) {
+  if (co->errfunc == 0)
+    return 0;
+  return cast_int(co->errfunc / (ptrdiff_t)sizeof(*co->stack.p)) + 1;
 }
 
 
@@ -401,7 +419,8 @@ LUA_API int diluvium_shim_setslot (lua_State *co, int i, lua_State *L) {
 
 LUA_API int diluvium_shim_checkframes (lua_State *co,
                                        const diluvium_frame *frames, int n,
-                                       int nslots, int *out_frame) {
+                                       int nslots, int errfunc,
+                                       int *out_frame) {
   int i, cap;
   int prevfunc = 0;
   if (out_frame != NULL) *out_frame = -1;
@@ -409,6 +428,23 @@ LUA_API int diluvium_shim_checkframes (lua_State *co,
     return DILUVIUM_RES_NO_FRAMES;
   if (nslots < 1 || nslots > diluvium_shim_stacksize(co))
     return DILUVIUM_RES_STACK;
+  /*
+  ** The thread's error handler, before the frames because it is a property of
+  ** the thread. Slot 1 is excluded along with 0's "none": an offset of 0 *is*
+  ** slot 1, and the core reads it as no-handler, so a record naming slot 1
+  ** describes a state the VM cannot be in. The type check is the load-bearing
+  ** one -- 'luaG_errormsg' asserts the slot holds a function, and in a release
+  ** build a non-function there is "called" through '__call' resolution, whose
+  ** failure re-enters 'luaG_errormsg' with the handler still armed. Refused
+  ** here instead, per the S2 lesson: what the VM handles by asserting, this
+  ** layer handles by refusing.
+  */
+  if (errfunc != 0) {
+    if (errfunc < 2 || errfunc > nslots)
+      return DILUVIUM_RES_ERRFUNC;
+    if (!ttisfunction(s2v(co->stack.p + (errfunc - 1))))
+      return DILUVIUM_RES_ERRFUNC;
+  }
   cap = diluvium_shim_stackcapacity(co);
   for (i = 0; i < n; i++) {
     const diluvium_frame *f = &frames[i];
@@ -454,6 +490,22 @@ LUA_API int diluvium_shim_checkframes (lua_State *co,
            only the innermost frame may lack a continuation. */
         if (!f->has_k && i + 1 < n)
           return DILUVIUM_RES_NO_CONTINUATION;
+        /*
+        ** A saved error handler only exists on a yieldable pcall frame --
+        ** 'lua_pcallk' is the field's one writer -- and it names the handler
+        ** the pcall displaced, which was armed before this frame existed and
+        ** so lives below this frame's function. The slot must hold a function
+        ** for the thread-level check's reason: 'finishpcallk' will re-arm it
+        ** on the way out of the pcall.
+        */
+        if (f->old_errfunc != 0) {
+          if (!(f->callstatus & cast(unsigned long, CIST_YPCALL)))
+            return DILUVIUM_RES_ERRFUNC;
+          if (f->old_errfunc < 2 || f->old_errfunc >= f->func_index)
+            return DILUVIUM_RES_ERRFUNC;
+          if (!ttisfunction(s2v(co->stack.p + (f->old_errfunc - 1))))
+            return DILUVIUM_RES_ERRFUNC;
+        }
       }
       else {
         const Proto *p;
@@ -503,7 +555,7 @@ LUA_API int diluvium_shim_neededstack (const diluvium_frame *frames, int n) {
 
 LUA_API int diluvium_shim_restore (lua_State *co,
                                    const diluvium_frame *frames, int n,
-                                   lua_KFunction *ks, int nyield) {
+                                   lua_KFunction *ks, int nyield, int errfunc) {
   int i;
   if (frames == NULL || n < 1)
     return 0;
@@ -552,7 +604,14 @@ LUA_API int diluvium_shim_restore (lua_State *co,
     if (f->is_c) {
       ci->u.c.k = (ks != NULL) ? ks[i] : NULL;
       ci->u.c.ctx = cast(lua_KContext, f->ctx);
-      ci->u.c.old_errfunc = cast(ptrdiff_t, f->old_errfunc);
+      /* From the slot index back to the 'savestack' byte offset the core
+         speaks, the same mapping the funcidx reconstruction above uses. When
+         this was a blind cast of a field the record never carried, every
+         restored pcall frame held 0 and 'finishpcallk' disarmed the handler
+         chain on the way out (audit: old_errfunc). */
+      ci->u.c.old_errfunc = (f->old_errfunc != 0)
+          ? (char *)(co->stack.p + (f->old_errfunc - 1)) - (char *)co->stack.p
+          : 0;
     }
     else {
       const Proto *p = clLvalue(s2v(ci->func.p))->p;
@@ -570,6 +629,13 @@ LUA_API int diluvium_shim_restore (lua_State *co,
   ** handing back nothing.
   */
   co->ci->u2.nyield = nyield;
+  /* The thread's own handler, re-armed where it was. 'luaG_errormsg' consults
+     this at the throw point; leaving it 0 was the visible half of the
+     old_errfunc audit entry -- a restored program's error arrived correct but
+     with no traceback, because the handler the driver installed never ran. */
+  co->errfunc = (errfunc != 0)
+      ? (char *)(co->stack.p + (errfunc - 1)) - (char *)co->stack.p
+      : 0;
   co->status = LUA_YIELD;
   return 1;
 }
@@ -662,6 +728,9 @@ LUA_API const char *diluvium_shim_resreason (int code) {
     case DILUVIUM_RES_TBC:
       return "a to-be-closed slot is out of range, out of order, or holds "
              "nothing closable";
+    case DILUVIUM_RES_ERRFUNC:
+      return "an error-handler slot is out of range, on a frame that cannot "
+             "hold one, or holds no function";
     default:
       return "unknown reason";
   }

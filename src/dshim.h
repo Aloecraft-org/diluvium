@@ -62,7 +62,16 @@ typedef struct diluvium_frame {
   unsigned long callstatus;
   long ctx;              /* u.c.ctx, C frames only */
   int funcidx;           /* u2.funcidx */
-  long old_errfunc;      /* u.c.old_errfunc, C frames only */
+  /*
+  ** The error handler saved by 'lua_pcallk', as a 1-based slot index, 0 for
+  ** none -- reported only for CIST_YPCALL frames, because 'lua_pcallk' is the
+  ** field's only writer and on any other C frame it holds whatever the last
+  ** user of that recycled CallInfo left there. A slot index rather than the
+  ** raw 'savestack' offset for the same reason 'func_index' is one: the raw
+  ** value is bytes over 'sizeof(StackValue)', which differs between builds,
+  ** and a snapshot must not care.
+  */
+  long old_errfunc;
   /*
   ** The continuation itself, C frames only, NULL when there is none.
   **
@@ -124,6 +133,18 @@ LUA_API int diluvium_shim_status (lua_State *co);
 ** and handing back nothing.
 */
 LUA_API int diluvium_shim_nyield (lua_State *co);
+
+/*
+** The thread's active error handler, as a 1-based slot index, 0 for none.
+**
+** 'lua_pcallk' with an error function arms it and the throw path consults it:
+** 'luaG_errormsg' calls the function at this slot at the throw point, which is
+** where a traceback is attached while the frames it describes still exist. The
+** offset 0 is unambiguous as "none" because the core itself treats it so --
+** slot 1 can never hold an active handler. Reported in slot units for the same
+** reason 'diluvium_frame.old_errfunc' is.
+*/
+LUA_API int diluvium_shim_errfunc (lua_State *co);
 
 
 /*
@@ -305,6 +326,7 @@ LUA_API lua_KFunction diluvium_shim_contfunc (const char *name, size_t len);
 #define DILUVIUM_RES_NEXTRAARGS		11  /* a vararg count that cannot fit */
 #define DILUVIUM_RES_NO_CONTINUATION	12  /* a C frame below the top with no k */
 #define DILUVIUM_RES_TBC		13  /* a tbc index out of range or unordered */
+#define DILUVIUM_RES_ERRFUNC		14  /* an error-handler slot that cannot be */
 
 /*
 ** Check an array of 'n' frames against the thread they will be built into, with
@@ -317,10 +339,17 @@ LUA_API lua_KFunction diluvium_shim_contfunc (const char *name, size_t len);
 ** what the frames *say* about it: that 'func_index' holds a function, that
 ** 'is_c' agrees with what is actually there, that 'pc' is inside the prototype
 ** the function actually has.
+**
+** 'errfunc' is the thread's error-handler slot as 'diluvium_shim_errfunc'
+** reports it, checked here with the frames because the same things can be
+** wrong with it: out of range, or naming a slot with no function in it. A
+** refusal of the thread-level slot reports 'out_frame' as -1, since no frame
+** is at fault.
 */
 LUA_API int diluvium_shim_checkframes (lua_State *co,
                                        const diluvium_frame *frames, int n,
-                                       int nslots, int *out_frame);
+                                       int nslots, int errfunc,
+                                       int *out_frame);
 
 /* Slots the frames need reserved: the highest 'top_index' any of them names,
    and the highest register any Lua frame's prototype uses. A caller sizes the
@@ -356,10 +385,16 @@ LUA_API int diluvium_shim_setslot (lua_State *co, int i, lua_State *L);
 ** 'ks' holds the continuation for each C frame, NULL where there is none -- and
 ** a NULL for a C frame that is not the innermost is refused by 'checkframes',
 ** so this cannot build a chain that resume would walk into and find nothing.
+**
+** 'errfunc' re-arms the thread's error handler at the slot
+** 'diluvium_shim_errfunc' reported, 0 for none. Without it a restored
+** program's error is correct but bare: 'luaG_errormsg' finds no handler at
+** the throw point, so the message handler the driver installed never runs and
+** the traceback it would have attached does not exist (audit: old_errfunc).
 */
 LUA_API int diluvium_shim_restore (lua_State *co,
                                    const diluvium_frame *frames, int n,
-                                   lua_KFunction *ks, int nyield);
+                                   lua_KFunction *ks, int nyield, int errfunc);
 
 /*
 ** Re-open upvalue 'n' of the closure at 'idx' against slot 'slot' of 'co'.
