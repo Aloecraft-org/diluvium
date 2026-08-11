@@ -1157,6 +1157,7 @@ static int ds_hook_slot (lua_State *L, int idx, int i, void *ud) {
 ** but not impossible, and the failure is a severed alias rather than an error.
 */
 static const char DS_CAPTURED = 0;      /* weak set of threads encoded so far */
+static const char DS_TARGET = 0;        /* the one thread this save may capture */
 
 static void ds_captured (lua_State *L) {
   if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_CAPTURED) != LUA_TTABLE) {
@@ -1380,10 +1381,48 @@ static int ds_encodethread (lua_State *L, int abs) {
   if (co == L)
     return luaL_error(L, "snapshot: a thread cannot capture itself");
   /*
-  ** 10.7's preconditions, applied here rather than only at the top level,
-  ** because a thread can be reached from anywhere in the graph -- a supervisor's
-  ** table of children, for instance -- and each one has to be capturable in its
-  ** own right.
+  ** 10.7 precondition 4: a snapshot holds a single thread (audit finding 14).
+  ** The convention is that a supervisor *tells* an instance to hibernate and
+  ** the instance cleans up and parks somewhere capturable, so this is a check
+  ** a well-behaved program never trips -- and quietly capturing a nested
+  ** coroutine was worse than refusing one, because whether it restores as the
+  ** same coroutine is a promise nothing here tests or keeps.
+  **
+  ** Which thread is *the* thread depends on who is asking. 'diluvium_snap_save'
+  ** declares its target in DS_TARGET before the walk; anything else the graph
+  ** reaches is a nested coroutine. Driven without a declared target -- the
+  ** codec's own entry point -- the first thread the encode meets stands for
+  ** the target, and a second distinct one is the same shape by another door:
+  ** DS_CAPTURED is per-stream, so it being non-empty here means another thread
+  ** already went in. A *re-reference* to either never reaches this function,
+  ** because the codec's seen-table writes a backreference first.
+  */
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_TARGET) == LUA_TTHREAD) {
+    lua_State *target = lua_tothread(L, -1);
+    lua_pop(L, 1);
+    if (co != target)
+      return luaL_error(L, "snapshot: this thread is a nested coroutine, not "
+                           "the thread being captured -- a snapshot holds a "
+                           "single thread (10.7), so a program must let its "
+                           "coroutines finish, or drop them, before it "
+                           "hibernates");
+  }
+  else {
+    lua_pop(L, 1);
+    if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DS_CAPTURED) == LUA_TTABLE) {
+      lua_pushnil(L);
+      if (lua_next(L, -2) != 0)
+        return luaL_error(L, "snapshot: this thread is a nested coroutine, not "
+                             "the thread being captured -- a snapshot holds a "
+                             "single thread (10.7), so a program must let its "
+                             "coroutines finish, or drop them, before it "
+                             "hibernates");
+    }
+    lua_settop(L, base);
+  }
+  /*
+  ** The rest of 10.7's preconditions, applied to the one thread that may pass
+  ** the gate above: it has to be capturable in its own right.
   */
   code = diluvium_shim_capturable(co, &i);
   if (code != DILUVIUM_SNAP_OK)
@@ -1757,6 +1796,15 @@ static void ds_buildroot (lua_State *L, int thidx) {
 }
 
 
+/* The graph encode, shaped for 'lua_pcall': the root is at 1, the encoded
+   stream is the one result. Protection exists so DS_TARGET clears on every
+   exit path; see the caller. */
+static int ds_savegraph (lua_State *L) {
+  diluvium_msgpack_encode_graph(L, 1, diluvium_snap_hooks_for(L));
+  return 1;
+}
+
+
 LUA_API void diluvium_snap_save (lua_State *L, int thidx,
                                  const diluvium_snap_opts *opts) {
   int abs = lua_absindex(L, thidx);
@@ -1771,8 +1819,27 @@ LUA_API void diluvium_snap_save (lua_State *L, int thidx,
      fingerprint covers them -- and a host that named its own functions changes
      that fingerprint. */
   diluvium_snap_permanents(L);
+  /*
+  ** Declare the target, so the walk can tell *the* thread from a nested
+  ** coroutine it reaches (10.7 precondition 4; the check lives in
+  ** 'ds_encodethread'). The encode runs under protection so the slot clears
+  ** on the refusal path too: this function raises through to a caller, and a
+  ** target left behind by a refused save would make the next *directly
+  ** driven* encode in this state -- a test, typically -- apply the wrong
+  ** thread's identity check.
+  */
+  lua_pushvalue(L, abs);
+  lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_TARGET);
   ds_buildroot(L, abs);
-  diluvium_msgpack_encode_graph(L, -1, diluvium_snap_hooks_for(L));
+  lua_pushcfunction(L, ds_savegraph);
+  lua_insert(L, -2);
+  {
+    int rc = lua_pcall(L, 1, 1, 0);
+    lua_pushnil(L);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &DS_TARGET);
+    if (rc != LUA_OK)
+      lua_error(L);                     /* the message is on top; re-raise */
+  }
   /*
   ** The graph's index is taken from 'lua_gettop' rather than computed. Both
   ** guesses at computing it were wrong -- 'encode_graph' leaves its result above

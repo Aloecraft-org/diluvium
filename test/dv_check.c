@@ -2076,6 +2076,51 @@ static void a_restored_pcall_still_guards_and_still_hands_back (void) {
 
 
 /*
+** 10.7 precondition 4, from the ABI (audit finding 14): a program holding a
+** suspended coroutine at its park will not snapshot, and the refusal says
+** what to do about it. The second half is the design's other commitment --
+** the convention is that a supervisor tells an instance to hibernate and the
+** instance cleans up and parks capturable, so dropping the coroutine has to
+** be sufficient. A refusal a program cannot comply with would be a wall, not
+** a check.
+*/
+static void a_nested_coroutine_refuses_the_snapshot (void) {
+  static const char *src =
+    "local q = queue.declare('work', {cap = 2})\n"
+    "local inner = coroutine.create(function() coroutine.yield(1) end)\n"
+    "coroutine.resume(inner)\n"
+    "queue.wait({q})\n"      /* parked holding a suspended coroutine */
+    "inner = nil\n"
+    "queue.wait({q})\n";     /* parked having dropped it */
+  dv_instance *a = dv_new(NULL);
+  size_t need = 0;
+  if (a == NULL || !park_on_queue(a, src)) { ok(0, "an agent parks"); dv_free(a); return; }
+  ok(dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK,
+     "a program parked holding a suspended coroutine will not snapshot");
+  {
+    const char *m = dv_last_error(a);
+    ok(m != NULL && strstr(m, "nested coroutine") != NULL,
+       "and the refusal names the nested coroutine");
+    if (m != NULL && strstr(m, "nested coroutine") == NULL)
+      printf("      (%s)\n", m);
+  }
+  {
+    dv_queue_id q = dv_queue_lookup(a, "work");
+    static const uint8_t one[] = { 0x01 };
+    dv_queue_push(a, q, one, sizeof(one));
+    if (dv_resume(a, q) != DV_IDLE) {
+      ok(0, "the program parks again after dropping the coroutine");
+      dv_free(a);
+      return;
+    }
+    ok(dv_snapshot(a, NULL, NULL, 0, &need) == DV_OK && need > 0,
+       "and once it is dropped, the same program snapshots");
+  }
+  dv_free(a);
+}
+
+
+/*
 ** Finding 1: the test that never existed. The count hook was armed in exactly
 ** one place, inside 'dv_run', and a restored instance cannot reach 'dv_run',
 ** so a woken agent kept a readable budget and lost its enforcement -- the one
@@ -2203,6 +2248,7 @@ int main (void) {
   a_registered_prototype_shrinks_a_snapshot();
   a_restored_program_can_raise();
   a_restored_pcall_still_guards_and_still_hands_back();
+  a_nested_coroutine_refuses_the_snapshot();
   a_woken_instance_is_still_budgeted();
 
   printf("\n%d checks, %d failed\n", checks, failures);

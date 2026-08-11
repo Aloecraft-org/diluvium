@@ -525,6 +525,28 @@ static void a_shape_wrapper_is_refused (lua_State *L) {
 }
 
 
+static void a_nested_coroutine_is_refused_by_name (lua_State *L) {
+  /*
+  ** 10.7 precondition 4 (audit finding 14). Before the check existed this
+  ** encode ACCEPTED: the walk reached the child through the parent's local
+  ** and captured it as if that were a promise anything kept. The refusal has
+  ** to be by name, not merely a failure -- the audit's own instruction --
+  ** because a program told "cannot be captured" with no noun will not know to
+  ** let its coroutines finish.
+  */
+  expect_refusal(L,
+    "local parent = coroutine.create(function()\n"
+    "  local inner = coroutine.create(function() coroutine.yield(1) end)\n"
+    "  coroutine.resume(inner)\n"
+    "  coroutine.yield(2)\n"
+    "end)\n"
+    "coroutine.resume(parent)\n"
+    "return {thread = parent}\n",
+    "nested coroutine",
+    "a suspended coroutine held by the captured thread is refused by name");
+}
+
+
 static int protected_encode_bare (lua_State *L) {
   diluvium_msgpack_encode_graph(L, 1, NULL);
   return 1;
@@ -2331,6 +2353,7 @@ int main (void) {
 
   printf("\n=== snapshot graph: refusals ===\n");
   light_userdata_is_refused(L);
+  a_nested_coroutine_is_refused_by_name(L);
   a_shape_wrapper_is_refused(L);
   userdata_is_refused_by_name(L);
   a_function_is_refused_without_hooks(L);

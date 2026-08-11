@@ -668,11 +668,12 @@ log. The intended end state is that it has no users: a program that needs the ti
 its host, which is also what makes the answer fakeable and therefore what makes replay
 work. `doc/Determinism.md` is where that goes.
 
-**Two smaller edges.** Rebinding an endpoint token whose queue was destroyed returns
+**One smaller edge.** Rebinding an endpoint token whose queue was destroyed returns
 the destroyed handle and poisons the token permanently — do not `destroy` a bound
-endpoint queue and re-bind it. And §10.7's precondition that a snapshot capture involve
-a single thread is documented but unenforced: nested coroutines are captured rather
-than refused.
+endpoint queue and re-bind it. (§10.7's single-thread precondition, which used to sit
+in this paragraph as documented-but-unenforced, is now enforced: a program parked
+holding a suspended coroutine is refused a snapshot, by name, and snapshots once it
+lets the coroutine finish or drops it.)
 
 **No decimals.** Ext `0x01` is reserved for decQuad and unimplemented, so `1.23d`-style
 literals do not exist and money is not a solved problem here yet. Numbers are Lua
