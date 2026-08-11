@@ -171,6 +171,41 @@ and `make run` only checks that the process did not crash. That is the same defe
 the audit calls "a check that reports success without checking" — worth fixing
 before this example is trusted to gate anything.
 
+## The fixture can fail now
+
+`swarmd` returns non-zero when the run does not demonstrate what this README says
+it does, so `make run` is a test rather than a smoke check. It asserts what the
+runtime did, not what the scenario looked like: instances created and all
+destroyed, several live at once, a pair matched, the runaway stopped by its budget,
+and a widening grant refused. Truncate the run (`./swarmd 12`) and it exits 1
+naming what did not happen.
+
+It counts the coordinator's own log lines rather than reaching inside the program,
+because the host is supposed to know nothing about matchmaking and a fixture that
+inspected it would be checking something other than what ships.
+
+## Labels, and what allocating one found
+
+The coordinator mints a label in `admit()` — the smallest real form of factor IV's
+publisher seam. Clients arrive with names they chose; a label is what this swarm
+issued. `forget()` releases it with the instance, so a label cannot outlive its
+handler.
+
+Allocating one immediately found a bug that had nothing to do with labels.
+`pending` is a FIFO popped when a `spawned` event arrives, and **a denied spawn
+leaves an entry no `spawned` will ever pop** — so the next successful spawn is
+attributed to the wrong client. `greedy`, the client whose spawn is deliberately
+refused, is last in the arrival table, which hid it completely.
+
+The fix pops the front on `denied`, and that fix is worth reading as a warning
+rather than a solution: popping the front is *order-correlation*, and
+order-correlation is precisely what breaks when a request can be refused. It is
+right here only because one spawn is outstanding at a time and every `denied` in
+this toy belongs to a spawn. The real answer is a correlation token in the request
+that the event echoes — which is the same conclusion `doc/Determinism.md` reaches
+for hostcalls, from the other direction. §9.2's events do not carry one, and a real
+coordinator will need that before it runs more than one spawn at a time.
+
 ## What is not here, and what it would take
 
 **No hibernation.** Every instance in this example is resident, which is release

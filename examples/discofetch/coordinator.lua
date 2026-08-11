@@ -44,6 +44,12 @@ say(('got the handler template (%d bytes)'):format(#HANDLER_SRC))
 -- which instance is theirs. No candidates, no addresses, no session data -- those
 -- live in the handler and never come here.
 local waiting  = {}    -- want -> { client = name, id = instance }
+-- Factor IV's publisher seam, in the smallest form that is still real: the
+-- coordinator allocates a label, not the client and not the host. Clients arrive
+-- with names they chose; a label is what this swarm issued, and the question the
+-- toy exists to answer is what happens to one when its handler dies.
+local labels   = {}    -- instance id -> label issued to it
+local nextlabel = 0
 local pending  = {}    -- spawn order, so a 'spawned' event can be attributed
 local byid     = {}    -- instance id -> client name
 local idof     = {}    -- client name -> instance id
@@ -76,9 +82,9 @@ answer once traffic has to flow both ways -- see the README.
 with a quote or a newline in it cannot break out of the string and become code.
 Without it this function would be an injection hole with extra steps.
 ]]
-local function handler_for (name, want, nat)
+local function handler_for (name, want, nat, label)
   -- One pass, deliberately: see the README.
-  local subs = {CLIENT = name, WANT = want, NAT = nat}
+  local subs = {CLIENT = name, WANT = want, NAT = nat, LABEL = label}
   return (HANDLER_SRC:gsub('@(%u+)@', function (k)
     local v = subs[k]
     if v == nil then return nil end     -- leave unknown placeholders alone
@@ -87,11 +93,14 @@ local function handler_for (name, want, nat)
 end
 
 local function admit (c)
-  say(('%s wants %s (nat %s) -> spawning a handler'):format(c.client, c.want, c.nat))
+  nextlabel = nextlabel + 1
+  c.label = ('dv-%04d'):format(nextlabel)
+  say(('%s wants %s (nat %s) -> spawning a handler as %s'):format(
+      c.client, c.want, c.nat, c.label))
   pending[#pending + 1] = c
   queue.push(sys, {
     op   = 'spawn',
-    code = handler_for(c.client, c.want, c.nat),
+    code = handler_for(c.client, c.want, c.nat, c.label),
     --[[
     Narrower again: one queue name, for this client only, and *no* lifecycle. A
     handler therefore cannot spawn anything -- it may declare system/lifecycle and
@@ -115,6 +124,10 @@ end
 -- All state for one instance; every lifecycle event that ends one runs it.
 local function forget (id)
   local name = byid[id]
+  -- The label goes when the instance does. A label outliving its handler is the
+  -- publisher-seam version of the stale-id bug this function was written for.
+  if labels[id] then say(('label %s released with handler %d'):format(labels[id], id)) end
+  labels[id] = nil
   byid[id] = nil
   if name then idof[name] = nil end
   for k, v in pairs(waiting) do if v.id == id then waiting[k] = nil end end
@@ -136,7 +149,8 @@ while true do
       if c then
         byid[m.id] = c.client
         idof[c.client] = m.id
-        say(('handler %d is %s'):format(m.id, c.client))
+        labels[m.id] = c.label
+        say(('handler %d is %s, label %s'):format(m.id, c.client, c.label))
       end
 
     elseif m.event == 'exceeded' then
@@ -155,7 +169,22 @@ while true do
       forget(m.id)
 
     elseif m.event == 'denied' then
-      say(('a request was denied: %s'):format(tostring(m.detail)))
+      -- A denied spawn leaves a 'pending' entry that no 'spawned' will ever pop,
+      -- so without this the *next* successful spawn is attributed to the wrong
+      -- client. 'greedy' is last in the arrival table, which hid it.
+      --
+      -- Popping the front is order-correlation, and order-correlation is exactly
+      -- what breaks here: it is right only while one request is outstanding and
+      -- every 'denied' belongs to a spawn. The real answer is the one
+      -- doc/Determinism.md reaches for hostcalls -- a correlation token in the
+      -- request, echoed in the event -- and 9.2's events do not carry one.
+      local c = table.remove(pending, 1)
+      if c then
+        say(('a spawn was denied (%s); label %s was never issued'):format(
+            tostring(m.detail), tostring(c.label)))
+      else
+        say(('a request was denied: %s'):format(tostring(m.detail)))
+      end
 
     elseif m.event == 'throttled' then
       -- 9.5's rate limit as a rate rather than a filter: the request stays queued

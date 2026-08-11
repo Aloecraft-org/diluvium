@@ -39,6 +39,24 @@
 
 /* How many messages may wait for a non-resident instance, and how long a queue
    name may be. Bounded on purpose: see dvs.h on 'dvs_push'. */
+/*
+** The largest lifecycle request 'drain' will read, which is in practice the
+** largest program a spawn can carry.
+**
+** It was 8192 and undocumented, which is a poor combination for a design whose
+** 9.1 says code arrives as a message: a request over the limit is answered with
+** "the request is too large" at run time and nothing warns before that.
+** examples/discofetch's coordinator reached 7791 bytes as a toy, so four lines
+** of comment were enough to push a spawn over and bring the swarm up with one
+** instance instead of eight -- which is how this number got noticed at all.
+**
+** Two of these are live at once in the worst case (this and 'do_spawn''s copy),
+** so it is bounded by what is reasonable on a stack rather than by what a
+** program might want. A host that needs more than this should be sending a
+** reference to code rather than the code.
+*/
+#define DVS_MAX_REQUEST		32768
+
 #define DVS_MAX_PENDING		16
 #define DVS_MAX_QNAME		64
 
@@ -987,7 +1005,7 @@ static void do_spawn (dvs_swarm *sw, dvs_slot *parent, const char *msg,
                       size_t len) {
   char caps[DVS_MAX_CAPS][DVS_MAX_CAP_LEN];
   const char *capv[DVS_MAX_CAPS];
-  char code[8192];
+  char code[DVS_MAX_REQUEST];
   size_t code_len = 0;
   int ncaps, i;
   uint64_t insns = 0, mem = 0;
@@ -1198,7 +1216,7 @@ static void drain (dvs_swarm *sw, dvs_slot *sl) {
   if (!dvs_holds(sw, sl->id, DVS_CAP_LIFECYCLE))
     return;
   for (;;) {
-    uint8_t buf[8192];
+    uint8_t buf[DVS_MAX_REQUEST];
     size_t n = 0;
     char op[32];
     {

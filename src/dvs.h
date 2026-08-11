@@ -223,6 +223,22 @@ void dvs_allow_hibernation (dvs_swarm *sw, int allow);
 */
 void dvs_allow_unsafe_stdlib (dvs_swarm *sw, int allow);
 
+
+/*
+** The largest lifecycle request the swarm layer will read: 32 KB.
+**
+** In practice this is the largest program a spawn can carry, since 9.1 says code
+** arrives as a message and a spawn request holds the source. A request over it is
+** answered with a "denied" event whose detail is "the request is too large" --
+** at run time, with nothing warning beforehand, so a program that grows past it
+** fails by coming up with fewer instances than it should.
+**
+** If you generate programs at runtime, check their size against this before
+** pushing them, and treat anything approaching it as a signal to send a
+** reference to code rather than the code.
+*/
+#define DVS_MAX_REQUEST_BYTES	32768
+
 /* Swap an instance out to the cache. It must be parked; a running or already
    non-resident instance is refused rather than forced. Refused outright unless
    'dvs_allow_hibernation' was called -- see above. */

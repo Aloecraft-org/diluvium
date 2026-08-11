@@ -1,7 +1,8 @@
 --[[
 handler.lua -- one client's session, and nothing else's.
 
-This is a *template*. The coordinator substitutes @CLIENT@, @WANT@ and @NAT@ and
+This is a *template*. The coordinator substitutes @CLIENT@, @WANT@, @NAT@,
+@LABEL@ and
 spawns the result, so every client gets a program written for it. Generating a
 program per unit of work is the ordinary shape here rather than a trick -- 9.1 is
 built around a system whose programs are produced and rewritten at runtime.
@@ -23,6 +24,9 @@ What matters about this file is what it does NOT have:
 local CLIENT = @CLIENT@
 local WANT   = @WANT@
 local NAT    = @NAT@
+-- Issued by the coordinator, not chosen by the client. The handler never learns
+-- how it was allocated, which is the property a real nameserver has to keep.
+local LABEL  = @LABEL@
 
 local log   = queue.declare('log', {capacity = 8,  exported = true})
 -- 6.6 reserves 'outbox' per instance and exports it, so this needs no declare.

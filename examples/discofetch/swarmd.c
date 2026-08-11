@@ -82,6 +82,21 @@ static int host_drive (void *ud, dvs_id id, dv_instance *inst, void *ctx) {
 static int total_created = 0, total_destroyed = 0, peak_live = 0;
 
 /*
+** What the run is supposed to demonstrate, counted so it can be checked.
+**
+** Until this existed 'main' returned 0 whatever happened, so `make run` -- which
+** CI calls -- proved only that the process did not segfault. Four bugs found by
+** review in 2026-08 were all invisible to it, which is the audit's "reports
+** success without checking" in the fixture that is meant to gate real work.
+**
+** Counted by scanning the coordinator's own log lines rather than by
+** instrumenting it: the host is supposed to know nothing about matchmaking, and
+** a fixture that reached inside the program to check on it would be checking
+** something other than what ships.
+*/
+static int saw_match = 0, saw_budget_stop = 0, saw_denied_grant = 0;
+
+/*
 ** Whatever the host wants to keep alongside an instance -- a socket, a task
 ** handle, a deadline. Here it is just the id, so there is something to free.
 **
@@ -413,8 +428,13 @@ int main (int argc, char **argv) {
       if (q != 0) {
         while (dv_queue_pop(inst, q, buf, sizeof(buf), &n) == DV_OK) {
           char line[512];
-          if (mp_string(buf, n, line, sizeof(line)))
+          if (mp_string(buf, n, line, sizeof(line))) {
             printf("  [%u] %s\n", (unsigned)id, line);
+            if (strstr(line, "MATCH #") != NULL) saw_match++;
+            if (strstr(line, "blew its budget") != NULL) saw_budget_stop++;
+            if (strstr(line, "denied") != NULL &&
+                strstr(line, "queue:*") != NULL) saw_denied_grant++;
+          }
         }
       }
 
@@ -494,5 +514,38 @@ int main (int argc, char **argv) {
   free(sup_src);
   free(coord_src);
   free(handler_src);
+
+  /*
+  ** The invariants, and a non-zero exit when one fails.
+  **
+  ** Deliberately about what the README claims this example shows, rather than
+  ** about counts that would move whenever the arrival table is edited. A
+  ** stricter check would be a check on the scenario; these are checks on the
+  ** runtime behaviour the scenario exists to demonstrate.
+  */
+  {
+    int bad = 0;
+    printf("\n=== checks ===\n");
+#define CHECK(cond, what) \
+    do { \
+      printf("  [%s] %s\n", (cond) ? "PASS" : "FAIL", (what)); \
+      if (!(cond)) bad = 1; \
+    } while (0)
+    CHECK(total_created > 1, "more than the root instance was created");
+    CHECK(total_destroyed == total_created,
+          "every instance created was destroyed, so nothing leaked");
+    CHECK(peak_live > 1, "several instances were live at once");
+    CHECK(saw_match >= 1, "at least one pair was matched");
+    CHECK(saw_budget_stop >= 1,
+          "the runaway handler was stopped by its instruction budget");
+    CHECK(saw_denied_grant >= 1,
+          "a spawn asking to widen a grant was refused (9.3)");
+#undef CHECK
+    if (bad) {
+      printf("\nthis run did not demonstrate what the README says it does\n");
+      return 1;
+    }
+    printf("  all checks passed\n");
+  }
   return 0;
 }
