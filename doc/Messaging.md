@@ -996,10 +996,13 @@ carries its resumption state explicitly — `u.c.k`, `u.c.ctx`, `u.c.funcidx`,
 can already resolve. Hibernating across `pcall` is therefore feasible in
 principle, unlike a comparator whose state is genuinely on the machine stack.
 
-**It is out of scope for M6 anyway**, because restoring `old_errfunc` and the
-error-handler chain correctly is fiddly and nothing needs it yet. The wording is
-"C frames without continuations" so the door stays open and nobody later concludes
-it was ruled out on principle.
+**It was out of scope for M6**, because restoring `old_errfunc` and the
+error-handler chain correctly is fiddly and nothing needed it then. It is in now:
+the thread record carries the thread's error-handler slot and each pcall frame's
+saved one (`DS_THREAD_VERSION` 2), so a restored program's error runs the message
+handler at the throw point and carries a traceback, and a restored `pcall` re-arms
+the handler it displaced on the way out. The wording below stays "C frames without
+continuations" because that is still the boundary.
 
 **Implementation requirement:** before capturing, walk the `CallInfo` chain and
 refuse if any frame other than the top one has `CIST_C` set and a null
@@ -2759,18 +2762,18 @@ Grouped, deduplicated, and ordered by what a caller would hit first.
 
 | Defect | Consequence |
 |---|---|
-| The thread record drops `u2.funcidx` (`dsnap.c`) | The worst of the set. Every parked instance carries a `CIST_YPCALL` driver frame from `dtask.c`, so **any error raised in any restored program** unwinds with `funcidx == 0` — the stack base. `luaF_close` then closes every to-be-closed slot and open upvalue in the thread; with no tbc at all it reads the uninitialised `delta` padding of slot 0 and writes the error object over the driver's own function slot. Memory corruption on the wake-then-error path. |
-| The snapshot fuzzer has no effective field-validation coverage | The payload digest added during M6 refuses every mutant *before* the field checks it was built to exercise, so §10.10's "0 crashes" is currently hollow. Self-inflicted, in the same change that fixed a real gap. |
-| No host-identity stamp in the swarm layer | `dvs_hibernate` and `dvs_wake` pass NULL both ways, so §10.10's "a foreign stamp is refused" is not true of the swarm's own snapshots. |
+| ~~The thread record drops `u2.funcidx` (`dsnap.c`)~~ **Fixed.** | The worst of the set. Every parked instance carries a `CIST_YPCALL` driver frame from `dtask.c`, so **any error raised in any restored program** unwound with `funcidx == 0` — the stack base. `luaF_close` then closed every to-be-closed slot and open upvalue in the thread; with no tbc at all it read the uninitialised `delta` padding of slot 0 and wrote the error object over the driver's own function slot. Memory corruption on the wake-then-error path. Reconstructed at restore for every `CIST_YPCALL` frame, and `a_restored_program_can_raise` is the test that had never existed. `old_errfunc` followed in the same release: the record now carries the error-handler slots too, so the restored error also gets its traceback. |
+| ~~The snapshot fuzzer has no effective field-validation coverage~~ **Fixed, and it found two.** | The payload digest added during M6 refused every mutant *before* the field checks it was built to exercise, so §10.10's "0 crashes" was hollow. The fuzzer re-seals the digest after mutating; the mutants that then reached depth found S2 (fixed, and the `KNOWN` set is empty). |
+| ~~No host-identity stamp in the swarm layer~~ **Fixed.** | `dvs_hibernate` and `dvs_wake` passed NULL both ways, so §10.10's "a foreign stamp is refused" was not true of the swarm's own snapshots. `dvs_set_host_identity` is where a swarm holds one now, and all four stamp quadrants are asserted. |
 | §10.2's "a parked agent has no C frame" is false | The wait chain is two C frames carrying continuations. The conclusion (it is capturable) still holds; the reason given for it does not. |
-| §10.7's precondition 4 ("single thread") has no implementing code | Nested coroutines are captured rather than refused. |
+| ~~§10.7's precondition 4 ("single thread") has no implementing code~~ **Enforced.** | Nested coroutines were captured rather than refused. A program parked holding a suspended coroutine is now refused by name, and snapshots once it lets the coroutine finish or drops it. |
 
 **The swarm layer.**
 
 | Defect | Consequence |
 |---|---|
 | A spawn request's budget is silently ignored | A child spawned the way §9.1 documents runs **unbudgeted**, and a guest can escape its own budget through a child and hang `dvs_step`. |
-| A woken instance has no instruction budget | The count hook is never re-armed, so waking launders a budget away. |
+| ~~A woken instance has no instruction budget~~ **Fixed.** | The count hook was never re-armed, so waking laundered a budget away. `dv_restore` arms it now, and the header carries `insn_used`, so the budget is the program's rather than one residency's. |
 | A clean exit is reported as `"faulted"` | `dv_last_error` is sticky, so a supervisor restarts healthy children. Certain to occur, not a corner case. |
 | `do_kill` narrows a 64-bit id to 32 bits | Destroys a different live instance instead of refusing. `do_hibernate`'s self-versus-target guard compares the same truncated value. |
 | `do_spawn` truncates code at the first NUL | The child runs a prefix and it is reported as a successful spawn. Harmless for source, silent corruption for bytecode. |
@@ -2784,6 +2787,7 @@ Grouped, deduplicated, and ordered by what a caller would hit first.
 | ~~References can still be forged, two ways~~ **Both fixed.** | The trust gate added earlier was incomplete, in two places. Laundering was: decode `\xd4\x02` plus a name into an inert opaque ext, push it onto a queue, and let the trusted delivery path decode it again into a genuine reference. Closed at the encoder — a reserved ext code cannot be written to the wire at all — so the bytes never leave the state that made them up (`the_laundering_route_is_closed`). The second was the registry: the "hidden" metatable is reachable through `debug.getmetatable`, and everything else through `debug.getregistry`, so a guest holding one real reference could mint one to any peer name it could guess. **Closed by narrowing the `debug` library for instances**, which is what profile B asked for — no registry-side scheme survives while that library is open, including the weak-keyed provenance set the skeptic preferred, because the guest reaches that table too and adds itself to it. §7.3's unforgeability claim is true of an instance again, and false again for one created with `DV_FLAG_UNSAFE_DEBUG`. |
 | ~~A guest cannot pass a reference in a message~~ **Fixed.** | It encoded as a plain one-element array, so §7.4's store-and-forward did not round-trip the thing it forwards, and a router could use an endpoint but never hand one on. The resolver seam (§4.2) already had an `encode` hook for exactly this and nothing implemented it. Now: a table carrying a metatable is offered to the resolver before it is encoded as a map or an array, and `dendpoint.c` returns the same ext `0x02` and the same payload it would resolve. Asserted on the wire and end to end through two instances (`a_reference_survives_being_forwarded`). The hook's contract changed while doing it — it returns a code and a payload rather than appending to the encode in progress, so no registry slot holds a pointer into a buffer that an error mid-encode unwinds past. |
 | Rebinding a destroyed token returns the destroyed handle | And poisons the token permanently. |
+| ~~An endpoint reference does not survive a hibernate~~ **Fixed.** | The reference metatable is the permanent `dendpoint.refmt`, so identity survives; `bind` adopts an endpoint queue no token claims, which is how a woken program re-binds its own endpoint and how the host's drain path comes back; and the refusal for a genuine non-reference now describes what it checks. |
 | ~~A guest can mint reserved ext codes~~ **Fixed.** | The encoder trusted the wrapper's `code` field. `msgpack.ext` refuses a reserved code, but the wrapper it returns is an ordinary table: `w = msgpack.ext(0x10, s)` and then `w[3] = 0x02` produced exactly what the constructor had just refused. Verified by hand before fixing — the bytes came out `d4 02`. The check now runs where the bytes are written, because a constructor cannot vouch for a value that stays mutable. This is also what closes the laundering route above, which is why a finding filed as tidiness turned out to be the security one. |
 | The malformed-input assertions in `test_msgpack.lua` cannot fail | `pcall` never returns nil, so the comparison is against a value that cannot occur. |
 
@@ -2812,8 +2816,9 @@ sidesteps two of the six blocking findings without any change to the runtime.
 The four items that had to be fixed for it — the faulted-versus-exited confusion,
 `do_kill`'s truncation, the NUL truncation if bytecode is ever spawned, and
 `kill_subtree`'s recursion — **are fixed**, and so are four things beyond that list:
-§9.1's documented nested `budget` now reaches the child, hibernation is refused
-unless a host asks for it by name (`dvs_allow_hibernation`), a reference now survives
+§9.1's documented nested `budget` now reaches the child, hibernation was refused
+unless a host asked for it by name while its defects were open (`dvs_allow_hibernation`,
+now an opt-out — the block closed; see profile C), a reference now survives
 being forwarded in a message, and reserved ext codes are refused on encode, which
 closes one of the two forgery routes. What a deployment on this profile is accepting
 is written out for a reader who has not read this document, under **Known issues** in
@@ -2900,17 +2905,19 @@ looked at, which is why it took writing a release note that claimed profile B wa
 reachable to notice. The evidence is `doc/audit/M0-M7.md` under **Found since the
 sweep**, S1.
 
-**Profile C — hibernation at scale.** Adds `u2.funcidx`, real field-validation
-coverage, the host-identity stamp, budget re-arming on wake, and endpoint survival
-across a snapshot. Ten of the ~24 defects live here, including three of the six
-blocking ones. A deployment that keeps agent state at the application level and
-spawns fresh instances per unit of work never enters this profile — and pays little
-for it, since `dv_new` plus `dv_load` of a small chunk is comparable to `dv_new` plus
-`dv_restore` of a value graph.
+**Profile C — hibernation at scale. Done, so it has stopped being a profile.**
+It added `u2.funcidx`, real field-validation coverage, the host-identity stamp,
+budget re-arming on wake, and endpoint survival across a snapshot; ten of the ~24
+defects lived here, including three of the six blocking ones. All of them are
+fixed, S2 with them, and the fuzzer's `KNOWN` set is empty, so hibernation is on
+by default and `dvs_allow_hibernation` is a host's opt-out rather than the
+capability's gate. `doc/Hibernate.md` is the record of the close-out. A deployment
+that keeps agent state at the application level and spawns fresh instances per
+unit of work still never hibernates anything — that is a way of using the system,
+no longer a defect boundary with a name.
 
-The order is deliberate: A is close, B is a design decision plus its consequences,
-and C is the largest block and the most avoidable. A project that does not need C
-should say so explicitly rather than carry it as unfinished work.
+The order was deliberate: A was close, B was a design decision plus its
+consequences, and C was the largest block. All three are done.
 
 ### 18.3 The checklist
 
@@ -2918,10 +2925,10 @@ Every open item, in the order a session should pick them up, with the audit find
 number (`doc/audit/M0-M7.md`) beside each. Nothing here is a survey: each line is
 something a session can finish, and the ones with a design decision in them say so.
 
-**Profiles A and B are done, and so is everything that was on neither.** Twenty-nine
-of the thirty-five confirmed findings are fixed. What is left from the audit is
-most of profile C — findings 1, 5, 12, 14 and 25, with 0 now fixed — plus one decision that
-the audit never raised because nothing in this document had decided it.
+**Every profile is done.** All thirty-five confirmed findings are fixed, S2 from
+*Found since the sweep* with them. What follows is the record of how the last
+block — profile C, findings 0, 1, 5, 12, 14 and 25 — was closed, plus the one item
+that remains open because it was never the audit's: the hostcall.
 
 **Sealing is decided and done** (audit S1). An instance is sealed by default;
 `DV_FLAG_UNSAFE_STDLIB` undoes it, flags attenuate through a spawn, and all three
@@ -2946,27 +2953,18 @@ What it leaves behind is the real item:
       clock has only `DV_FLAG_UNSAFE_STDLIB`, which is why that flag is scaffolding
       rather than a configuration.
 
-**The question, and it is the next release's headline.** Does this project support
-hibernation at scale? 18.2 says a deployment that keeps agent state at the
-application level and spawns fresh instances per unit of work never enters profile C
-and pays little for it. If that is the answer, say so here and strike the six —
-`dv_snapshot` and `dv_restore` stay as they are, documented as a single-residency
-facility, and `dvs_allow_hibernation` stays off with the reason written beside it.
-If the answer is yes, the six below are the work, and finding 0 is first because it
-is the reason the switch exists.
+**The question is answered: yes, this project supports hibernation at scale.**
+The six below are done, hibernation is on by default, and `dvs_allow_hibernation`
+is a host's opt-out. The weighing note that stood here — finding 0 reachable
+through the instance ABI while the swarm's switch said "off", a true statement
+about one layer and a false one about the stack — resolved with the block: the
+corruption path is closed, `dv_restore`'s refusal-by-validation is the whole
+contract again, and `dv.h` carries the reasoning where 18.3 asked for a gate or a
+reason.
 
-One thing to weigh before answering, which was not clear when 18.2 was written:
-**finding 0 is reachable through the instance ABI, which has no switch.**
-`dvs_allow_hibernation` gates the swarm layer, but `dv_restore` is a public call a
-host may make directly, and finding 0 says any error raised in any restored program
-unwinds from the stack base. So "hibernation is off" is true of the swarm layer and
-not of the ABI underneath it, and a release that answers no should probably also
-refuse `dv_restore` by default rather than only documenting it.
-
-**Profile C — hibernation at scale.** `doc/Hibernate.md` is the working brief for
-this block: it carries the reproduction for each open item, the two instruments that
-now exist, and the three traps this work has already sprung. The list below is the
-index; that file is what to read before starting.
+**Profile C — hibernation at scale. Closed.** `doc/Hibernate.md` was the working
+brief for this block and is now its record: the reproductions, the two
+instruments, and the traps. The list below is the index of what was done.
 
 - [x] **Done.** Carry `u2.funcidx` in the thread record (**0**). Eleven frame words instead of
       ten, or reconstruct it in `ds_buildthread` for every `CIST_YPCALL` frame as the
@@ -2980,23 +2978,34 @@ index; that file is what to read before starting.
       would need the format bump; §10.2 already calls it out of scope, so it is a
       separate decision and a smaller one — a missing traceback rather than memory
       corruption.
-- [ ] Re-arm the instruction budget on wake, and carry `insn_used` through the
-      snapshot (**1**). The count hook is armed in exactly one place, inside
-      `dv_run`, and a woken instance can never re-enter it (`dv_run` refuses a
-      started instance), so this needs a call inside `dv_restore` or a new `dv_`
-      entry point. Without carrying `insn_used`, a budget becomes per-residency.
-- [x] **Done, and it found two.** The snapshot fuzzer has real field-validation
-      coverage (**5**): it re-seals the payload digest after mutating, so mutants
-      reach the layer the digest used to refuse them in front of. 409 refused / 20
-      accepted / 0 crashed became **335 / 92 / 2**, and the two crashes are audit
-      **S2** — malformed snapshots that abort on a `lua_assert` instead of being
-      refused, which means a release build with assertions compiled out takes the
-      same input somewhere undefined. Fixing those is the next item here.
-- [ ] Stamp host identity on the swarm layer's own snapshots (**25**).
-- [ ] Make an endpoint reference survive a snapshot (**12**), and fix the false
-      statement `bind` makes when it does not.
-- [ ] Enforce §10.7's precondition 4, or strike it (**14**). Nested coroutines are
-      captured rather than refused, and one of those two is the answer.
+- [x] **Done.** Re-arm the instruction budget on wake, and carry `insn_used` through
+      the snapshot (**1**). `dv_restore` arms the hook -- the ordering is forced,
+      since `dv_set_budget` refuses a started instance, so set-budget-then-restore
+      is the only order a host can write -- and the header carries `insn_used`
+      (`DILUVIUM_SNAP_FORMAT` 2), readable without a restore via
+      `diluvium_snap_headerusage`. `a_woken_instance_is_still_budgeted` wakes a
+      budgeted instance into the loop 9.4 exists for and asserts both residencies
+      charge one limit. `old_errfunc` rode the same format bump, as
+      `doc/Hibernate.md` directed, so the invalidation was paid once.
+- [x] **Done, and it found two — which are now also fixed.** The snapshot fuzzer
+      has real field-validation coverage (**5**): it re-seals the payload digest
+      after mutating, so mutants reach the layer the digest used to refuse them in
+      front of. 409 refused / 20 accepted / 0 crashed became **335 / 92 / 2**, and
+      the two crashes were audit **S2** — a crafted to-be-closed list naming a
+      non-closable slot reached the raise inside `luaF_newtbcupval`, escaping the
+      lock convention. `diluvium_shim_settbc` refuses it first now; the full
+      corpus runs 0 crashed and the fuzzer's `KNOWN` set is empty.
+- [x] **Done.** Stamp host identity on the swarm layer's own snapshots (**25**).
+      `dvs_set_host_identity`, read at hibernate and at wake; all four stamp
+      quadrants asserted in one swarm by moving the identity under the cache.
+- [x] **Done.** Make an endpoint reference survive a snapshot (**12**), and fix the
+      false statement `bind` makes when it does not. The reference metatable is
+      the permanent `dendpoint.refmt`; `bind` adopts an endpoint queue no token
+      claims, which is how a woken program re-binds its own endpoint and how the
+      host's drain path comes back; and the refusal now describes what it checks.
+- [x] **Done: enforced.** §10.7's precondition 4 (**14**). A nested coroutine is
+      refused by name, with the design's other commitment held to by test -- the
+      same program snapshots once it drops the coroutine.
 
 **Owed, and it has now failed once.** A workflow that runs `make verify_wasm`. Its
 four wrong file names and its swallowed exit status are fixed (**29**), and it was

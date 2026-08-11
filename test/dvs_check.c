@@ -122,31 +122,28 @@ static dvs_swarm *swarm_with (uint32_t rate) {
 
 
 /*
-** A swarm with hibernation switched on.
-**
-** It is off by default in this release, because 18.1's snapshot defect makes the
-** wake-then-error path corrupt memory. The tests below still turn it on, so the
-** machinery does not rot while it is disabled -- what they must NOT do is stop
-** asserting that it is off by default, which is the point of
-** 'hibernation_is_off_unless_asked_for'.
+** A swarm with hibernation on. It is on by default since the profile-C block
+** closed (doc/Hibernate.md), so this is 'swarm_with' under the name the
+** hibernation tests were written against -- kept so the call sites still say
+** what they rely on, not how it comes about.
 */
 static dvs_swarm *swarm_with_hibernation (uint32_t rate) {
-  dvs_swarm *sw = swarm_with(rate);
-  if (sw != NULL)
-    dvs_allow_hibernation(sw, 1);
-  return sw;
+  return swarm_with(rate);
 }
 
 
 /*
-** Off by default, refused by name, and the refusal says why.
+** On by default, and the opt-out refuses by name.
 **
-** 18.2's profile A depends on this: a defect that cannot be reached is worth more
-** than one that is merely written down, and a host that hits this should be told
-** what it hit rather than left with a bare DVS_ERROR on a call that reads as though
-** it should work.
+** This test used to assert the opposite -- off by default, because 18.1's
+** snapshot defect made the wake-then-error path corrupt memory and a defect
+** that cannot be reached is worth more than one that is merely written down.
+** The block that motivated the switch is closed; what survives of it is the
+** opt-out, and the same principle applied to it: a host that switched
+** hibernation off and then hits the refusal should be told who switched it
+** off, not left with a bare DVS_ERROR.
 */
-static void hibernation_is_off_unless_asked_for (void) {
+static void hibernation_is_on_by_default (void) {
   dvs_swarm *sw = swarm_with(4);
   dvs_id root = 0;
   static const char *caps[] = { "queue:work" };
@@ -158,20 +155,21 @@ static void hibernation_is_off_unless_asked_for (void) {
     dvs_free(sw);
     return;
   }
-  dvs_step(sw);                 /* it parks, so 'not parked' is not the reason */
-  ok(dvs_hibernate(sw, root) == DVS_ERROR,
-     "a parked instance is not hibernated by default");
-  ok(dvs_resident(sw, root), "and stays resident");
+  dvs_step(sw);                 /* it parks, so the snapshot is takeable */
+  ok(dvs_hibernate(sw, root) == DVS_OK,
+     "a parked instance hibernates with nothing asked for first");
+  ok(!dvs_resident(sw, root), "and is cached");
+  ok(dvs_wake(sw, root) == DVS_OK, "and wakes");
+  dvs_allow_hibernation(sw, 0);
+  ok(dvs_hibernate(sw, root) == DVS_ERROR, "the opt-out refuses");
+  ok(dvs_resident(sw, root), "and the instance stays resident");
   {
     const char *e = dvs_last_error(sw);
-    ok(e != NULL && strstr(e, "18.1") != NULL,
-       "and the refusal points at the defect that motivates it");
     ok(e != NULL && strstr(e, "dvs_allow_hibernation") != NULL,
-       "and names the call that overrides it");
+       "and the refusal names the call that switched it off");
   }
   dvs_allow_hibernation(sw, 1);
-  ok(dvs_hibernate(sw, root) == DVS_OK, "asking for it explicitly works");
-  ok(!dvs_resident(sw, root), "and then the instance is cached");
+  ok(dvs_hibernate(sw, root) == DVS_OK, "and switching back on works");
   dvs_free(sw);
 }
 
@@ -1773,7 +1771,7 @@ int main (void) {
   a_host_can_read_an_instance_s_budget_and_capabilities();
 
   printf("\n=== the snapshot cache and wake_on_message (8.4, 9.5) ===\n");
-  hibernation_is_off_unless_asked_for();
+  hibernation_is_on_by_default();
   snapshots_carry_the_host_identity();
   a_denied_hibernate_does_not_make_a_clean_exit_a_fault();
   flags_attenuate_through_a_spawn();

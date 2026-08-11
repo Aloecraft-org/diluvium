@@ -486,6 +486,17 @@ dv_status dv_snapshot (dv_instance *inst, const char *host,
 ** same order a load uses; the other order does not exist, because
 ** 'dv_set_budget' refuses an instance that has started and a restored instance
 ** has.
+**
+** On why this call has no on/off gate, since 18.3 asked for one or a reason:
+** the gate was wanted while a known corruption path was reachable through here
+** with the swarm's switch saying "off" -- a true statement about one layer and
+** a false one about the stack. That path is closed (audit finding 0, and the
+** rest of the profile-C block with it; doc/Hibernate.md is the record), and
+** what remains is what this comment already promises: refusal by validation on
+** any input, which a gate in front of would restate without strengthening.
+** The swarm's 'dvs_allow_hibernation(sw, 0)' remains for a deployment that
+** wants swapping refused as policy; a host calling this ABI directly is the
+** policy.
 */
 dv_status dv_restore (dv_instance *inst, const char *host,
                       const uint8_t *s, size_t len);

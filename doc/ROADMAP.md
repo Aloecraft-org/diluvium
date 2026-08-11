@@ -675,12 +675,12 @@ images are not, so an unexplained jump is usually one of those moving.
 
 ## Open
 
-- **The M0–M7 audit's confirmed defects.** 35 confirmed, 32 refuted; roughly 24
-  distinct. Listed with consequences in `doc/Messaging.md` section 18, together
-  with three release profiles — the useful framing is that ten of the defects are
-  hibernation and are therefore optional for a deployment that keeps agent state
-  at the application level. Profile A (trusted programs, resident instances) needs
-  four small fixes and is the nearest usable release.
+- **The M0–M7 audit's confirmed defects — all fixed.** 35 confirmed, 32 refuted;
+  roughly 24 distinct. Listed with consequences in `doc/Messaging.md` section 18,
+  whose three release profiles are all done: the last block was profile C —
+  hibernation at scale — and `doc/Hibernate.md` is the record of closing it.
+  Hibernation is on by default; what remains from that arc is release
+  engineering (the changelog entry and `stable: true`, §18.3), not runtime work.
 - Contract calling convention, kernel framing, libm embedding — carried
   from the handoff, all still open.
 - Float reduction order, needed before any vector work.

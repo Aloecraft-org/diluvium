@@ -536,7 +536,7 @@ queue.push(sys, {
 })
 queue.push(sys, {op = 'kill',      id = child})   -- kills the subtree
 queue.push(sys, {op = 'query',     id = child})   -- answered with a 'status' event
-queue.push(sys, {op = 'hibernate', id = child})   -- see §9; off by default
+queue.push(sys, {op = 'hibernate', id = child})   -- swaps it out to the cache
 ```
 
 And the events that come back, on the **parent's** `system/events`:
@@ -637,18 +637,16 @@ budget's count hook and silently disable the budget. Dispatch to both, or don't.
 As of `v5.5.1_build3`. The full list with its reasoning is `doc/Messaging.md` §18;
 this is what it means for code you are writing now.
 
-**Hibernation is off, and should stay off.** `dvs_hibernate` refuses unless a host calls
-`dvs_allow_hibernation`. The thread record does not carry `u2.funcidx`, so an error
-raised in a *restored* program unwinds from the stack base and writes the error object
-over the driver's own function slot — memory corruption, reached by the ordinary
-wake-then-error path. **Keep agent state at the application level and spawn a fresh
-instance per unit of work.** It costs little: `dv_new` plus `dv_load` of a small chunk is
-comparable to `dv_new` plus `dv_restore` of a value graph, and at 46 KB resident, ten
-thousand idle instances is about 449 MB.
-
-Behind the same switch: a woken instance's instruction budget is not re-armed, the
-swarm layer stamps no host identity on its own snapshots, and endpoints do not survive
-a snapshot.
+**Hibernation is on.** This paragraph used to say off-and-stay-off, because the thread
+record dropped `u2.funcidx` and an error raised in a *restored* program corrupted
+memory. That block is closed — the record carries what it dropped plus the error-handler
+slots, a woken instance's budget is re-armed and cumulative, the swarm stamps host
+identity when given one (`dvs_set_host_identity`), endpoints survive a snapshot, and a
+nested coroutine is refused by name rather than half-captured. `dvs_allow_hibernation`
+remains as an opt-out for a deployment that keeps agent state at the application level
+and spawns a fresh instance per unit of work — still a fine design: `dv_new` plus
+`dv_load` of a small chunk is comparable to `dv_new` plus `dv_restore` of a value graph,
+and at 46 KB resident, ten thousand idle instances is about 449 MB.
 
 **A default instance is a boundary, but not one that has been attacked.** `debug` is
 narrowed and `io`/`os`/`package` are absent, both by default, so a program reaches

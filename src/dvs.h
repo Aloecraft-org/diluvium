@@ -178,25 +178,15 @@ dvs_status dvs_kill (dvs_swarm *sw, dvs_id id);
 */
 
 /*
-** Hibernation is OFF by default, and that is a release decision rather than a
-** default anyone should keep.
+** Hibernation is ON by default; this is a host's opt-out.
 **
-** 18.1 records a defect in the snapshot layer that this layer cannot work around:
-** the thread record drops 'u2.funcidx', so an error raised in a *restored* program
-** unwinds from the stack base -- closing every to-be-closed slot and open upvalue in
-** the thread, and, with no such slots, writing the error object over the driver's own
-** function slot. That is memory corruption, not a wrong answer, and it is reached by
-** the ordinary wake-then-error path.
-**
-** So a swarm refuses to hibernate anything unless a caller asks for it explicitly.
-** The point is to make a known defect *unreachable* rather than documented: a
-** deployment that keeps agent state at the application level and spawns fresh
-** instances never enters that path, and 18.2's profile C is what turning this on
-** commits to.
-**
-** Passing 1 is how the tests keep the machinery exercised, so that the capability
-** does not rot while it is switched off. Do not pass 1 in production until 18.1's
-** entry is struck out.
+** The comment that used to stand here made it off by default and said why: 18.1
+** recorded a memory-corruption defect on the wake-then-error path, and the
+** switch existed to make it unreachable rather than documented. That block is
+** closed -- doc/Hibernate.md is the record -- so the default is the capability
+** working. Passing 0 is for a deployment that keeps agent state at the
+** application level and wants the swap-out machinery refused by name rather
+** than merely unused.
 */
 void dvs_allow_hibernation (dvs_swarm *sw, int allow);
 
@@ -261,8 +251,8 @@ void dvs_allow_unsafe_stdlib (dvs_swarm *sw, int allow);
 #define DVS_MAX_REQUEST_BYTES	32768
 
 /* Swap an instance out to the cache. It must be parked; a running or already
-   non-resident instance is refused rather than forced. Refused outright unless
-   'dvs_allow_hibernation' was called -- see above. */
+   non-resident instance is refused rather than forced. Refused outright when
+   the host opted out with 'dvs_allow_hibernation(sw, 0)' -- see above. */
 dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id);
 
 /* Bring one back. 'dvs_step' does this by itself when a message arrives for a

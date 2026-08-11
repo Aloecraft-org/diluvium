@@ -131,7 +131,7 @@ struct dvs_swarm {
   dvs_id next_id;
   uint32_t spawn_rate;
   uint32_t spawns_this_step;
-  int allow_hibernation;        /* off by default: see dvs.h */
+  int allow_hibernation;        /* on by default; a host may opt out: dvs.h */
   char *host_identity;          /* the stamp for 10.10; NULL = unstamped */
   uint32_t unsafe_stdlib;       /* DV_FLAG_UNSAFE_STDLIB, or 0. See dvs.h. */
   char error[512];
@@ -200,6 +200,7 @@ dvs_swarm *dvs_new (const dvs_host *host, uint32_t max_instances,
     return NULL;
   }
   sw->next_id = 1;
+  sw->allow_hibernation = 1;
   return sw;
 }
 
@@ -708,16 +709,15 @@ dvs_status dvs_hibernate (dvs_swarm *sw, dvs_id id) {
   if (sl == NULL || !sl->alive)
     return DVS_GONE;
   /*
-  ** Refused unless asked for. 18.1's snapshot defect makes the wake-then-error path
-  ** corrupt memory, so this release makes it unreachable rather than documenting it.
-  ** The message names the reason, because "DVS_ERROR" on a call that used to work is
-  ** exactly the sort of thing a host wastes an afternoon on.
+  ** On by default since the profile-C block closed (doc/Hibernate.md); this
+  ** branch is the host's opt-out. The message names who turned it off, because
+  ** "DVS_ERROR" on a call that works everywhere else is exactly the sort of
+  ** thing a host wastes an afternoon on.
   */
   if (!sw->allow_hibernation) {
-    set_error(sw, "hibernation is off in this build: a restored program that "
-                  "raises an error unwinds from the stack base (see "
-                  "doc/Messaging.md 18.1). Call dvs_allow_hibernation to enable "
-                  "it anyway.");
+    set_error(sw, "hibernation is switched off for this swarm: this host "
+                  "called dvs_allow_hibernation(sw, 0). Call it with 1 to "
+                  "switch it back on.");
     return DVS_ERROR;
   }
   if (sl->inst == NULL)
