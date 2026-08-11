@@ -80,7 +80,7 @@ queue.push(out, {kind = 'ready', client = CLIENT, want = WANT})
 
 --[[
 Park. This is where a real session spends its life, and at scale it is where
-almost every instance is: idle on an inbox, costing about 42 KB and no CPU.
+almost every instance is: idle on an inbox, costing about 46 KB and no CPU.
 
 'queue.wait' with nothing ready parks the program and hands control back to the
 host, which decides when it runs again. There is no thread here and no scheduler.
