@@ -14,6 +14,16 @@ pub const DV_WAIT_MAX: usize = 32;
 /// Refuse precompiled chunks in `dv_load`, accepting source only.
 pub const DV_FLAG_TEXT_ONLY: u32 = 0x1;
 
+/// Open the whole `debug` library rather than the narrowed one.
+///
+/// Restores the endpoint-forgery route and lets a program switch off its own
+/// instruction budget. For hosts whose programs are their own.
+pub const DV_FLAG_UNSAFE_DEBUG: u32 = 0x2;
+
+/// Leave `io`, `os` and `package` out of the instance, with `dofile` and
+/// `loadfile`. What is left is the language, the queues and the codec.
+pub const DV_FLAG_SEALED: u32 = 0x4;
+
 pub type dv_status = c_int;
 
 pub const DV_OK: dv_status = 0;

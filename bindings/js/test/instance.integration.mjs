@@ -182,4 +182,67 @@ const check = (cond, what) => {
   check(refused, "a precompiled chunk is refused by default");
 }
 
+// -- what a program is allowed to reach --------------------------------------
+//
+// A JS host had no way to set either switch until 5.5.1_build4's flags were
+// plumbed through: the wrapper passed only TEXT_ONLY, so "run a program you did
+// not write" was reachable from C and not from here. These run in the
+// js-binding CI job only, because they need a real module -- which is also why
+// the flag arithmetic in index.js is not covered by `npm test`.
+{
+  const inst = await Diluvium.load(
+    wasm,
+    "assert(os and io and package) return 1",
+    { name: "open" }
+  );
+  check(inst.run().done, "a default instance is not sealed");
+  inst.close();
+}
+
+{
+  const inst = await Diluvium.load(
+    wasm,
+    `assert(os == nil and io == nil and package == nil)
+     assert(dofile == nil and loadfile == nil)
+     return 1`,
+    { name: "sealed", sealed: true }
+  );
+  check(inst.run().done, "a sealed instance reaches nothing outside itself");
+  inst.close();
+}
+
+{
+  // Sealing must not come to mean "unusable".
+  const inst = await Diluvium.load(
+    wasm,
+    `local q = queue.declare("out", {exported = true})
+     queue.push(q, ("x"):rep(3) .. tostring(math.floor(2.5)))
+     return 1`,
+    { name: "sealed-works", sealed: true }
+  );
+  check(inst.run().done, "and a sealed instance still runs");
+  check(
+    inst.pop(inst.queue("out")) === "xxx2",
+    "and still has the language and its queues"
+  );
+  inst.close();
+}
+
+{
+  const narrow = await Diluvium.load(
+    wasm,
+    "assert(not pcall(debug.getregistry)) return 1",
+    { name: "narrow" }
+  );
+  check(narrow.run().done, "debug is narrowed by default");
+  narrow.close();
+  const wide = await Diluvium.load(
+    wasm,
+    "assert(type(debug.getregistry()) == 'table') return 1",
+    { name: "wide", unsafeDebug: true }
+  );
+  check(wide.run().done, "and unsafeDebug puts the whole library back");
+  wide.close();
+}
+
 console.log(`\n${checks} checks, 0 failed`);

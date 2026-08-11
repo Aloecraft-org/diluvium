@@ -166,6 +166,113 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// One Diluvium program, with its own heap, queues and fate.
+/// What a program loaded into an instance is allowed to reach.
+///
+/// [`Instance::from_source`] and [`Instance::from_bytecode`] cover the common
+/// cases; this is here for the two switches that have no business being
+/// positional booleans, and because a host that cannot set them has no way to
+/// run a program it did not write.
+///
+/// ```no_run
+/// # use diluvium::Config;
+/// // A program from somewhere else: no `io`, no `os`, no `package`, no
+/// // bytecode, and a `debug` library that cannot forge a capability.
+/// let inst = Config::new()
+///     .sealed(true)
+///     .load_source("return 1 + 1", "=untrusted")?;
+/// # Ok::<(), diluvium::Error>(())
+/// ```
+///
+/// `Default` is what `from_source` uses. **It is not a sandbox**: today an
+/// instance gets `io`, `os` and `package` unless [`Config::sealed`] says
+/// otherwise, so a program can call `os.execute`. Whether that default should
+/// invert is an open decision -- see §18.3 of `doc/Messaging.md` -- and this
+/// type is where it would change, in one place, for every Rust host.
+#[derive(Clone, Copy, Debug)]
+pub struct Config {
+    text_only: bool,
+    sealed: bool,
+    unsafe_debug: bool,
+}
+
+impl Default for Config {
+    /// Written out rather than derived, so that flipping a default is an edit
+    /// to a line that says what it means.
+    fn default() -> Self {
+        Config {
+            text_only: false,
+            sealed: false,
+            unsafe_debug: false,
+        }
+    }
+}
+
+impl Config {
+    /// A configuration with every switch at its default.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Refuse precompiled chunks, accepting source only.
+    ///
+    /// Worth setting whenever the bytes did not come from your own compiler.
+    /// Note it binds `dv_load` and not the program's own `load()`.
+    pub fn text_only(mut self, yes: bool) -> Self {
+        self.text_only = yes;
+        self
+    }
+
+    /// Leave `io`, `os` and `package` out, with `dofile` and `loadfile`.
+    ///
+    /// Set this whenever the program is not one you wrote. What is left is the
+    /// language, the queues, coroutines and the codec -- a program that needs a
+    /// clock or a file should be handed it through a queue. Note that a
+    /// snapshot does not cross this switch: the permanents fingerprint covers
+    /// names, so a sealed instance's snapshot restores only into another one.
+    pub fn sealed(mut self, yes: bool) -> Self {
+        self.sealed = yes;
+        self
+    }
+
+    /// Open the whole `debug` library rather than the narrowed one.
+    ///
+    /// This restores the endpoint-forgery route and lets the program switch off
+    /// its own instruction budget. Only for programs you wrote yourself.
+    pub fn unsafe_debug(mut self, yes: bool) -> Self {
+        self.unsafe_debug = yes;
+        self
+    }
+
+    fn flags(self) -> u32 {
+        let mut f = 0;
+        if self.text_only {
+            f |= sys::DV_FLAG_TEXT_ONLY;
+        }
+        if self.sealed {
+            f |= sys::DV_FLAG_SEALED;
+        }
+        if self.unsafe_debug {
+            f |= sys::DV_FLAG_UNSAFE_DEBUG;
+        }
+        f
+    }
+
+    /// Load source under this configuration.
+    pub fn load_source(self, source: &str, name: &str) -> Result<Instance, Error> {
+        Instance::load_with(self, source.as_bytes(), name)
+    }
+
+    /// Load a program that may be precompiled bytecode, under this
+    /// configuration. Refused when [`Config::text_only`] is set.
+    pub fn load_bytecode(self, code: &[u8], name: &str) -> Result<Instance, Error> {
+        Instance::load_with(self, code, name)
+    }
+
+    fn load(self, code: &[u8], name: &str) -> Result<Instance, Error> {
+        Instance::load_with(self, code, name)
+    }
+}
+
 pub struct Instance {
     raw: *mut sys::dv_instance,
     /// `!Sync`: see the threading note in the crate docs.
@@ -197,6 +304,10 @@ impl Instance {
     }
 
     fn load(code: &[u8], name: &str, text_only: bool) -> Result<Self, Error> {
+        Config::new().text_only(text_only).load(code, name)
+    }
+
+    fn load_with(cfg: Config, code: &[u8], name: &str) -> Result<Self, Error> {
         let library = unsafe { sys::dv_abi_version() };
         if library != sys::DV_ABI_VERSION {
             return Err(Error::AbiMismatch {
@@ -205,7 +316,7 @@ impl Instance {
             });
         }
         let cfg = sys::dv_config {
-            flags: if text_only { sys::DV_FLAG_TEXT_ONLY } else { 0 },
+            flags: cfg.flags(),
             ..Default::default()
         };
         let raw = unsafe { sys::dv_new(&cfg) };

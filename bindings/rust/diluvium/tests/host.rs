@@ -288,3 +288,86 @@ fn an_instance_moves_between_threads() {
     });
     assert!(handle.join().unwrap());
 }
+
+// --- Config: what a program is allowed to reach -----------------------------
+//
+// These exist because a Rust host had no way to set either switch. The C ABI
+// grew DV_FLAG_SEALED and DV_FLAG_UNSAFE_DEBUG in 5.5.1_build4 and this crate
+// still passed only DV_FLAG_TEXT_ONLY, so "run a program you did not write"
+// was reachable from C and not from here. A default that cannot be opted out of
+// is worse than a wrong default.
+
+#[test]
+fn a_default_instance_is_not_sealed() {
+    // The current default, asserted rather than left to be discovered. If it
+    // ever inverts, this is the test that has to change with it -- which is the
+    // point of writing it down.
+    let mut inst =
+        Instance::from_source("assert(os and io and package) return 1", "open").unwrap();
+    assert!(matches!(inst.run().unwrap(), Step::Done));
+}
+
+#[test]
+fn a_sealed_instance_reaches_nothing_outside_itself() {
+    let mut inst = diluvium::Config::new()
+        .sealed(true)
+        .load_source(
+            "assert(os == nil and io == nil and package == nil) \
+             assert(dofile == nil and loadfile == nil) \
+             return 1",
+            "sealed",
+        )
+        .unwrap();
+    assert!(matches!(inst.run().unwrap(), Step::Done));
+}
+
+#[test]
+fn a_sealed_instance_still_has_the_language_and_its_queues() {
+    // Sealing must not come to mean "unusable": the whole point is that a
+    // program can still do its job through the queues its host gives it.
+    let mut inst = diluvium::Config::new()
+        .sealed(true)
+        .load_source(
+            "local q = queue.declare('out', {exported = true}) \
+             queue.push(q, ('x'):rep(3) .. tostring(math.floor(2.5))) \
+             return 1",
+            "sealed-works",
+        )
+        .unwrap();
+    assert!(matches!(inst.run().unwrap(), Step::Done));
+    let id = inst.queue("out").unwrap();
+    let got: Option<String> = inst.pop(id).unwrap();
+    assert_eq!(got.as_deref(), Some("xxx2"));
+}
+
+#[test]
+fn the_debug_library_is_narrowed_unless_a_host_asks() {
+    // Narrowed by default: the forgery route of audit finding 6 is shut.
+    let mut inst =
+        Instance::from_source("assert(not pcall(debug.getregistry)) return 1", "narrow")
+            .unwrap();
+    assert!(matches!(inst.run().unwrap(), Step::Done));
+
+    // And a host that wants it back can say so, which is profile A.
+    let mut open = diluvium::Config::new()
+        .unsafe_debug(true)
+        .load_source("assert(type(debug.getregistry()) == 'table') return 1", "wide")
+        .unwrap();
+    assert!(matches!(open.run().unwrap(), Step::Done));
+}
+
+#[test]
+fn text_only_still_works_through_config() {
+    // The one switch this crate already had, now reached the other way, so the
+    // two paths cannot drift.
+    let dumped = {
+        let mut inst =
+            Instance::from_source("return string.dump(function() return 7 end)", "dump").unwrap();
+        assert!(matches!(inst.run().unwrap(), Step::Done));
+        b"\x1bLua".to_vec()
+    };
+    let err = diluvium::Config::new()
+        .text_only(true)
+        .load_bytecode(&dumped, "=binary");
+    assert!(err.is_err(), "text_only must refuse a binary chunk");
+}

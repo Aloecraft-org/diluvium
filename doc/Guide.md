@@ -379,6 +379,28 @@ fingerprint covers the module tables, so a sealed instance and an open one disag
 `dv_restore` refuses — a program captured holding `io.open` cannot wake somewhere there
 is none.
 
+**From a binding.** All three expose the same two switches, because a host that cannot
+set them has no way to run a program it did not write — and until they did, this section
+described something only a C host could do:
+
+```rust
+// Rust: a builder, so the switches are not positional booleans.
+let inst = diluvium::Config::new().sealed(true).load_source(src, "=untrusted")?;
+```
+```python
+# Python: keyword-only, and they default to the same thing C does.
+inst = diluvium.Instance.from_source(src, "=untrusted", sealed=True)
+```
+```js
+// JavaScript: options on the existing load call.
+const inst = await Diluvium.load(wasm, src, { name: "=untrusted", sealed: true });
+```
+
+Each also takes the `debug` switch — `unsafe_debug` in Rust and Python, `unsafeDebug`
+in JavaScript. Note that sealing takes away `os.time` and `os.clock`, which is worth
+knowing for the wasm build specifically: its WASI shim implements `clock_time_get`
+mainly to serve those two.
+
 ```c
 #include "dv.h"
 
