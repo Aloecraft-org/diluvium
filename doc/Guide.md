@@ -284,8 +284,9 @@ return 0
 Run it with `diluvium --task prog.lua`. Without `--task` the program runs on the main
 thread, which cannot park, and `queue.wait` will raise rather than yield.
 
-When that program is parked it costs about **42 KB** and no CPU (`make footprint`).
-That is the number to plan capacity with: a thousand idle sessions is ~41 MB.
+When that program is parked it costs about **46 KB** and no CPU (`make footprint`).
+That is the number to plan capacity with: a thousand idle sessions is ~45 MB, ten
+thousand ~449 MB.
 
 Three things a program cannot do, and each is deliberate:
 
@@ -596,8 +597,8 @@ raised in a *restored* program unwinds from the stack base and writes the error 
 over the driver's own function slot — memory corruption, reached by the ordinary
 wake-then-error path. **Keep agent state at the application level and spawn a fresh
 instance per unit of work.** It costs little: `dv_new` plus `dv_load` of a small chunk is
-comparable to `dv_new` plus `dv_restore` of a value graph, and at 42 KB resident, ten
-thousand idle instances is about 410 MB.
+comparable to `dv_new` plus `dv_restore` of a value graph, and at 46 KB resident, ten
+thousand idle instances is about 449 MB.
 
 Behind the same switch: a woken instance's instruction budget is not re-armed, the
 swarm layer stamps no host identity on its own snapshots, and endpoints do not survive

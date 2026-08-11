@@ -2808,8 +2808,10 @@ is written out for a reader who has not read this document, under **Known issues
 edit.
 
 The cost of staying resident was unmeasured when these profiles were written and is
-now measured: **42 KB per instance parked on a queue** (`make footprint`), so a
-thousand agents is 41 MB and ten thousand is 410 MB. That is the number this profile
+now measured: **46 KB per instance parked on a queue** (`make footprint`), so a
+thousand agents is 45 MB and ten thousand is 449 MB. It was 42 KB before build4 --
+narrowing `debug` costs about 3 KB per instance, for a table of twelve refusing
+closures. Worth the trade, and worth knowing that the trade exists. That is the number this profile
 lives or dies by, since dropping hibernation means nothing is swapped out.
 
 **Profile B — untrusted or generated programs.** Adds the whole capability layer as a

@@ -470,8 +470,8 @@ int main (int argc, char **argv) {
   */
   printf("\nEach client's state lived in that client's own instance. The host holds\n");
   printf("no client data at all -- there is nothing here to leak or to clear.\n");
-  printf("At ~42 KB per resident instance (make footprint), %d concurrent\n", peak_live);
-  printf("sessions cost about %d KB of guest heap.\n", peak_live * 42);
+  printf("At ~46 KB per resident instance (make footprint), %d concurrent\n", peak_live);
+  printf("sessions cost about %d KB of guest heap.\n", peak_live * 46);
 
   free(sup_src);
   free(coord_src);

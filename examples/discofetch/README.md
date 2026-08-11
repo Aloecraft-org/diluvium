@@ -132,8 +132,8 @@ non-NULL. This host allocates a one-field struct for exactly that reason.
 **No hibernation.** Every instance in this example is resident, which is release
 5.5.1_build3's supported configuration — `doc/Messaging.md` §18.1 records a snapshot
 defect that makes the wake-then-error path corrupt memory, so `dvs_hibernate` refuses
-unless a host asks for it by name. At ~42 KB per parked instance (`make footprint`),
-ten thousand idle sessions is about 410 MB, so for this shape of workload staying
+unless a host asks for it by name. At ~46 KB per parked instance (`make footprint`),
+ten thousand idle sessions is about 449 MB, so for this shape of workload staying
 resident is affordable and the swap-out is an optimisation rather than a requirement.
 
 **No two-way traffic between handlers.** A match currently ends the session. To have
