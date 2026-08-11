@@ -2454,6 +2454,19 @@ Settled during design. Do not relitigate during implementation.
 Recorded because the reasons generalize, and because this document is the handoff
 artifact between sessions that do not share context.
 
+- **A hostcall was reasoned about as a function call, so it looked like it had to
+  block.** The claim was that a queue-shaped hostcall "makes every hostcall a park, so
+  `os.time` costs a full host round-trip", and that this argued for a synchronous C
+  handler beside `dv_set_endpoint_handler`. Queues are unidirectional: asking is a
+  `queue.push`, which returns, and the answer arrives later like any other message.
+  Nothing forces a block between the two. Measured against this tree: a guest asks, does
+  500,500 iterations without parking, then parks once on `{inbox, reply}` — the park an
+  actor's loop performs anyway — and the answer arrives during it. Zero round-trips
+  added, and no ABI. The general error is the one §8.2 and the `pcall` entry below name
+  from a different direction: reasoning about a shape from the API it resembles rather
+  than from the tree. Here it would have cost a second path out of the message log —
+  exactly the defect `DV_FLAG_UNSAFE_STDLIB` exists to scaffold over — in the name of
+  avoiding a cost that was not there. `doc/Determinism.md` carries the corrected design.
 - **`pcall` was listed as non-yieldable.** It is not, and has not been since Lua
   5.2. The error came from generalizing backward from the hibernate constraint to
   the yield constraint via a shared diagnostic; the two sets are different. M3's
@@ -2851,17 +2864,34 @@ program that can start a process has no need to forge an endpoint reference, so 
 item this section spent its length on was not the one in front.
 
 Narrowing `debug` makes the **capability layer** a boundary: no forged references, no
-switching off a budget. `DV_FLAG_SEALED` is what makes the **instance** one: it
-leaves out `io`, `os` and `package`, and `dofile`/`loadfile` with them. The two are
-separate switches because they do separate jobs and neither implies the other, and
-profile B needs both.
+switching off a budget. Sealing is what makes the **instance** one: no `io`, `os` or
+`package`, and no `dofile`/`loadfile`. Both are now the default, and
+`DV_FLAG_UNSAFE_STDLIB` undoes the second for programs that predate it.
+
+**The deeper reading, which is why sealing is the default rather than an option.** An
+instance is supposed to reach outside itself by yielding a request its host answers —
+`queue.wait` is that, and `doc/Determinism.md` calls the general form a hostcall.
+`io`/`os`/`package` were a *second* boundary that arrived by inheritance from
+`luaL_openlibs` and was never decided anywhere in this document. Two things beyond
+security follow from having them: §9.4's budget charges VM instructions and a
+subprocess costs none, so the budget stops meaning anything; and `doc/Determinism.md`'s
+replay claim requires every input to arrive through the message log, which `os.time`
+does not — invisibly, since it never crosses the seam the analyzer watches. So the flag
+is scaffolding with an intended user count of zero, not a supported configuration.
 
 Sealing removes rather than narrows, which is the opposite of the choice made for
-`debug` function by function. There is no useful line inside those three: `os.time`
-and `os.clock` are harmless, but §8.3 says the host owns the clock, so the pieces
-worth keeping are pieces this design says should arrive by message anyway. What is
-left is the language, the queues, coroutines and the codec — asserted, so that
-"sealed" does not quietly come to mean "unusable".
+`debug` function by function. Two reasons. `os == nil` is the true statement — this
+instance has no operating system — whereas `debug` keeps its concept and loses
+particular powers; and a program written `if os and os.time then` has asked for a
+fallback, which a refusing stub would override with a hard failure. What is left is the
+language, the queues, coroutines and the codec — asserted, so that "sealed" does not
+quietly come to mean "unusable".
+
+Flags attenuate through a spawn, which they did not before: `build` zeroed its config
+and never consulted the parent, so a sealed supervisor spawned children that had
+`os.execute`. `dvs_allow_unsafe_stdlib` sets the swarm's ceiling, a child inherits its
+parent's set, and a spawn request may carry `sealed = true` to narrow further. There is
+no way to widen — §9.3 applied to flags.
 
 Nothing in this document ever decided the standard library surface. §8.5 fixes the
 signature of a permission check and calls the token model separate work; no section
@@ -2893,15 +2923,28 @@ of the thirty-five confirmed findings are fixed. What is left from the audit is
 profile C entire — the six findings 0, 1, 5, 12, 14 and 25 — plus one decision that
 the audit never raised because nothing in this document had decided it.
 
-- [ ] **Decide whether an instance is sealed by default** (audit S1). `DV_FLAG_SEALED`
-      exists and is opt-in, so today a host that does not know about it gets `io`,
-      `os` and `package` in its guest — which is to say the unsafe configuration is
-      the one you get by not reading. Sealing by default is the safer answer and a
-      breaking change for any embedder whose guest calls `os.time`; the flag would
-      invert to something like `DV_FLAG_HOST_ACCESS`. This is a compatibility call
-      rather than a technical one, which is why it is here rather than done. Note it
-      cannot be deferred quietly: profile B's correctness depends on which way it
-      goes, and the default is what most deployments will run.
+**Sealing is decided and done** (audit S1). An instance is sealed by default;
+`DV_FLAG_UNSAFE_STDLIB` undoes it, flags attenuate through a spawn, and all three
+bindings expose the switch. Taken now rather than after publishing build4, because
+`dv_new` has shipped exactly once — in a prerelease that is neither `latest` nor
+mirrored — so this is the cheapest the change will ever be, and `DV_FLAG_SEALED` never
+ships at all.
+
+What it leaves behind is the real item:
+
+- [ ] **Make the flag unnecessary: a hostcall for what a program needs from outside.**
+      Sealing closes the second boundary; it does not give a sealed program a way to ask
+      the time. The mechanism needs no ABI — a hostcall is a message on a queue the host
+      drains and an answer on a queue it pushes to, which is measured working against
+      this tree today with no new machinery, and which gets replay for free because
+      requests and answers are then already in the log. `doc/Determinism.md` carries the
+      design, the measurement, and the one thing with a deadline: **reserve a
+      correlation token in the request encoding before the first hostcall ships**, since
+      a guest may have several outstanding and replies arrive in whatever order the host
+      answers. (The earlier "reserve a `pending` status" was shaped by assuming a
+      synchronous handler; see §17.) Until this exists, a program that genuinely needs a
+      clock has only `DV_FLAG_UNSAFE_STDLIB`, which is why that flag is scaffolding
+      rather than a configuration.
 
 **The question, and it is the next release's headline.** Does this project support
 hibernation at scale? 18.2 says a deployment that keeps agent state at the

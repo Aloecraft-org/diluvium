@@ -190,26 +190,80 @@ class Instance:
     # -- construction ------------------------------------------------------
 
     @classmethod
-    def from_source(cls, source: str, name: str = "=(program)") -> "Instance":
+    def from_source(
+        cls,
+        source: str,
+        name: str = "=(program)",
+        *,
+        unsafe_stdlib: bool = False,
+        unsafe_debug: bool = False,
+    ) -> "Instance":
         """Compile Lua source into a fresh instance.
 
         `name` appears in error messages and tracebacks; give it something a
         human can act on.
+
+        An instance is sealed: it has no `io`, `os` or `package`, and reaches
+        outside itself only by yielding a request its host answers. What is left
+        is the language, the queues, coroutines and the codec, so a program that
+        needs a clock or a file should be handed it through a queue.
+
+        `unsafe_stdlib` puts those libraries back. **Scaffolding, not a
+        supported configuration**: it costs the instruction budget its meaning,
+        because a subprocess started by `os.execute` costs no VM instructions,
+        and it costs the swarm its replayability, because inputs then arrive
+        somewhere other than the message log.
+
+        `unsafe_debug` opens the whole `debug` library rather than the narrowed
+        one, which restores the endpoint-forgery route and lets the program
+        switch off its own instruction budget. Only for programs you wrote.
         """
-        return cls._load(source.encode("utf-8"), name, text_only=True)
+        return cls._load(
+            source.encode("utf-8"),
+            name,
+            text_only=True,
+            unsafe_stdlib=unsafe_stdlib,
+            unsafe_debug=unsafe_debug,
+        )
 
     @classmethod
-    def from_bytecode(cls, code: bytes, name: str = "=(program)") -> "Instance":
+    def from_bytecode(
+        cls,
+        code: bytes,
+        name: str = "=(program)",
+        *,
+        unsafe_stdlib: bool = False,
+        unsafe_debug: bool = False,
+    ) -> "Instance":
         """Load a program that may be precompiled bytecode.
 
         Prefer :meth:`from_source` for anything you did not compile yourself.
         The loader refuses malformed bytecode rather than crashing, but that is a
         smaller claim than "bytecode is safe".
         """
-        return cls._load(bytes(code), name, text_only=False)
+        return cls._load(
+            bytes(code),
+            name,
+            text_only=False,
+            unsafe_stdlib=unsafe_stdlib,
+            unsafe_debug=unsafe_debug,
+        )
+
+    # dv.h's flags. Kept together so the mapping is one place.
+    _FLAG_TEXT_ONLY = 0x1
+    _FLAG_UNSAFE_DEBUG = 0x2
+    _FLAG_UNSAFE_STDLIB = 0x4
 
     @classmethod
-    def _load(cls, code: bytes, name: str, *, text_only: bool) -> "Instance":
+    def _load(
+        cls,
+        code: bytes,
+        name: str,
+        *,
+        text_only: bool,
+        unsafe_stdlib: bool = False,
+        unsafe_debug: bool = False,
+    ) -> "Instance":
         library = library_abi_version()
         if library != ABI_VERSION:
             raise AbiMismatch(
@@ -218,7 +272,11 @@ class Instance:
             )
         cfg = ffi.new("dv_config *")
         cfg.abi_version = ABI_VERSION
-        cfg.flags = 0x1 if text_only else 0
+        cfg.flags = (
+            (cls._FLAG_TEXT_ONLY if text_only else 0)
+            | (cls._FLAG_UNSAFE_STDLIB if unsafe_stdlib else 0)
+            | (cls._FLAG_UNSAFE_DEBUG if unsafe_debug else 0)
+        )
         raw = lib.dv_new(cfg)
         if raw == ffi.NULL:
             raise DiluviumError("could not create a Diluvium instance")

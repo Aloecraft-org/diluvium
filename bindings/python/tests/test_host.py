@@ -265,3 +265,50 @@ def test_a_closed_instance_refuses_rather_than_crashing():
     inst.close()  # idempotent
     with pytest.raises(diluvium.DiluviumError):
         inst.run()
+
+
+# --- what a program is allowed to reach --------------------------------------
+#
+# These exist because a Python host had no way to set either switch. The C ABI
+# grew DV_FLAG_UNSAFE_STDLIB and DV_FLAG_UNSAFE_DEBUG in 5.5.1_build4 and this wrapper
+# still passed only DV_FLAG_TEXT_ONLY, so "run a program you did not write" was
+# reachable from C and not from here.
+
+
+def test_a_default_instance_is_sealed():
+    inst = Instance.from_source(
+        "assert(os == nil and io == nil and package == nil) "
+        "assert(dofile == nil and loadfile == nil) return 1",
+        "sealed-default",
+    )
+    inst.run()
+
+
+def test_unsafe_stdlib_puts_the_libraries_back():
+    # The escape hatch, and the only way a Python host gets `os` at all.
+    inst = Instance.from_source(
+        "assert(os.execute and io.popen and package.loadlib) return 1",
+        "legacy",
+        unsafe_stdlib=True,
+    )
+    inst.run()
+
+
+def test_a_sealed_instance_still_has_the_language_and_its_queues():
+    # Sealing must not come to mean "unusable".
+    inst = Instance.from_source(
+        "local q = queue.declare('out', {exported = true}) "
+        "queue.push(q, ('x'):rep(3) .. tostring(math.floor(2.5))) return 1",
+        "sealed-works",
+    )
+    inst.run()
+    assert inst.pop(inst.queue("out")) == "xxx2"
+
+
+def test_the_debug_library_is_narrowed_unless_a_host_asks():
+    Instance.from_source("assert(not pcall(debug.getregistry)) return 1", "narrow").run()
+    Instance.from_source(
+        "assert(type(debug.getregistry()) == 'table') return 1",
+        "wide",
+        unsafe_debug=True,
+    ).run()

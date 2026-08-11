@@ -1165,6 +1165,89 @@ static void a_denied_hibernate_does_not_make_a_clean_exit_a_fault (void) {
 
 
 /*
+** Flags attenuate through a spawn, like every other authority in 9.3.
+**
+** They did not. 'build' zeroed its dv_config and never consulted the parent, so
+** a sealed supervisor spawned children that had `os.execute` -- the one grant in
+** this layer that widened instead of narrowing. Nothing tested it because
+** nothing could: the flags had no swarm-level surface at all until
+** 'dvs_allow_unsafe_stdlib'.
+**
+** Three cases, and the middle one is the defect: a sealed swarm's children are
+** sealed, an unsafe swarm's children inherit that, and a child of an unsafe
+** parent can still be sealed on request -- which is the supervisor that needs
+** `os.time` itself but hands its workers an instance without it.
+*/
+static void flags_attenuate_through_a_spawn (void) {
+  /* The child reports what it can reach; the supervisor forwards it. */
+  static const char SUP[] =
+    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+    "local ev  = queue.declare('system/events', {cap = 16})\n"
+    "local log = queue.declare('log', {cap = 16})\n"
+    /* The child parks after reporting. A child that returned would be reaped
+       in the same step that spawned it, and its queues would go with it. */
+    "local KID = \"local o = queue.declare('out', {exported = true}) \"\n"
+    "         .. \"queue.push(o, os == nil and 'sealed' or 'open') \"\n"
+    "         .. \"local w = queue.declare('w', {cap = 2}) queue.wait({w})\"\n"
+    "queue.push(sys, {op = 'spawn', code = KID, caps = {}, sealed = SEAL_KID})\n"
+    "while true do queue.wait({ev}) end\n";
+  static const char *caps[] = { "lifecycle", "queue:log" };
+  struct { int unsafe_swarm, seal_kid; const char *want, *what; } cases[] = {
+    { 0, 0, "sealed",
+      "a sealed swarm's children are sealed" },
+    { 1, 0, "open",
+      "an unsafe swarm's children inherit that, rather than being sealed by luck" },
+    { 1, 1, "sealed",
+      "and a child of an unsafe parent can still be sealed on request" },
+  };
+  size_t c;
+  for (c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+    dvs_swarm *sw = swarm_with(4);
+    dvs_id root = 0;
+    char src[sizeof(SUP) + 64];
+    int i, said = 0;
+    if (sw == NULL) { ok(0, "a swarm"); continue; }
+    if (cases[c].unsafe_swarm)
+      dvs_allow_unsafe_stdlib(sw, 1);
+    snprintf(src, sizeof(src), "local SEAL_KID = %s\n%s",
+             cases[c].seal_kid ? "true" : "false", SUP);
+    if (dvs_root(sw, src, strlen(src), caps, 2, 0, 0, &root) != DVS_OK) {
+      printf("      (%s)\n", dvs_last_error(sw));
+      ok(0, cases[c].what);
+      dvs_free(sw);
+      continue;
+    }
+    for (i = 0; i < 6 && !said; i++) {
+      uint32_t k;
+      dvs_step(sw);
+      /* Read the child's own queue directly: the point is what the *child*
+         reaches, and routing it through the parent would only prove the
+         supervisor still runs. */
+      for (k = 2; k <= 4 && !said; k++) {
+        dv_instance *kid = dvs_instance(sw, k);
+        dv_queue_id q;
+        uint8_t buf[64];
+        size_t n = 0;
+        if (kid == NULL) continue;
+        q = dv_queue_lookup(kid, "out");
+        if (q != 0 && dv_queue_pop(kid, q, buf, sizeof(buf), &n) == DV_OK &&
+            n > 1) {
+          char one[64];
+          ok(strcmp(msg_str(buf, n, one, sizeof(one)), cases[c].want) == 0,
+             cases[c].what);
+          if (strcmp(one, cases[c].want) != 0)
+            printf("      (child said %s, wanted %s)\n", one, cases[c].want);
+          said = 1;
+        }
+      }
+    }
+    if (!said) ok(0, cases[c].what);
+    dvs_free(sw);
+  }
+}
+
+
+/*
 ** A bare "*" is a name, not a licence.
 **
 ** 'strncmp(held, want, 0)' returns 0 for any pair of strings, so a one-character
@@ -1615,6 +1698,7 @@ int main (void) {
   printf("\n=== the snapshot cache and wake_on_message (8.4, 9.5) ===\n");
   hibernation_is_off_unless_asked_for();
   a_denied_hibernate_does_not_make_a_clean_exit_a_fault();
+  flags_attenuate_through_a_spawn();
   pushing_to_a_dead_instance_is_gone();
   an_instance_swaps_out_and_a_message_wakes_it();
   a_cached_instance_without_wake_on_message_is_gone();

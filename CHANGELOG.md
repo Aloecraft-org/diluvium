@@ -10,7 +10,7 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
-## [5.5.1_build4] - unreleased (prerelease)
+## [5.5.1_build4] - 2026-08-11 (prerelease)
 
 `v5.5.1_build4` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
@@ -38,16 +38,23 @@ other confirmed finding from the M0-M7 audit that is not part of
 hibernation is now fixed -- twenty-nine of thirty-five, and the six
 that remain are hibernation entire.
 
-**And a correction that is the most important thing in these notes.**
-Section 18.2 said the `debug` library was the one item between a
-deployment and running programs it did not write. That was wrong.
-`dv_new` opened every standard library, so an instance also had
+**An instance is now sealed by default**, and that is the change most
+likely to affect you. Section 18.2 said the `debug` library was the one
+item between a deployment and running programs it did not write. That was
+wrong: `dv_new` opened every standard library, so an instance also had
 `os.execute`, `io.popen`, `io.open`, `package.loadlib`, `dofile` and
-`loadfile` -- and a program that can start a process does not need to
-forge an endpoint reference. `DV_FLAG_SEALED` is new and leaves those
-out. **Profile B needs both flags, not one**, and the mistake was found
-by checking the claim this release was about to make rather than by the
-audit.
+`loadfile`, and a program that can start a process has no need to forge an
+endpoint reference.
+
+It is a default rather than a flag because it is what the design already
+said. An instance reaches outside itself by yielding a request its host
+answers -- `queue.wait` is that, and `doc/Determinism.md` calls the general
+form a hostcall. `io`/`os`/`package` were a second boundary that arrived by
+inheriting `luaL_openlibs` and was never decided anywhere. Having them
+costs more than the obvious: the instruction budget stops meaning anything
+(a subprocess costs no VM instructions) and the swarm stops being
+replayable (inputs stop arriving through the message log), and neither
+failure announces itself.
 
 Beyond that: four checks that reported success without checking
 anything, and a defect where destroying an endpoint queue made its
@@ -55,25 +62,45 @@ token permanently unusable.
 
 ### Added
 
-- `DV_FLAG_SEALED` in `dv_config.flags`: leave `io`, `os` and `package`
-  out of the instance, and `dofile`/`loadfile` with them. What is left
-  is the language, the queues, coroutines and the codec -- so a program
-  reaches nothing but what its host pushes to it.
+- `DV_FLAG_UNSAFE_STDLIB` in `dv_config.flags`: put `io`, `os` and
+  `package` back, with `dofile` and `loadfile`. **Scaffolding for
+  programs that predate the sealed default, not a supported
+  configuration** -- see **Changed** and **Upgrading**.
 
-  Set this whenever the program is not one you wrote. It is a separate
-  switch from `DV_FLAG_UNSAFE_DEBUG` because the two do different jobs:
-  narrowing `debug` makes the capability layer a boundary, and this
-  makes the instance one. Neither implies the other.
+  A snapshot does not cross this flag: the permanents fingerprint covers
+  the module tables, so a sealed instance and an unsealed one disagree
+  and `dv_restore` refuses with the permanents-set message. That is the
+  right answer -- a program captured holding `io.open` cannot wake
+  somewhere there is none. It *does* cross `DV_FLAG_UNSAFE_DEBUG`,
+  because there the names are all still present.
+- `dvs_allow_unsafe_stdlib` in the swarm layer, and flag attenuation
+  with it.
 
-  A program needing a clock or a file should be given it through a
-  queue; section 8.3 already says the host owns the clock. `print`
-  still works. A snapshot does not cross this flag -- the permanents
-  fingerprint covers names, and sealing removes them -- so a sealed
-  instance's snapshot restores only into another sealed instance, and
-  the refusal says so.
+  Flags were the one authority in that layer that did not narrow:
+  `build` zeroed its `dv_config` and never consulted the parent, so a
+  sealed supervisor spawned children that had `os.execute`. Now the
+  swarm has a ceiling (off by default), the root takes it, and a child
+  inherits its parent's set. A spawn request carrying `sealed = true`
+  narrows further, which is the supervisor that needs `os.time` itself
+  but hands its workers an instance without it. There is no way to
+  widen -- section 9.3 applied to flags.
 - `DV_FLAG_UNSAFE_DEBUG` in `dv_config.flags`: open the whole `debug`
   library in this instance rather than the narrowed one. For profile A
   hosts, whose programs are their own. See **Upgrading**.
+
+### Changed
+
+- **An instance no longer has `io`, `os` or `package`, or `dofile` and
+  `loadfile`.** Breaking for a program that used them; see **Upgrading**
+  for the one-flag escape and what it costs.
+
+  Taken now rather than deferred because the arithmetic only gets worse:
+  `dv_new` has shipped exactly once, in 5.5.1_build3, which is flagged
+  prerelease, is not `latest`, and is not on the release mirror -- so the
+  set of hosts affected is as small as it will ever be, and grows from
+  the moment a release carrying `dv_new` becomes `latest`. Deciding it
+  here also means the `DV_FLAG_SEALED` of earlier drafts never ships and
+  is not deprecated one release after being introduced.
 
 ### Fixed
 
@@ -142,12 +169,8 @@ token permanently unusable.
 
   This is not a smaller version of the forgery problem below. It is a
   larger one, and it means 18.2's profile B was not reachable in
-  5.5.1_build3 for a reason nobody had written down. `DV_FLAG_SEALED`
-  is the fix, and it is opt-in, so **the default is unchanged and a
-  host that does not set it still has all of the above.** Whether the
-  default should invert is recorded as an open decision in 18.3; it is
-  a compatibility call, since sealing by default breaks any embedder
-  whose guest calls `os.time`.
+  5.5.1_build3 for a reason nobody had written down. The fix is the
+  sealed default in **Changed**, not a flag you have to know about.
 
   Recorded as S1 in `doc/audit/M0-M7.md` under "Found since the sweep".
 - **An endpoint reference can no longer be forged through the
@@ -224,12 +247,21 @@ token permanently unusable.
   and section 18.3 states the decision they amount to: whether this
   project supports hibernation at scale, or says it does not and
   strikes them.
-- **An instance is not sealed by default.** `DV_FLAG_SEALED` is opt-in,
-  so a host that does not know about it gets `io`, `os` and `package`
-  in its guest -- which is to say the unsafe configuration is the one
-  you get by not reading these notes. Inverting the default is a
-  breaking change and is left as an explicit decision in section 18.3
-  of `doc/Messaging.md` rather than taken quietly here.
+- **A sealed program has no way to ask for the time.**
+
+  Sealing closes the second boundary; it does not populate the first. An
+  instance is supposed to reach outside itself by yielding a request its
+  host answers, and `queue.wait` is the only thing that implements that
+  -- there is no general hostcall yet. So a program that genuinely needs
+  a clock or a file has `DV_FLAG_UNSAFE_STDLIB` and nothing better, which
+  is exactly why that flag is scaffolding rather than a configuration.
+
+  `doc/Determinism.md` carries the design, and it needs no ABI: a
+  hostcall is a message on a queue the host drains and an answer on a
+  queue it pushes to, which is measured working against this tree today
+  with no new machinery. The one thing with a deadline is reserving a
+  correlation token in the request encoding before the first hostcall
+  ships, since a guest may have several outstanding at once.
 - `DV_FLAG_UNSAFE_DEBUG` is a real hole, deliberately.
 
   A host that sets it gets the whole `debug` library back and, with it,
@@ -276,6 +308,31 @@ snapshot also crosses `DV_FLAG_UNSAFE_DEBUG` in both directions, and
 the permanent resolves in the restoring instance, so a program captured
 holding `debug.sethook` wakes with whichever one the instance it wakes
 in is entitled to.
+
+**An instance no longer has `io`, `os` or `package`, nor `dofile` and
+`loadfile`.** This is the breaking change in this release.
+
+Nothing fails at load time -- sealing cannot be checked statically -- so
+a program that uses `os` reports `attempt to index a nil value (global
+'os')` when it reaches that line, and a program whose only use is on an
+error path will not fail until that path runs. Grep your programs for
+`os.`, `io.`, `package.`, `require`, `dofile` and `loadfile` rather than
+relying on a test pass.
+
+Two ways forward. Prefer handing the program what it needs through a
+queue: section 8.3 already says the host owns the clock, and a value that
+arrives as a message is one that can be replayed and faked in a test.
+Failing that, set `DV_FLAG_UNSAFE_STDLIB` (`unsafe_stdlib` in Rust and
+Python, `unsafeStdlib` in JavaScript, `dvs_allow_unsafe_stdlib` for a
+swarm) and understand that it makes `dv_usage` approximate and the swarm
+non-replayable.
+
+A program that feature-detects -- `if os and os.time then` -- keeps
+working and takes its own fallback, which is why the libraries are
+removed rather than replaced with stubs that raise.
+
+`print` is unaffected; it is in the base library and does not go through
+`io`.
 
 `LUAC_FORMAT` is unchanged at 0x46; chunks compiled by 5.5.1_build3
 load without recompiling.

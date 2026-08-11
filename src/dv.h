@@ -123,32 +123,41 @@ typedef struct dv_config {
 #define DV_FLAG_UNSAFE_DEBUG	0x2u
 
 /*
-** Leave `io`, `os` and `package` out of the instance.
+** Put `io`, `os` and `package` back into the instance, with `dofile` and
+** `loadfile`. **Scaffolding, not a supported configuration.**
 **
-** Those three are the standard libraries that reach outside the state's own
-** memory, and without this an instance has all of them: `os.execute`,
-** `io.popen`, `io.open` and `package.loadlib` are all reachable by a program
-** you loaded. Set this whenever the program is not one you wrote.
+** By default an instance has none of them, and reaches outside itself only by
+** yielding a request its host answers -- which today means the queues. That is
+** the design's one boundary, and this flag is a second one that predates it.
 **
-** It is a separate switch from DV_FLAG_UNSAFE_DEBUG rather than the same one,
-** because the two do different jobs. Narrowing `debug` is what makes the
-** *capability layer* a boundary -- no forged endpoint references, no switching
-** off an instruction budget. This is what makes the *instance* a boundary. A
-** program that can start a process has no need to forge a reference, so a host
-** running code it did not write wants both, and neither implies the other.
+** Set it only for a program that predates the sealed default and that you
+** wrote yourself. Three things stop being true when you do:
 **
-** What is left is the language, the queues, and whatever the host pushes into
-** them. A program that needs a clock or a file should be given it through a
-** queue: 8.3 already says the host owns the clock. `print` still works -- it is
-** in the base library and does not go through `io`.
+**   The instruction budget stops meaning anything. 9.4 charges VM instructions;
+**   a subprocess started by `os.execute` costs none of them, so a program can
+**   burn an hour of machine time while `dv_usage` reports a few thousand.
+**
+**   Replay stops working. doc/Determinism.md's claim is that a swarm is
+**   replayable because every input arrives through the message log. `os.time`
+**   and `io.read` do not, and they do not cross the seam the analyzer watches,
+**   so the swarm is not replayable and nothing says so.
+**
+**   The instance stops being a boundary. `os.execute` reaches the machine; a
+**   program that can start a process has no need of anything else this ABI
+**   restricts.
+**
+** The intended end state is that this flag has no users, because a program that
+** needs the time asks for it and the host answers -- which is also what makes
+** that answer fakeable, and therefore what makes replay work. See
+** doc/Determinism.md.
 **
 ** A snapshot does not cross this flag. The permanents fingerprint covers the
-** names in the module tables, so a sealed instance and an open one disagree,
-** and 'dv_restore' refuses with the permanents-set message. That is the right
-** answer: a program captured holding `io.open` cannot wake somewhere there is
-** none.
+** names in the module tables, so a sealed instance and an unsealed one
+** disagree, and 'dv_restore' refuses with the permanents-set message. That is
+** the right answer: a program captured holding `io.open` cannot wake somewhere
+** there is none.
 */
-#define DV_FLAG_SEALED		0x4u
+#define DV_FLAG_UNSAFE_STDLIB	0x4u
 
 /* Passing NULL for 'cfg' means the defaults, including the current version. */
 dv_instance *dv_new (const dv_config *cfg);

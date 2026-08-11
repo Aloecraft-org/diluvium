@@ -357,10 +357,28 @@ export const Diluvium = {
    * Lua text; `bytecode` is accepted only if you pass `{ allowBytecode: true }`,
    * because the loader refusing malformed bytecode is a smaller claim than
    * bytecode being safe.
+   *
+   * An instance is sealed: it has no `io`, `os` or `package`, and reaches
+   * outside itself only by yielding a request its host answers. What is left is
+   * the language, the queues, coroutines and the codec, so a program that needs
+   * a clock or a file should be handed it through a queue.
+   *
+   * `unsafeStdlib` puts those libraries back. **Scaffolding, not a supported
+   * configuration**: it costs the instruction budget its meaning, since a
+   * subprocess started by `os.execute` costs no VM instructions, and it costs
+   * replayability, since inputs then arrive somewhere other than the message
+   * log. It is also what the WASI shim's `clock_time_get` is for -- `os.time`
+   * and `os.clock` reach it, and without this flag neither exists.
+   *
+   * `unsafeDebug` opens the whole `debug` library rather than the narrowed one,
+   * which restores the endpoint-forgery route and lets the program switch off
+   * its own instruction budget. Only for programs you wrote.
    */
   async load(wasm, source, {
     name = "=(program)",
     allowBytecode = false,
+    unsafeStdlib = false,
+    unsafeDebug = false,
     wasiWrite = undefined,
   } = {}) {
     const mod = await instantiate(wasm, { wasiWrite });
@@ -381,7 +399,12 @@ export const Diluvium = {
       );
       const view = new DataView(mod.exports.memory.buffer);
       view.setUint32(cfg + layout[L.CONFIG_ABI], ABI_VERSION, true);
-      view.setUint32(cfg + layout[L.CONFIG_FLAGS], allowBytecode ? 0 : 0x1, true);
+      // dv.h's flags: TEXT_ONLY 0x1, UNSAFE_DEBUG 0x2, UNSAFE_STDLIB 0x4.
+      const flags =
+        (allowBytecode ? 0 : 0x1) |
+        (unsafeDebug ? 0x2 : 0) |
+        (unsafeStdlib ? 0x4 : 0);
+      view.setUint32(cfg + layout[L.CONFIG_FLAGS], flags, true);
       const ptr = mod.exports.dv_new(cfg);
       if (ptr === 0) throw new DiluviumError("could not create an instance");
       const inst = new Instance(mod, ptr, layout);
