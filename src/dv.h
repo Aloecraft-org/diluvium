@@ -100,6 +100,28 @@ typedef struct dv_config {
 */
 #define DV_FLAG_TEXT_ONLY	0x1u
 
+/*
+** Open the whole 'debug' library in the instance, rather than the narrowed one.
+**
+** An instance gets 'debug' with twelve of its sixteen functions replaced by
+** refusals that say why, because the library reaches past every abstraction the
+** rest of this ABI is built out of: 'getregistry' hands back the metatable that
+** makes an endpoint reference unforgeable, 'getmetatable' walks past
+** '__metatable', and 'sethook' takes the one hook slot that 'dv_set_budget'
+** enforces a budget through -- so a program could switch its own budget off in
+** one line. 'getinfo', 'getlocal', 'gethook' and 'traceback' stay: a program
+** may read its own frames.
+**
+** Set this only where the program is one you wrote or generated yourself. It
+** does not merely restore convenience -- it puts back the three escapes above,
+** so with it set the capability layer is a way of structuring a program rather
+** than a boundary around one.
+**
+** (The refusal messages name this constant, in src/dlibs.c; they are the only
+** other place it appears.)
+*/
+#define DV_FLAG_UNSAFE_DEBUG	0x2u
+
 /* Passing NULL for 'cfg' means the defaults, including the current version. */
 dv_instance *dv_new (const dv_config *cfg);
 void dv_free (dv_instance *inst);

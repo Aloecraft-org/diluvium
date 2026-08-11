@@ -268,8 +268,12 @@ dv_instance *dv_new (const dv_config *cfg) {
   }
   lua_pushlightuserdata(inst->L, inst);
   lua_setfield(inst->L, LUA_REGISTRYINDEX, "diluvium.instance");
-  luaL_openlibs(inst->L);
-  diluvium_openlibs(inst->L);   /* msgpack and queue, including inbox/outbox */
+  /* The standard libraries with 'debug' narrowed, then msgpack and queue,
+     including inbox/outbox. 'DV_FLAG_UNSAFE_DEBUG' is the host saying the
+     program is its own and it wants the whole library; see dlibs.c. */
+  diluvium_openguestlibs(inst->L,
+                         (inst->flags & DV_FLAG_UNSAFE_DEBUG)
+                           ? DILUVIUM_GUEST_FULL_DEBUG : 0u);
   /*
   ** Name this library's own C function, per 10.4: the message handler sits in the
   ** driver's frame on every instance's thread, so without a name no parked
