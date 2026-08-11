@@ -89,12 +89,41 @@ static void de_tokens (lua_State *L) {
 }
 
 
+/*
+** The queue handle a token is bound to, or 0.
+**
+** A handle whose queue has been destroyed answers 0, and the entry is dropped on
+** the way past. 'queue.destroy' is in the guest table and knows nothing about
+** endpoints, so a program that finished with a peer and tidied up left this map
+** naming a dead handle -- and nothing ever removed an entry from it.
+**
+** What that cost: 'endpoint.bind' short-circuits on this map, because two handles
+** onto one far end would let a program lose ordering against itself. Binding the
+** same reference again therefore returned the destroyed handle and reported
+** success; every push through it raised "handle 5 has been destroyed", and the
+** token could not be bound again for the life of the instance. The host's own
+** 'dv_endpoint_queue' kept naming the dead handle as the buffer to drain.
+**
+** Validating here rather than in 'de_bind' fixes both sides at once, which is
+** the reason for putting a write in something that reads: the map is a cache of
+** a fact 'dqueue.c' owns, and this is where it is noticed to be stale.
+**
+** A *gone* endpoint keeps its handle. Its queue still exists and pushes to it
+** answer "gone", which is 6.4's row and a normal outcome; only destruction takes
+** the queue away.
+*/
 LUA_API lua_Integer diluvium_endpoint_queue (lua_State *L, unsigned int token) {
   lua_Integer id;
   de_tokens(L);
   lua_rawgeti(L, -1, (lua_Integer)token);
   id = lua_tointeger(L, -1);
-  lua_pop(L, 2);
+  lua_pop(L, 1);
+  if (id != 0 && !diluvium_queue_is_endpoint(L, id)) {
+    lua_pushnil(L);
+    lua_rawseti(L, -2, (lua_Integer)token);
+    id = 0;
+  }
+  lua_pop(L, 1);
   return id;
 }
 

@@ -1051,6 +1051,120 @@ static void a_faulting_child_reports_a_readable_reason (void) {
 
 
 /*
+** A child that exits cleanly after a denied hibernate is 'exited', not 'faulted'.
+**
+** Audit findings 15 and 19, and the last item profile A was waiting on. The fix
+** -- 'clear_error' immediately before Lua runs, in dv.c -- has been in since
+** build3 and is asserted at the ABI level by
+** 'an_error_does_not_outlive_the_step_that_caused_it'. What no test reproduced
+** is the symptom a *supervisor* sees, and that is the one that costs something:
+** the swarm decides between three events by asking whether the instance holds an
+** error string, so a string left behind by something other than the program's own
+** execution makes a healthy child look dead.
+**
+** The route, which is finding 19's and is natural rather than contrived: a
+** supervisor spawns a worker and asks for it to be hibernated in the same batch
+** of requests -- 'start it asleep'. Both are drained before either is driven, so
+** the hibernate is correctly denied (nothing is parked yet, the child has not
+** run), and 'dv_snapshot' leaves its refusal on the child. The child then does
+** its work and returns. Before the fix the parent was told
+**
+**   faulted|2|dv_snapshot: nothing is parked; a snapshot is taken of a program
+**             waiting on a queue, not of one that has not run or has finished
+**
+** and dvs.c's own comment says the three events exist because "a fault may need
+** a restart" -- so a supervisor restarts a worker that succeeded, for as long as
+** it keeps using that pattern.
+**
+** The control is the point of the test: the same child, the same supervisor,
+** without the hibernate request. If both halves ever report the same thing, this
+** test has stopped distinguishing anything.
+**
+** Hibernation has to be switched on for the route to exist at all, which is
+** worth noticing: since build3 the default refuses in 'dvs_hibernate' before
+** reaching 'dv_snapshot', so nothing is left on the child and profile A cannot
+** reach this symptom by the hibernate route even unfixed.
+*/
+static const char STICKY_SUP[] =
+  "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
+  "local ev  = queue.declare('system/events', {cap = 16})\n"
+  "local log = queue.declare('log', {cap = 16})\n"
+  /* Declaring a queue and returning: no error, no park, no budget. */
+  "local KID = \"local q = queue.declare('done', {cap = 2})\"\n"
+  "queue.push(sys, {op = 'spawn', code = KID, caps = {}})\n"
+  "if ASK_HIBERNATE then\n"
+  /* The first spawn is id 2, as everywhere else in this file. Reading the id
+     off the 'spawned' event instead would put the two requests in different
+     batches, and the child would have run and exited before the second
+     arrived -- which is the case this test is not about. */
+  "  queue.push(sys, {op = 'hibernate', id = 2})\n"
+  "end\n"
+  "while true do\n"
+  "  local id, e = queue.wait({ev})\n"
+  "  queue.push(log, tostring(e.event) .. '|' .. tostring(e.id))\n"
+  "end\n";
+
+/* Run STICKY_SUP once and return the events its child produced, joined by ','. */
+static const char *sticky_events (int ask_hibernate, char *out, size_t cap) {
+  dvs_swarm *sw = swarm_with_hibernation(4);
+  dvs_id root = 0;
+  static const char *caps[] = { "lifecycle", "queue:log" };
+  char src[sizeof(STICKY_SUP) + 64];
+  int i;
+  out[0] = '\0';
+  snprintf(src, sizeof(src), "local ASK_HIBERNATE = %s\n%s",
+           ask_hibernate ? "true" : "false", STICKY_SUP);
+  if (sw == NULL) return out;
+  if (dvs_root(sw, src, strlen(src), caps, 2, 0, 0, &root) != DVS_OK) {
+    snprintf(out, cap, "(the supervisor would not start: %s)",
+             dvs_last_error(sw));
+    dvs_free(sw);
+    return out;
+  }
+  for (i = 0; i < 8; i++) {
+    dv_instance *sup;
+    dv_queue_id log;
+    uint8_t buf[256];
+    size_t n = 0;
+    dvs_step(sw);
+    sup = dvs_instance(sw, root);
+    if (sup == NULL) break;
+    log = dv_queue_lookup(sup, "log");
+    while (log != 0 &&
+           dv_queue_pop(sup, log, buf, sizeof(buf), &n) == DV_OK && n > 1) {
+      char one[128];
+      msg_str(buf, n, one, sizeof(one));
+      /* Only the child's events; 'spawned' and 'hibernated' are the request
+         being answered and say nothing about how the child stopped. */
+      if (strncmp(one, "exited|", 7) == 0 ||
+          strncmp(one, "faulted|", 8) == 0 ||
+          strncmp(one, "exceeded|", 9) == 0) {
+        if (out[0] != '\0') strncat(out, ",", cap - strlen(out) - 1);
+        strncat(out, one, cap - strlen(out) - 1);
+      }
+    }
+  }
+  dvs_free(sw);
+  return out;
+}
+
+
+static void a_denied_hibernate_does_not_make_a_clean_exit_a_fault (void) {
+  char plain[256], asked[256];
+  sticky_events(0, plain, sizeof(plain));
+  sticky_events(1, asked, sizeof(asked));
+  ok(strcmp(plain, "exited|2") == 0,
+     "a child that finishes its work is reported as exited");
+  if (strcmp(plain, "exited|2") != 0) printf("      (got %s)\n", plain);
+  ok(strcmp(asked, "exited|2") == 0,
+     "and still is when a hibernate for it was denied earlier in the step");
+  if (strcmp(asked, "exited|2") != 0) printf("      (got %s)\n", asked);
+  ok(strcmp(plain, asked) == 0,
+     "so a refused hibernate leaves no trace in what the parent is told");
+}
+
+
+/*
 ** A bare "*" is a name, not a licence.
 **
 ** 'strncmp(held, want, 0)' returns 0 for any pair of strings, so a one-character
@@ -1500,6 +1614,7 @@ int main (void) {
 
   printf("\n=== the snapshot cache and wake_on_message (8.4, 9.5) ===\n");
   hibernation_is_off_unless_asked_for();
+  a_denied_hibernate_does_not_make_a_clean_exit_a_fault();
   pushing_to_a_dead_instance_is_gone();
   an_instance_swaps_out_and_a_message_wakes_it();
   a_cached_instance_without_wake_on_message_is_gone();

@@ -209,6 +209,50 @@ static void queues (void) {
 }
 
 
+/*
+** 6.4's `disabled` row, from the host side. Audit finding 10.
+**
+** M4 was accepted on "every row of 6.4 from the host side" and seven of the
+** eight rows were true of it; this was the eighth. Deleting the enabled check
+** in 'diluvium_queue_push_bytes' turned nothing red, and what that check exists
+** for is 6.1's reason -- a program going down should reject cleanly rather than
+** accept messages it will never read. Nothing in the tree said so from the side
+** a host is on: the only assertion on the flag was `enabled == 1`, the positive
+** direction, and the one guest that disabled a queue disabled a private one no
+** host push can reach.
+**
+** Disabled is not destroyed, which is the other half: what the queue already
+** holds stays readable, so a host can drain what a program pushed before it
+** stopped taking more.
+*/
+static void a_disabled_queue_refuses_a_host_push (void) {
+  dv_instance *inst = load(
+    "local q = queue.declare('work', {capacity = 2, exported = true}) "
+    "queue.push(q, 'held') "
+    "queue.disable(q) "
+    "return 0", 0);
+  dv_queue_id work;
+  dv_queue_info info;
+  uint8_t buf[64];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  eq_st(dv_run(inst, NULL), DV_DONE, "a program that disables a queue runs");
+  work = dv_queue_lookup(inst, "work");
+  ok(work != 0, "and the queue is still there afterwards");
+  memset(&info, 0, sizeof(info));
+  eq_st(dv_queue_state(inst, work, &info), DV_OK, "its state reads");
+  eq_i(info.enabled, 0, "and reports itself disabled");
+  eq_st(dv_queue_push(inst, work, MP_ONE, sizeof(MP_ONE)), DV_QUEUE_DISABLED,
+        "a host push into it is refused rather than silently stored");
+  eq_i(info.len, 1, "the message it held before is still held");
+  eq_st(dv_queue_pop(inst, work, buf, sizeof(buf), &n), DV_OK,
+        "and still pops, because disabled is not destroyed");
+  ok(n == 5 && memcmp(buf + 1, "held", 4) == 0,
+     "as the message the program pushed");
+  dv_free(inst);
+}
+
+
 static void zero_copy (void) {
   dv_instance *inst = load(
     "local q = queue.declare('out', {exported = true}) "
@@ -648,6 +692,64 @@ static void endpoint_preauthorised (void) {
   log = dv_queue_lookup(inst, "log");
   dv_queue_pop(inst, log, buf, sizeof(buf), &n);
   ok(n == 5 && memcmp(buf + 1, "live", 4) == 0, "and it is live");
+  dv_free(inst);
+}
+
+
+/*
+** Bind, destroy, bind again. Audit finding 11.
+**
+** Not on any profile's path, and here rather than under one because it is
+** reachable by accident: 'endpoint.bind' and 'queue.destroy' are both in the
+** guest table, and a program that finishes with a peer and tidies up is doing
+** the ordinary thing. The token-to-handle map had no way for an entry to leave
+** it, so the second bind returned the destroyed handle and said it had
+** succeeded; every push through it raised, and the token stayed unusable for the
+** life of the instance. The host saw it too -- 'dv_endpoint_queue' went on
+** naming a dead handle as the buffer to drain.
+**
+** The program pushes through the rebound handle rather than only inspecting it,
+** because "bind returned something" was true of the broken version as well.
+*/
+static void a_destroyed_endpoint_can_be_bound_again (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local out = queue.declare('log', {exported = true}) "
+    "local _, ref = queue.wait({inb}) "
+    "local first = endpoint.bind(ref, 'peer') "
+    "queue.destroy(first) "
+    "local ok, second = pcall(endpoint.bind, ref, 'peer') "
+    "if not ok then queue.push(out, 'rebind failed: ' .. tostring(second)) "
+    "  return 0 end "
+    "local okp, err = pcall(queue.push, second, 'through the new handle') "
+    "queue.push(out, tostring(okp) .. '|' .. tostring(second ~= first) "
+    "  .. '|' .. tostring(err)) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox, log;
+  uint8_t ref[3], buf[128];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  dv_endpoint_allow(inst, (const uint8_t *)"9", 1, 42);
+  inbox = dv_queue_lookup(inst, "inbox");
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  ref_message(ref, '9');
+  dv_queue_push(inst, inbox, ref, sizeof(ref));
+  eq_st(dv_resume(inst, inbox), DV_DONE,
+        "a program can destroy an endpoint queue and bind the token again");
+  log = dv_queue_lookup(inst, "log");
+  if (dv_queue_pop(inst, log, buf, sizeof(buf), &n) == DV_OK && n > 1) {
+    char text[128];
+    const char *msg = mp_str(buf, n, text, sizeof(text));
+    ok(strstr(msg, "true|true|") == msg,
+       "and the handle it gets back is a new, live one it can push through");
+    if (strstr(msg, "true|true|") != msg) printf("      (%s)\n", msg);
+  }
+  else ok(0, "and the handle it gets back is a new, live one it can push through");
+  /* And the host is told the truth about which buffer to drain. */
+  ok(dv_endpoint_queue(inst, 42) != 0,
+     "and the host's endpoint handle names the live queue, not the dead one");
   dv_free(inst);
 }
 
@@ -1470,6 +1572,361 @@ static void an_error_does_not_outlive_the_step_that_caused_it (void) {
 }
 
 
+/* ======================================================================
+** The guest library set (18.2, profile B)
+** ====================================================================== */
+
+/*
+** Run one statement in a fresh instance and hand back the error it raised, or
+** "" if it completed. The statement is all a refusal test needs, because the
+** refusals fire before they look at their arguments.
+*/
+static const char *raised (const char *stmt, uint32_t flags) {
+  static char buf[512];
+  dv_instance *inst = load(stmt, flags);
+  dv_waitset ws;
+  const char *msg;
+  buf[0] = '\0';
+  if (inst == NULL) return "load failed";
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  msg = dv_last_error(inst);
+  if (msg != NULL) snprintf(buf, sizeof(buf), "%s", msg);
+  dv_free(inst);
+  return buf;
+}
+
+
+/*
+** The twelve names an instance does not get, checked one at a time.
+**
+** Table-driven so the set cannot shrink without this failing: a later change
+** that puts one of these back has to delete a line here and say why in the
+** commit, rather than quietly widening what a guest reaches. The reason each
+** one is on the list is in src/dlibs.c.
+*/
+static void the_debug_library_is_narrowed (void) {
+  static const char *const gone[] = {
+    "debug", "getregistry", "getmetatable", "setmetatable",
+    "getupvalue", "setupvalue", "upvalueid", "upvaluejoin",
+    "getuservalue", "setuservalue", "sethook", "setlocal", NULL
+  };
+  int i;
+  for (i = 0; gone[i] != NULL; i++) {
+    char stmt[64], what[96];
+    const char *msg;
+    snprintf(stmt, sizeof(stmt), "debug.%s()", gone[i]);
+    snprintf(what, sizeof(what), "debug.%s refuses, by name", gone[i]);
+    msg = raised(stmt, 0);
+    ok(strstr(msg, "is not available inside a Diluvium instance") != NULL, what);
+    if (strstr(msg, "is not available inside a Diluvium instance") == NULL)
+      printf("      (%s)\n", msg);
+  }
+  /* And the refusal is worth reading: it says what the function would have
+     defeated, not just that it is gone. */
+  ok(strstr(raised("debug.sethook()", 0), "budget") != NULL,
+     "and sethook's refusal names the budget it would have switched off");
+}
+
+
+static void a_program_can_still_read_its_own_frames (void) {
+  /* The line is "read your own frames, write nothing": taking a traceback away
+     would cost a program the ability to report its own failure and buy no
+     boundary, because none of these four reaches outside the instance. */
+  ok(raised("assert(type(debug.traceback()) == 'string')", 0)[0] == '\0',
+     "debug.traceback still works");
+  ok(raised("assert(type(debug.getinfo(1)) == 'table')", 0)[0] == '\0',
+     "debug.getinfo still works");
+  ok(raised("local n = debug.getlocal(1, 1)", 0)[0] == '\0',
+     "debug.getlocal still works");
+  ok(raised("debug.gethook()", 0)[0] == '\0',
+     "debug.gethook still works");
+}
+
+
+/*
+** Finding 6 of the M0-M7 audit, end to end.
+**
+** The host authorises exactly one peer and hands the program nothing. Before
+** this release the program read the reference metatable out of
+** 'debug.getregistry()' by its own '__name', wrapped guessed peer bytes in a
+** table wearing it, and 'endpoint.bind' returned a live handle -- so 7.3's
+** "a reference cannot be forged" was false, and 9.3's attenuation, which rests
+** on a reference being a capability rather than a guessable name, was false
+** with it. The decisive assertion is the same one
+** 'a_guest_cannot_mint_a_reference' uses: no queue exists for the peer.
+*/
+static void the_registry_forgery_route_is_closed (void) {
+  dv_instance *inst = load(
+    "local out = queue.declare('log', {exported = true}) "
+    "pcall(endpoint.bind, setmetatable({}, {}), 'prime') "
+    "local ok, reg = pcall(debug.getregistry) "
+    "if not ok then queue.push(out, 'refused') return 0 end "
+    "for _, v in pairs(reg) do "
+    "  if type(v) == 'table' and rawget(v, '__name') == 'diluvium.endpoint.ref' "
+    "  then queue.push(out, 'found the metatable') "
+    "       local okb = pcall(endpoint.bind, setmetatable({'9'}, v), 'peer') "
+    "       queue.push(out, 'bind=' .. tostring(okb)) end end "
+    "return 0", 0);
+  dv_waitset ws;
+  uint8_t buf[256];
+  size_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  dv_endpoint_allow(inst, (const uint8_t *)"9", 1, 42);
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  if (dv_queue_pop(inst, dv_queue_lookup(inst, "log"), buf, sizeof(buf), &n)
+      == DV_OK && n > 1) {
+    char text[256];
+    ok(strcmp(mp_str(buf, n, text, sizeof(text)), "refused") == 0,
+       "a guest cannot reach the registry the reference metatable lives in");
+  }
+  else ok(0, "a guest cannot reach the registry the reference metatable lives in");
+  ok(dv_endpoint_queue(inst, 42) == 0,
+     "and no queue exists for the peer it tried to reach");
+  dv_free(inst);
+}
+
+
+/*
+** A budget that a program can switch off is not a budget.
+**
+** 'debug.sethook()' with no arguments is the documented way to clear a hook,
+** and 9.4's instruction budget is a count hook in the one slot a lua_State
+** has -- so before this release that one line disarmed it: an instance limited
+** to 200,000 instructions ran three million and reported 'insn_used' of nought.
+** Not found by the M0-M7 audit; found while closing finding 6, because it is
+** the same shape as the two budget defects that audit did find.
+*/
+static void a_guest_cannot_switch_its_own_budget_off (void) {
+  static const char *src =
+    "pcall(debug.sethook) local n = 0 while true do n = n + 1 end";
+  dv_instance *inst = load(src, 0);
+  dv_waitset ws;
+  uint64_t used = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  ok(dv_set_budget(inst, 200000, 0) == DV_OK, "a budget is set");
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_ERROR,
+        "a program that tries to clear its own hook still stops");
+  ok(dv_exceeded(inst), "and it is the budget that stopped it");
+  dv_usage(inst, &used, NULL);
+  ok(used >= 200000, "and the count was kept while it tried");
+  dv_free(inst);
+}
+
+
+/*
+** The way out, and what it costs.
+**
+** Profile A -- every program written or templated by the operator -- has a real
+** use for the whole library, so it is one flag rather than a fork of the build.
+** Setting it puts the three escapes back, which is why the constant is spelled
+** the way it is; this asserts both halves so neither can be a surprise.
+*/
+static void a_host_can_ask_for_the_whole_debug_library (void) {
+  ok(raised("assert(type(debug.getregistry()) == 'table')",
+            DV_FLAG_UNSAFE_DEBUG)[0] == '\0',
+     "DV_FLAG_UNSAFE_DEBUG puts the whole debug library back");
+  ok(raised("assert(debug.getmetatable(setmetatable({}, {__metatable = 0})))",
+            DV_FLAG_UNSAFE_DEBUG)[0] == '\0',
+     "including the parts a narrowed instance refuses");
+  {
+    /* The cost, asserted rather than only documented: with the flag set the
+       budget is switchable-off again, and a host reading this test learns that
+       from the test rather than from a surprise in production. */
+    dv_instance *inst = load(
+      "debug.sethook() local n = 0 for i = 1, 3000000 do n = n + 1 end",
+      DV_FLAG_UNSAFE_DEBUG);
+    dv_waitset ws;
+    if (inst == NULL) { ok(0, "load"); return; }
+    dv_set_budget(inst, 200000, 0);
+    memset(&ws, 0, sizeof(ws));
+    dv_run(inst, &ws);
+    ok(!dv_exceeded(inst),
+       "and with it set a program can switch its own budget off, as documented");
+    dv_free(inst);
+  }
+}
+
+
+/*
+** Narrowing 'debug' must not have broken every snapshot ever taken.
+**
+** 10.4 requires the permanents set to be identical on save and restore, and the
+** fingerprint in the header is a hash over the sorted *names* the module walk
+** finds -- so replacing twelve of the debug library's functions is safe only
+** because the names stay. That is the reason they are refusals rather than
+** deletions, and it is a claim about a hash rather than something a reader can
+** see, so it is asserted here: a snapshot from a narrowed instance restores
+** into one that asked for the whole library, and the reverse. If a later change
+** deletes a field instead of replacing it, this is what goes red.
+**
+** The permanent resolves in the *restoring* runtime, which is the behaviour to
+** want: a program captured while holding 'debug.sethook' gets whichever
+** 'debug.sethook' the instance it wakes in is entitled to.
+*/
+static void a_snapshot_crosses_the_debug_flag (void) {
+  static const char *src =
+    "local work = queue.declare('work', {cap = 2})\n"
+    "local keep = debug.traceback\n"
+    "queue.wait({work})\n";
+  uint32_t both[2] = { 0, DV_FLAG_UNSAFE_DEBUG };
+  int i;
+  for (i = 0; i < 2; i++) {
+    dv_config cfg;
+    dv_instance *a, *b;
+    uint8_t *buf;
+    size_t need = 0, got = 0;
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.abi_version = DV_ABI_VERSION;
+    cfg.flags = both[i];
+    a = dv_new(&cfg);
+    if (a == NULL || !park_on_queue(a, src)) {
+      ok(0, "an instance parks"); dv_free(a); continue;
+    }
+    if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0) {
+      ok(0, "it snapshots"); dv_free(a); continue;
+    }
+    buf = (uint8_t *)malloc(need);
+    if (buf == NULL) { ok(0, "room for the snapshot"); dv_free(a); continue; }
+    dv_snapshot(a, NULL, buf, need, &got);
+    dv_free(a);
+    cfg.flags = both[1 - i];   /* the other side of the flag */
+    b = dv_new(&cfg);
+    if (b == NULL) { ok(0, "a fresh instance"); free(buf); continue; }
+    {
+      dv_status st = dv_restore(b, NULL, buf, got);
+      ok(st == DV_OK, both[i] == 0
+           ? "a narrowed instance's snapshot restores under the whole library"
+           : "and one taken under the whole library restores into a narrowed one");
+      if (st != DV_OK) printf("      (%s)\n", dv_last_error(b));
+    }
+    dv_free(b);
+    free(buf);
+  }
+}
+
+
+/*
+** DV_FLAG_SEALED, and what an unsealed instance reaches without it.
+**
+** Found while writing this release's notes, by checking a claim rather than by
+** the M0-M7 audit: 18.2's profile B named `debug` as the last thing between a
+** deployment and running programs it did not write, and that list was
+** incomplete. An instance gets every standard library, so `os.execute`,
+** `io.popen`, `io.open` and `package.loadlib` were all in reach -- and
+** `io.open('/etc/passwd')` returned a file handle. Narrowing `debug` makes the
+** capability layer a boundary; it does nothing about a program that can start a
+** process, which does not need to forge an endpoint reference to do harm.
+**
+** The unsealed half is asserted here too, deliberately. It is the default, so a
+** reader of this file should see it stated rather than have to infer it from
+** the absence of a test -- and if the default ever changes, this is the line
+** that has to change with it.
+*/
+static void an_instance_is_not_sealed_by_default (void) {
+  ok(raised("assert(os.execute and io.popen and package.loadlib)", 0)[0] == '\0',
+     "without DV_FLAG_SEALED an instance has os, io and package");
+  ok(raised("local f = io.open('/etc/passwd') assert(f) f:close()", 0)[0] == '\0',
+     "and io.open really opens a file the host never mentioned");
+}
+
+
+static void a_sealed_instance_reaches_nothing_outside_itself (void) {
+  static const struct { const char *expr, *what; } gone[] = {
+    { "os",      "os" },
+    { "io",      "io" },
+    { "package", "package" },
+    { "require", "require" },
+    { "dofile",  "dofile" },
+    { "loadfile","loadfile" },
+    { NULL, NULL }
+  };
+  int i;
+  for (i = 0; gone[i].expr != NULL; i++) {
+    char stmt[64], what[96];
+    snprintf(stmt, sizeof(stmt), "assert(%s == nil)", gone[i].expr);
+    snprintf(what, sizeof(what), "a sealed instance has no '%s'", gone[i].what);
+    ok(raised(stmt, DV_FLAG_SEALED)[0] == '\0', what);
+  }
+  /* What is left is the language and the queues, which is the point: sealing
+     must not cost a program the ability to do its job. */
+  ok(raised("local q = queue.declare('w', {cap = 2}) "
+            "queue.push(q, msgpack.encode and 'ok' or 'ok') "
+            "assert(#('x'):rep(3) == 3 and math.floor(1.5) == 1) "
+            "assert(type(print) == 'function')", DV_FLAG_SEALED)[0] == '\0',
+     "and still has the language, the queues, and print");
+}
+
+
+/*
+** Unlike DV_FLAG_UNSAFE_DEBUG, a snapshot does not cross this one -- and that is
+** the correct answer rather than a limitation, because a program captured
+** holding 'io.open' has nowhere to land in a state that has none. The mechanism
+** is the permanents fingerprint (10.4), which covers names, and sealing removes
+** names rather than replacing them.
+*/
+static void a_snapshot_does_not_cross_the_seal (void) {
+  static const char *src =
+    "local work = queue.declare('work', {cap = 2})\n"
+    "queue.wait({work})\n";
+  dv_config cfg;
+  dv_instance *a, *b;
+  uint8_t *buf;
+  size_t need = 0, got = 0;
+  memset(&cfg, 0, sizeof(cfg));
+  cfg.abi_version = DV_ABI_VERSION;
+  cfg.flags = DV_FLAG_SEALED;
+  a = dv_new(&cfg);
+  if (a == NULL || !park_on_queue(a, src)) {
+    ok(0, "a sealed instance parks"); dv_free(a); return;
+  }
+  if (dv_snapshot(a, NULL, NULL, 0, &need) != DV_OK || need == 0) {
+    ok(0, "it snapshots"); dv_free(a); return;
+  }
+  buf = (uint8_t *)malloc(need);
+  if (buf == NULL) { ok(0, "room"); dv_free(a); return; }
+  dv_snapshot(a, NULL, buf, need, &got);
+  dv_free(a);
+  cfg.flags = 0;                /* an unsealed instance: more names, not fewer */
+  b = dv_new(&cfg);
+  if (b == NULL) { ok(0, "a fresh instance"); free(buf); return; }
+  ok(dv_restore(b, NULL, buf, got) != DV_OK,
+     "a sealed instance's snapshot does not restore into an unsealed one");
+  {
+    const char *e = dv_last_error(b);
+    ok(e != NULL && strstr(e, "permanents") != NULL,
+       "and the refusal names the permanents set");
+    if (e != NULL && strstr(e, "permanents") == NULL) printf("      (%s)\n", e);
+  }
+  dv_free(b);
+  free(buf);
+  /* And it does restore into another sealed one, so the refusal above is about
+     the seal rather than about sealed instances being unsnapshottable. */
+  cfg.flags = DV_FLAG_SEALED;
+  a = dv_new(&cfg);
+  if (a != NULL && park_on_queue(a, src)) {
+    size_t n2 = 0, g2 = 0;
+    uint8_t *b2;
+    dv_snapshot(a, NULL, NULL, 0, &n2);
+    b2 = (uint8_t *)malloc(n2 != 0 ? n2 : 1);
+    if (b2 != NULL) {
+      dv_snapshot(a, NULL, b2, n2, &g2);
+      dv_free(a);
+      b = dv_new(&cfg);
+      ok(b != NULL && dv_restore(b, NULL, b2, g2) == DV_OK,
+         "but does restore into another sealed one");
+      dv_free(b);
+      free(b2);
+      return;
+    }
+  }
+  dv_free(a);
+  ok(0, "but does restore into another sealed one");
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -1477,6 +1934,7 @@ int main (void) {
   run_to_completion();
   errors();
   queues();
+  a_disabled_queue_refuses_a_host_push();
   zero_copy();
   notification();
   parking();
@@ -1492,6 +1950,7 @@ int main (void) {
   endpoint_refusals();
   endpoint_preauthorised();
   endpoint_with_no_host_binding();
+  a_destroyed_endpoint_can_be_bound_again();
   a_guest_cannot_mint_a_reference();
   a_reference_survives_being_forwarded();
   a_forged_ext_is_not_a_reference();
@@ -1503,6 +1962,17 @@ int main (void) {
   a_budget_does_not_disturb_a_program_inside_it();
   a_memory_budget_refuses_an_allocation();
   a_budget_cannot_be_changed_mid_flight();
+
+  printf("\n=== the guest library set (18.2 profile B) ===\n");
+  the_debug_library_is_narrowed();
+  a_program_can_still_read_its_own_frames();
+  the_registry_forgery_route_is_closed();
+  a_guest_cannot_switch_its_own_budget_off();
+  a_host_can_ask_for_the_whole_debug_library();
+  a_snapshot_crosses_the_debug_flag();
+  an_instance_is_not_sealed_by_default();
+  a_sealed_instance_reaches_nothing_outside_itself();
+  a_snapshot_does_not_cross_the_seal();
 
   printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");
   a_parked_instance_snapshots_and_wakes();

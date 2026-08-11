@@ -26,4 +26,29 @@
 */
 LUA_API void diluvium_openlibs (lua_State *L);
 
+
+/*
+** The whole library set an *instance* gets: the standard libraries, with
+** 'debug' narrowed, and then Diluvium's own.
+**
+** Separate from 'diluvium_openlibs' because the narrowing is not wanted
+** everywhere. The CLI and the browser build both host a program that is the
+** person at the keyboard's own, and the upstream test suite drives 'debug'
+** hard; those two callers keep 'luaL_openlibs'. An instance is the case where
+** the program came from somewhere else, and that is where the standard set
+** stops being a reasonable default -- see the narrowing's own comment in
+** dlibs.c for which functions go and why each one has to.
+*/
+#define DILUVIUM_GUEST_FULL_DEBUG	0x1u
+
+/*
+** Leave out `io`, `os` and `package` as well: the three libraries that reach
+** anything outside this state's own memory. What is left is the language, the
+** queues, and whatever the host pushes into them -- which is the model 7.1
+** describes, made true rather than assumed.
+*/
+#define DILUVIUM_GUEST_SEALED		0x2u
+
+LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags);
+
 #endif

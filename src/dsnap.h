@@ -110,6 +110,12 @@ LUA_API size_t diluvium_snap_headerfor (lua_State *L,
 #define DILUVIUM_SNAP_HOST_MISMATCH	6
 #define DILUVIUM_SNAP_BAD_PAYLOAD	7  /* the header was fine; the rest is not */
 #define DILUVIUM_SNAP_CORRUPT		8  /* the payload is not the bytes that were written */
+/* The highest code above. Bump it in the same edit that adds one: it is what
+   'every_refusal_has_its_own_sentence' walks, and a code past it would be
+   checked by nothing. The test also asserts that the code after this one has no
+   sentence, so forgetting to bump it is caught rather than silently narrowing
+   what is checked. */
+#define DILUVIUM_SNAP_LAST		DILUVIUM_SNAP_CORRUPT
 
 LUA_API int diluvium_snap_checkheader (lua_State *L,
                                        const diluvium_snap_opts *opts,
