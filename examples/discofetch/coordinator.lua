@@ -90,9 +90,6 @@ local function admit (c)
   queue.push(sys, {
     op   = 'spawn',
     code = handler_for(c.client, c.want, c.nat),
-    -- Narrower again: one queue name, for this client only, and *no* lifecycle.
-    -- A handler therefore cannot spawn anything -- it may declare
-    -- system/lifecycle and write to it, and nothing will ever read it.
     --[[
     Narrower again: one queue name, for this client only, and *no* lifecycle. A
     handler therefore cannot spawn anything -- it may declare system/lifecycle and
