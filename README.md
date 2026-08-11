@@ -189,7 +189,23 @@ See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#ter
 
 ## Quick Start
 
-Check back frequently for updates
+**[`doc/Guide.md` is the programmer's guide](doc/Guide.md)** — the language additions,
+the `msgpack`, `queue` and `endpoint` libraries, the shape of a program that parks on a
+queue, embedding an instance from C, and running a swarm of them. Every sample in it
+was run against the tree.
+
+For a worked example, `examples/discofetch/` is a supervisor, a coordinator and one
+instance per connected client, with a Dockerfile:
+
+```sh
+make -C examples/discofetch run
+```
+
+The rest of `doc/` is about building Diluvium rather than using it:
+`doc/Messaging.md` is the messaging and swarm design (and §18 the known defects),
+`doc/ROADMAP.md` the language and compiler state, `doc/Lab.md` the brief for a REPL
+and debugger, `doc/Determinism.md` an open design for a replayable scheduler, and
+`doc/audit/` the evidence behind §18.
 
 ## Installation Instructions
 

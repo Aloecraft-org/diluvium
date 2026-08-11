@@ -32,3 +32,6 @@ __pycache__/
 
 # Workflow agents get their own worktrees under here; they are scratch space.
 .claude/worktrees/
+
+# Built by examples/discofetch/Makefile
+examples/discofetch/swarmd

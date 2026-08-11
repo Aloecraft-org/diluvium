@@ -2948,10 +2948,20 @@ switch exists:
       captured rather than refused, and one of those two is the answer.
 
 The one thing not on this list is anything about `diluvium lab`, the REPL or the
-debugger. That is `doc/Lab.md`, which is a design brief rather than a checklist
-because those features do not exist yet. Its third finding is worth re-reading
-against this release, because it is now half-answered: there is one hook slot, and a
-debug hook installed naively would replace the budget hook. An instance no longer
-lets a *program* do that — `debug.sethook` is one of the twelve refusals — so what
-remains is the host-side question of how `diluvium lab` installs one, and the answer
-"dispatch to both or refuse and say why" is unchanged.
+debugger. That is `doc/Lab.md`, which is a design brief rather than a checklist because
+those features do not exist yet. Two things about it are worth carrying forward against
+this release.
+
+Its central question is settled by execution rather than by reading: a breakpoint that
+parks a program **works** (a C hook may yield, and the parked frame's locals are readable
+by name from outside), and an all-guest debugger **cannot** be built (a Lua hook is not
+yieldable). So that work grows the `dv_` ABI rather than sitting on top of it — which
+this release reinforces from the other direction, since `dv.h` exposes no `lua_State` and
+therefore no host can reach `lua_sethook` at all.
+
+And its one-hook-slot hazard is now half-answered. An instance no longer lets a *program*
+take the slot — `debug.sethook` is one of the twelve refusals — so a guest can no longer
+switch its own budget off. What remains is the host-side question of how `diluvium lab`
+installs one, and the answer "dispatch to both, or refuse and say why" is unchanged. The
+same refusal also costs Lab.md's guest-side *tracer*, which now needs
+`DV_FLAG_UNSAFE_DEBUG`.
