@@ -59,10 +59,10 @@ releases:
 
   - version: "5.5.1_build4"
     tag: v5.5.1_build4
-    date: null
-    status: unreleased
+    date: 2026-08-11
+    status: released
     stable: false
-    mirror: false
+    mirror: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
