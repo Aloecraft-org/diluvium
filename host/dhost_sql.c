@@ -41,6 +41,40 @@ typedef struct dh_sql {
 } dh_sql;
 
 
+/*
+** The confinement authorizer, and it is load-bearing rather than defensive.
+** 'sqlite3_stmt_readonly' answers "does this modify the database", and a
+** review found that is the wrong question for a sandbox: ATTACH, DETACH,
+** BEGIN, COMMIT and SAVEPOINT all answer readonly=1, so the write-gate below
+** let them through -- and ATTACH escapes the one configured file (an
+** arbitrary-file read, or write on a readwrite deployment), while BEGIN
+** leaves a transaction open across calls on the single shared handle, its
+** locks and its state visible to every other guest. The write-gate answers
+** "does it change data"; this answers "does it touch connection state or
+** reach outside the file", which is the question confinement actually turns
+** on. Everything a query or a data statement legitimately does -- SELECT,
+** INSERT, UPDATE, DELETE, CREATE, the functions and reads under them --
+** returns SQLITE_OK; the escape hatches return SQLITE_DENY and fail the
+** statement at prepare. PRAGMA is denied wholesale: a guest has no read-only
+** PRAGMA it needs, and several (writable_schema, foreign_keys) are
+** connection-state changes that would leak the same way.
+*/
+static int sql_authorizer (void *ud, int action, const char *a, const char *b,
+                           const char *c, const char *d) {
+  (void)ud; (void)a; (void)b; (void)c; (void)d;
+  switch (action) {
+    case SQLITE_ATTACH:
+    case SQLITE_DETACH:
+    case SQLITE_TRANSACTION:
+    case SQLITE_SAVEPOINT:
+    case SQLITE_PRAGMA:
+      return SQLITE_DENY;
+    default:
+      return SQLITE_OK;
+  }
+}
+
+
 static int arg_str (const unsigned char *args, size_t argslen,
                     const char *key, const char **p, size_t *len) {
   diluvium_mp_cursor c;
@@ -56,22 +90,35 @@ static int arg_str (const unsigned char *args, size_t argslen,
   return 1;
 }
 
-/* Bind the 'params' array, if present. Returns 0 or fills 'detail'. */
+/* Bind the 'params' array. Returns 0 or fills 'detail'. The count must match
+   the statement's placeholders exactly: too few would silently NULL-bind the
+   rest, which is the truncation the row cap refuses to do elsewhere wearing a
+   quieter disguise. */
 static int bind_params (sqlite3_stmt *st, const unsigned char *args,
                         size_t argslen, char *detail, size_t detailcap) {
   diluvium_mp_cursor c;
   diluvium_mp_token t;
-  size_t i, n;
-  if (args == NULL)
-    return 0;
-  diluvium_mp_open(&c, args, argslen);
-  if (!diluvium_mp_field(&c, "params"))
-    return 0;
-  if (!diluvium_mp_read(&c, &t) || t.kind != DILUVIUM_MP_ARRAY) {
-    snprintf(detail, detailcap, "'params' must be an array");
+  size_t i, n = 0;
+  int want = sqlite3_bind_parameter_count(st);
+  int have_field = 0;
+  if (args != NULL) {
+    diluvium_mp_open(&c, args, argslen);
+    if (diluvium_mp_field(&c, "params")) {
+      have_field = 1;
+      if (!diluvium_mp_read(&c, &t) || t.kind != DILUVIUM_MP_ARRAY) {
+        snprintf(detail, detailcap, "'params' must be an array");
+        return -1;
+      }
+      n = t.len;
+    }
+  }
+  if ((size_t)want != n) {
+    snprintf(detail, detailcap, "the statement has %d parameter(s) but %d "
+             "were supplied; bind them all or none", want, (int)n);
     return -1;
   }
-  n = t.len;
+  if (!have_field)
+    return 0;
   for (i = 0; i < n; i++) {
     int rc;
     if (!diluvium_mp_read(&c, &t)) {
@@ -162,6 +209,19 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
   }
   if (!arg_str(args, argslen, "sql", &sql, &sqllen)) {
     snprintf(detail, detailcap, "args.sql must be the statement, as a string");
+    return DH_CALL_ERROR;
+  }
+  /* An embedded NUL would end the statement early at prepare while the tail
+     check below, walking a C string, could not see past it -- so the bytes
+     after it would be neither run nor refused, a blind spot rather than a
+     bug today but the wrong shape. Refuse it. And SQLite's lengths are int,
+     so an implausible statement is refused before the cast can flip sign. */
+  if (sqllen > (size_t)2000000000u) {
+    snprintf(detail, detailcap, "the statement is implausibly long");
+    return DH_CALL_ERROR;
+  }
+  if (memchr(sql, '\0', sqllen) != NULL) {
+    snprintf(detail, detailcap, "the statement has an embedded NUL byte");
     return DH_CALL_ERROR;
   }
   /* NUL-terminate a copy: the cursor's bytes are a slice of the request. */
@@ -292,6 +352,10 @@ int dh_sql_open (dh_host *h, char *err, size_t errcap) {
     return -1;
   }
   sqlite3_busy_timeout(s->db, 2000);
+  sqlite3_set_authorizer(s->db, sql_authorizer, s);
+  /* Belt to the authorizer's braces: no ATTACH means no reaching another
+     file even if a future SQLite classified one differently. */
+  sqlite3_limit(s->db, SQLITE_LIMIT_ATTACHED, 0);
   if (dh_register(h, "sql", conn_sql, s) != 0) {
     snprintf(err, errcap, "could not register the sql connector");
     sqlite3_close(s->db);

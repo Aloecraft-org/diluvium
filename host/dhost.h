@@ -205,6 +205,11 @@ void dh_http_close (dh_host *h);
    sleep when nothing is ready. */
 int dh_http_poll (dh_host *h, int timeout_ms);
 
+/* Milliseconds until the earliest live connection deadline, or -1 when the
+   listener holds none. Lets dh_host_poll_timeout bound a quiet-socket sleep
+   so a slow client's deadline fires near its moment. */
+int dh_http_next_timeout (dh_host *h);
+
 int dh_sql_open (dh_host *h, char *err, size_t errcap);
 void dh_sql_close (dh_host *h);
 

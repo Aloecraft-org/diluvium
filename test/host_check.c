@@ -22,6 +22,8 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 
+#include <sqlite3.h>
+
 #include "dmsgpack.h"
 #include "dhost.h"
 
@@ -391,6 +393,89 @@ static void sql_query_and_exec_split_along_the_grant (void) {
   dh_host_close(&h);
 }
 
+/*
+** The confinement escapes a review found, each now refused. A guest holding
+** only host:sql/query, mode=read, must not be able to ATTACH another file,
+** open a transaction, run a PRAGMA, or under-supply parameters. A secret
+** file is planted so a successful ATTACH would be provable exfiltration
+** rather than a guess.
+*/
+static void sql_confinement_holds (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[256], secretpath[512], dbpath[512];
+  FILE *sf;
+  sqlite3 *sdb;
+  /* A second database with a secret, and the deployment's own db, both made
+     with the library directly so the guest never had a hand in them. */
+  snprintf(secretpath, sizeof(secretpath), "%s/secret.db", tmpdir);
+  snprintf(dbpath, sizeof(dbpath), "%s/main.db", tmpdir);
+  if (sqlite3_open(secretpath, &sdb) == SQLITE_OK) {
+    sqlite3_exec(sdb, "CREATE TABLE s (v TEXT); INSERT INTO s VALUES "
+                      "('TOP-SECRET')", NULL, NULL, NULL);
+    sqlite3_close(sdb);
+  }
+  if (sqlite3_open(dbpath, &sdb) == SQLITE_OK) {
+    sqlite3_exec(sdb, "CREATE TABLE t (a INTEGER)", NULL, NULL, NULL);
+    sqlite3_close(sdb);
+  }
+  (void)sf;
+  {
+    char src[1400];
+    snprintf(src, sizeof(src),
+      "local calls = queue.declare('host/calls', {cap=8, exported=true})\n"
+      "local replies = queue.declare('host/replies', {cap=8})\n"
+      "local log = queue.declare('log', {cap=8, exported=true})\n"
+      "local park = queue.declare('park', {cap=1})\n"
+      "local function ask(req)\n"
+      "  queue.push(calls, req); local _, m = queue.wait({replies}, 5000)\n"
+      "  return m end\n"
+      "local v = {}\n"
+      "v[1] = (ask({tok=1, call='sql/query',\n"
+      "  args={sql=\"ATTACH DATABASE '%s/secret.db' AS x\"}}).status ~= 'ok')\n"
+      "v[2] = (ask({tok=2, call='sql/query',\n"
+      "  args={sql='BEGIN'}}).status ~= 'ok')\n"
+      "v[3] = (ask({tok=3, call='sql/query',\n"
+      "  args={sql='PRAGMA foreign_keys=OFF'}}).status ~= 'ok')\n"
+      "-- a select that under-supplies its parameters\n"
+      "v[4] = (ask({tok=4, call='sql/query',\n"
+      "  args={sql='SELECT a FROM t WHERE a = ?'}}).status ~= 'ok')\n"
+      "-- and a plain read still works, so the gate is not just off\n"
+      "v[5] = (ask({tok=5, call='sql/query',\n"
+      "  args={sql='SELECT count(*) FROM t'}}).status == 'ok')\n"
+      "if v[1] and v[2] and v[3] and v[4] and v[5] then queue.push(log,'good')\n"
+      "else queue.push(log, 'bad: '..tostring(v[1])..tostring(v[2])\n"
+      "  ..tostring(v[3])..tostring(v[4])..tostring(v[5])) end\n"
+      "queue.wait({park})\n", tmpdir);
+    fixture("sup_conf.lua", src);
+  }
+  {
+    char cfgsrc[768];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_conf.lua',\n"
+             "  caps = { 'host:sql/query' },\n"
+             "  connectors = { sql = { path = '%s/main.db',\n"
+             "    mode = 'read' } } }\n", tmpdir, tmpdir);
+    fixture("conf.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/conf.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the confinement deployment opens");
+      return;
+    }
+  }
+  ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
+     "ATTACH, BEGIN, PRAGMA and an under-supplied param are each refused, "
+     "and a plain read still works");
+  if (log[0] != '\0' && strcmp(log, "good") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
 
 /* ------------------------------------------------------------------ http */
 
@@ -472,6 +557,100 @@ static void a_request_becomes_a_message_and_a_message_an_answer (void) {
   dh_host_close(&h);
 }
 
+/* Send one raw request to a running host on 'port', drive, collect the raw
+   response. Returns bytes read. */
+static size_t http_exchange (dh_host *h, int port, const char *req,
+                             size_t reqlen, char *resp, size_t cap) {
+  int cfd = socket(AF_INET, SOCK_STREAM, 0);
+  struct sockaddr_in addr;
+  size_t got = 0;
+  int i, sent = 0;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons((uint16_t)port);
+  inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
+  if (connect(cfd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+    close(cfd);
+    return 0;
+  }
+  fcntl(cfd, F_SETFL, O_NONBLOCK);
+  resp[0] = '\0';
+  for (i = 0; i < 400 && got < cap - 1; i++) {
+    ssize_t n;
+    dh_host_turn(h);
+    dh_http_poll(h, 5);
+    if (!sent && write(cfd, req, reqlen) == (ssize_t)reqlen)
+      sent = 1;
+    n = read(cfd, resp + got, cap - 1 - got);
+    if (n > 0) { got += (size_t)n; resp[got] = '\0'; }
+    else if (n == 0 && got > 0) break;
+  }
+  close(cfd);
+  return got;
+}
+
+/*
+** The listener against a hostile guest and a hostile client, both refused.
+** The guest is inside the sandbox, so its reply's content_type is untrusted;
+** a CRLF in it must not inject a header. The client is outside the LB's TLS,
+** so a smuggling-shaped request -- two Content-Lengths -- must be a refusal,
+** not a guess about which the LB believed.
+*/
+static void the_listener_refuses_injection_and_smuggling (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], resp[2048];
+  fixture("sup_evil.lua",
+    "local inq = queue.declare('http_in', {cap = 8})\n"
+    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "while true do\n"
+    "  local _, m, why = queue.wait({inq})\n"
+    "  if why == 'ok' then\n"
+    "    queue.push(outq, {conn = m.conn, status = 200, body = 'ok',\n"
+    "      content_type = 'x/y\\r\\nEvil-Injected: 1'})\n"   /* the attack */
+    "  end\n"
+    "end\n");
+  {
+    char cfgsrc[512];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_evil.lua',\n"
+             "  connectors = { listen = { port = 18473,\n"
+             "    deadline_ms = 3000 } } }\n", tmpdir);
+    fixture("evil.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/evil.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the evil deployment opens (is port 18473 free?)");
+      return;
+    }
+  }
+  {
+    static const char req[] = "GET /x HTTP/1.1\r\nHost: c\r\n\r\n";
+    size_t got = http_exchange(&h, 18473, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "Evil-Injected") == NULL,
+       "a control character in the guest's content_type injects no header");
+    if (got > 0 && strstr(resp, "Evil-Injected") != NULL)
+      printf("      (INJECTED: %.160s)\n", resp);
+  }
+  {
+    static const char req[] = "POST /x HTTP/1.1\r\nHost: c\r\n"
+                              "Content-Length: 5\r\nContent-Length: 6\r\n\r\n"
+                              "hello";
+    size_t got = http_exchange(&h, 18473, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "HTTP/1.1 400") != NULL,
+       "two Content-Length headers are a 400, not a smuggling gamble");
+    if (got > 0 && strstr(resp, "HTTP/1.1 400") == NULL)
+      printf("      (response: %.120s)\n", resp);
+  }
+  dh_host_close(&h);
+}
+
 
 int main (void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/host_check_XXXXXX");
@@ -486,7 +665,9 @@ int main (void) {
   the_grant_gates_and_the_refusals_name_themselves();
   a_guest_wait_timeout_is_fired_by_the_host_clock();
   sql_query_and_exec_split_along_the_grant();
+  sql_confinement_holds();
   a_request_becomes_a_message_and_a_message_an_answer();
+  the_listener_refuses_injection_and_smuggling();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }

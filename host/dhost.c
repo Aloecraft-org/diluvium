@@ -36,8 +36,20 @@ void dh_buf_free (dh_buf *b) {
 static int dh_grow (dh_buf *b, size_t need) {
   unsigned char *np;
   size_t cap = (b->cap != 0) ? b->cap : 256;
-  while (cap - b->len < need)
+  /* Doubling with an overflow guard. Unbounded, 'cap *= 2' wraps through
+     SIZE_MAX to 0 -- an infinite loop, or an undersized buffer that leaves
+     b->p dangling on the realloc(,0) that follows. Unreachable on a 64-bit
+     host where every caller bounds 'need' to megabytes, but dh_buf is
+     exported for connectors that live elsewhere, and on a 32-bit size_t
+     (the wasm32 target) the threshold is only 2 GB. Refuse rather than
+     wrap. */
+  if (need > SIZE_MAX - b->len)
+    return -1;
+  while (cap - b->len < need) {
+    if (cap > SIZE_MAX / 2)
+      return -1;
     cap *= 2;
+  }
   if (cap == b->cap)
     return 0;
   np = (unsigned char *)realloc(b->p, cap);
@@ -342,8 +354,8 @@ int dh_config_load (const char *path, dh_config *out, char *err,
       s = (lua_type(L, -1) == LUA_TSTRING) ? lua_tolstring(L, -1, &sn) : NULL;
       if (s == NULL || sn + 1 > DH_NAME_MAX) {
         lua_pop(L, 2);
-        cfg_fail(err, errcap, "config.caps[%s] must be a short string%s",
-                 "i", "");
+        cfg_fail(err, errcap, "a config.caps entry is not a short string%s%s",
+                 "", "");
         goto done;
       }
       memcpy(out->caps[out->ncaps++], s, sn + 1);
@@ -724,6 +736,21 @@ static void pump_instance (dh_host *h, dh_slot *sc) {
     const uint8_t *req = NULL;
     size_t reqlen = 0;
     dh_buf reply;
+    /* Do not drain a request we cannot answer. If the reply queue is full,
+       leave the request in place and stop pumping this instance this turn:
+       "every drained request is answered" (Hostcall.md) is kept by not
+       draining until there is room, which also means a stateful connector
+       (sql/exec) is never re-run on a retry -- answering, then failing to
+       deliver, then recomputing next turn would double-apply its write.
+       Backpressure propagates backward to the guest, which is correct: it
+       undersized a queue it owns, and it will drain its replies when driven. */
+    if (replies != 0) {
+      dv_queue_info info;
+      memset(&info, 0, sizeof(info));
+      if (dv_queue_state(inst, replies, &info) == DV_OK &&
+          info.capacity > 0 && info.len >= info.capacity)
+        break;
+    }
     if (dv_queue_peek(inst, calls, &req, &reqlen) != DV_OK)
       break;
     dh_buf_init(&reply);
@@ -891,15 +918,25 @@ int dh_host_turn (dh_host *h) {
 int dh_host_poll_timeout (dh_host *h) {
   dh_slot *sc;
   int64_t next = -1;
+  int http;
   for (sc = h->slots; sc != NULL; sc = sc->next) {
     if (sc->has_deadline && (next < 0 || sc->deadline_ms < next))
       next = sc->deadline_ms;
   }
-  if (next < 0)
-    return -1;
-  if (next <= h->now_ms)
-    return 0;
-  if (next - h->now_ms > 60000)
-    return 60000;
-  return (int)(next - h->now_ms);
+  /* Fold in the listener's earliest connection deadline, so a caller that
+     sleeps for this value still wakes to enforce a slow client's timeout --
+     the comment used to claim this happened and it did not. */
+  http = dh_http_next_timeout(h);
+  if (next < 0) {
+    if (http < 0)
+      return -1;
+    return http;
+  }
+  {
+    int guest = (next <= h->now_ms) ? 0
+              : (next - h->now_ms > 60000) ? 60000 : (int)(next - h->now_ms);
+    if (http >= 0 && http < guest)
+      return http;
+    return guest;
+  }
 }

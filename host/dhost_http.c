@@ -33,6 +33,7 @@
 #include <netinet/tcp.h>
 #include <poll.h>
 #include <stdio.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -90,6 +91,20 @@ static void respond_raw (dh_conn *c, int status, const char *reason,
                    "Connection: close\r\n\r\n",
                    status, reason, ctype, blen);
   dh_buf_free(&c->out);
+  /* Clamp defensively. Today the pieces sum to ~238 bytes -- the ctype is
+     bounded to 127 by its copy and the reason is a short constant -- so this
+     cannot fire; it is here so a later change to either cannot turn a
+     truncated (n < 0 or n >= sizeof) header into an out-of-bounds dh_raw.
+     A header that would not fit becomes a bare 500, which is honest. */
+  if (n < 0 || (size_t)n >= sizeof(head)) {
+    static const char fallback[] =
+        "HTTP/1.1 500 Internal Server Error\r\n"
+        "Content-Length: 0\r\nConnection: close\r\n\r\n";
+    dh_raw(&c->out, fallback, sizeof(fallback) - 1);
+    c->wrote = 0;
+    c->state = CONN_WRITING;
+    return;
+  }
   dh_raw(&c->out, head, (size_t)n);
   if (blen > 0)
     dh_raw(&c->out, body, blen);
@@ -180,11 +195,42 @@ static void try_parse (dh_host *h, dh_http *x, dh_conn *c) {
   }
   {
     long clen = 0;
+    int seen_clen = 0;
     size_t i;
     for (i = 0; i < nheaders; i++) {
       if (headers[i].name_len == 14 &&
-          strncasecmp(headers[i].name, "Content-Length", 14) == 0)
-        clen = strtol(headers[i].value, NULL, 10);
+          strncasecmp(headers[i].name, "Content-Length", 14) == 0) {
+        /* Parse strictly, over the header's own length -- the value is not
+           NUL-terminated, and strtol would read past it and accept '+5' or
+           stop silently at '5x'. A parser that disagrees with the LB about
+           where the body ends is the request-smuggling primitive, so a
+           malformed length is a refusal, and a *second* Content-Length is a
+           refusal too (RFC 7230: they must agree, and we do not gamble on
+           which the LB believed). */
+        long v = 0;
+        size_t k;
+        if (seen_clen || headers[i].value_len == 0) {
+          respond_text(c, 400, "Bad Request",
+                       "a malformed or duplicated Content-Length\n");
+          return;
+        }
+        for (k = 0; k < headers[i].value_len; k++) {
+          char d = headers[i].value[k];
+          if (d < '0' || d > '9') {
+            respond_text(c, 400, "Bad Request",
+                         "Content-Length must be digits only\n");
+            return;
+          }
+          if (v > (LONG_MAX - (d - '0')) / 10) {
+            respond_text(c, 413, "Content Too Large", "Content-Length "
+                                                      "overflows\n");
+            return;
+          }
+          v = v * 10 + (d - '0');
+        }
+        clen = v;
+        seen_clen = 1;
+      }
       if (headers[i].name_len == 17 &&
           strncasecmp(headers[i].name, "Transfer-Encoding", 17) == 0) {
         respond_text(c, 400, "Bad Request",
@@ -193,7 +239,7 @@ static void try_parse (dh_host *h, dh_http *x, dh_conn *c) {
         return;
       }
     }
-    if (clen < 0 || clen > x->max_body) {
+    if (clen > x->max_body) {
       respond_text(c, 413, "Content Too Large", "body past the configured "
                                                 "cap\n");
       return;
@@ -245,8 +291,24 @@ static void pump_replies (dh_host *h, dh_http *x) {
     diluvium_mp_open(&c, msg, msglen);
     if (diluvium_mp_field(&c, "content_type") && diluvium_mp_read(&c, &t) &&
         t.kind == DILUVIUM_MP_STR && t.len < sizeof(ctype)) {
-      memcpy(ctype, t.p, t.len);
-      ctype[t.len] = '\0';
+      /* The guest is untrusted, and this string is interpolated into the
+         response header block. A control byte in it -- a CR or LF above all
+         -- would inject headers or split the response to the client on the
+         far side of the LB. A media type has no control characters, so any
+         is disqualifying: keep the safe default rather than a sanitized
+         guess at what the guest meant. */
+      size_t j;
+      int clean = 1;
+      for (j = 0; j < t.len; j++) {
+        if ((unsigned char)t.p[j] < 0x20 || (unsigned char)t.p[j] == 0x7f) {
+          clean = 0;
+          break;
+        }
+      }
+      if (clean) {
+        memcpy(ctype, t.p, t.len);
+        ctype[t.len] = '\0';
+      }
     }
     for (i = 0; i < x->max_conns; i++) {
       if (x->conns[i].state == CONN_WAITING && x->conns[i].token == token) {
@@ -372,7 +434,12 @@ int dh_http_poll (dh_host *h, int timeout_ms) {
       memset(c, 0, sizeof(*c));
       c->fd = fd;
       c->state = CONN_READING;
-      c->token = ++x->next_token;
+      /* Token 0 is the "reply named no connection" sentinel in the reply
+         pump, so the counter skips it on wrap -- otherwise the 2^32-th
+         connection would answer to a tokenless reply. */
+      if (++x->next_token == 0)
+        x->next_token = 1;
+      c->token = x->next_token;
       c->deadline_ms = h->now_ms + x->deadline_ms;
       dh_buf_init(&c->in);
       dh_buf_init(&c->out);
@@ -381,6 +448,24 @@ int dh_http_poll (dh_host *h, int timeout_ms) {
   free(fds);
   free(slot_of);
   return 0;
+}
+
+int dh_http_next_timeout (dh_host *h) {
+  dh_http *x = (dh_http *)h->listener;
+  int64_t next = -1;
+  int i;
+  if (x == NULL)
+    return -1;
+  for (i = 0; i < x->max_conns; i++) {
+    if (x->conns[i].state != CONN_FREE &&
+        (next < 0 || x->conns[i].deadline_ms < next))
+      next = x->conns[i].deadline_ms;
+  }
+  if (next < 0)
+    return -1;
+  if (next <= h->now_ms)
+    return 0;
+  return (next - h->now_ms > 60000) ? 60000 : (int)(next - h->now_ms);
 }
 
 int dh_http_open (dh_host *h, char *err, size_t errcap) {
