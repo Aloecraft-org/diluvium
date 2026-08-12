@@ -302,8 +302,7 @@ queue.info(q)              -- name, capacity, len, on_full, direction,
 
 `inbox` and `outbox` **already exist** in every instance, declared exported, so the
 zero-configuration case needs no code at all. Use `queue.lookup`, not `queue.declare`,
-or you will get "already declared" — which is how this was found while writing
-`examples/discofetch`.
+or you will get "already declared" — which is how this was found in practice.
 
 ### `queue.wait`
 
@@ -586,8 +585,10 @@ while (dvs_step(sw) > 0) { /* ... */ }
 ```
 
 A single-threaded `drive` is one `dv_run` or `dv_resume` — that is a legitimate host,
-not a stub. Copy `host_drive` from `examples/discofetch/swarmd.c` or
-`test/dvs_check.c`.
+not a stub. Most deployments do not write one: the **generic host** (`host/`,
+`make build_host`) implements the whole protocol from a `*.host.lua` config. To embed
+your own, `test/dvs_check.c`'s `host_drive` is the minimal one to copy and
+`host/dhost.c` the full one.
 
 **Return something non-NULL from `create` if you want `destroy` to fire at all**:
 `release()` guards the destroy callback on `ctx != NULL`, so a host whose `create`
@@ -652,12 +653,14 @@ parent holds  queue:client/*     child may get  queue:*                ✗ denie
 `system/lifecycle` and write to it all it likes, and nothing will ever read it. There
 is no error to catch and work around.
 
-### A worked example
+### Running one without writing C
 
-`examples/discofetch/` is a supervisor, a coordinator, and one handler instance per
-client, with a Dockerfile. It demonstrates in ~350 lines of C and three small Lua
-programs: per-client isolation, a budget stopping a runaway, a spawn denied for asking
-too much, and a restart policy written in Lua. Start there.
+The **generic host** (`host/`, `make build_host`) runs a swarm from a supervisor
+program plus a typed `*.host.lua` configuration — the drive loop, the roster, the
+hostcall pump, and connectors for the clock, SQLite, crypto and an HTTP listener, all in
+one binary, so a deployment is data rather than C. `doc/Host.md` is its contract and
+`host/dhost.c` the code. That is where a real deployment starts; write a host in C
+(above) only to embed the swarm in a larger program of your own.
 
 ---
 
@@ -677,8 +680,8 @@ src = template:gsub('@CLIENT@', function () return ('%q'):format(name) end)
 or a newline becomes code. This is the difference between code generation and an
 injection hole.
 
-**Code is data.** Hand a program its source over a queue like any other string. The
-host in `examples/discofetch` does exactly that rather than pasting Lua into Lua.
+**Code is data.** Hand a program its source over a queue like any other string. A
+supervisor does exactly that rather than pasting Lua into Lua.
 
 **A queue must exist before anything can be pushed to it**, and it exists once the
 program that declares it has run. So a host cannot push into an instance it has not

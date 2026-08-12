@@ -46,8 +46,8 @@
 ** It was 8192 and undocumented, which is a poor combination for a design whose
 ** 9.1 says code arrives as a message: a request over the limit is answered with
 ** "the request is too large" at run time and nothing warns before that.
-** examples/discofetch's coordinator reached 7791 bytes as a toy, so four lines
-** of comment were enough to push a spawn over and bring the swarm up with one
+** a coordinator program reached 7791 bytes in practice, so four lines of
+** comment were enough to push a spawn over and bring the swarm up with one
 ** instance instead of eight -- which is how this number got noticed at all.
 **
 ** Two of these are live at once in the worst case (this and 'do_spawn''s copy),

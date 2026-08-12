@@ -106,8 +106,8 @@ sandbox should never pay for. Three options, in the order I would consider them:
 **Since `doc/Host.md`, option 1 has a name and a bigger job.** The plan of record
 is a *generic host* — one binary implementing the host protocol from
 configuration plus a supervisor program, native and compiled to wasm32-wasi,
-subsuming `examples/discofetch/swarmd.c` (frozen pending deletion) rather than
-adding a lab-only sibling. So the question here is no longer "which binary
+replacing the bespoke per-deployment C host each deployment used to hand-write,
+rather than adding a lab-only sibling. So the question here is no longer "which binary
 carries the swarm layer for lab" but "is lab's native form anything other than
 the generic host with a REPL and a renderer attached" — and the current answer
 is no: build the generic host second, after its protocol has been exercised by

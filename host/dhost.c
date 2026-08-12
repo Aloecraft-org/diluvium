@@ -635,8 +635,8 @@ static void settle_deadline (dh_host *h, dh_slot *sc, dv_instance *inst) {
 static void *host_create (void *ud, dvs_id id, dv_instance *inst) {
   dh_host *h = (dh_host *)ud;
   /* Non-NULL is load-bearing: dvs guards its destroy callback on ctx, so a
-     create that returns NULL is never told the instance went away --
-     swarmd.c found that the hard way and this host keeps a roster. */
+     create that returns NULL is never told the instance went away, which is
+     why this host keeps a roster. */
   dh_slot *sc = (dh_slot *)calloc(1, sizeof(dh_slot));
   (void)inst;
   if (sc == NULL)
@@ -659,7 +659,8 @@ static void host_destroy (void *ud, dvs_id id, void *ctx) {
 }
 
 /*
-** Duty 2's inner step, one instance: swarmd.c's loop generalized. Deliver
+** Duty 2's inner step, one instance: a single-instance drive loop, generalized.
+** Deliver
 ** the round-robin next queue that has something, or start the program, or
 ** report it finished. Whenever the program parks anew, its wait timeout is
 ** read and remembered, so dh_host_turn can answer "your timeout elapsed"

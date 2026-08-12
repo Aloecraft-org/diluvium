@@ -190,16 +190,15 @@ See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#ter
 ## Quick Start
 
 **[`doc/Guide.md` is the programmer's guide](doc/Guide.md)** — the language additions,
-the `msgpack`, `queue` and `endpoint` libraries, the shape of a program that parks on a
-queue, embedding an instance from C, and running a swarm of them. Every sample in it
-was run against the tree.
+the `msgpack`, `queue`, `endpoint`, `bytes`, `json` and `time` libraries, the shape of a
+program that parks on a queue, embedding an instance from C, and running a swarm of them.
+Every sample in it was run against the tree.
 
-For a worked example, `examples/discofetch/` is a supervisor, a coordinator and one
-instance per connected client, with a Dockerfile:
-
-```sh
-make -C examples/discofetch run
-```
+To run programs without writing a host in C, the **generic host** (`host/`,
+`make build_host`) is one binary that implements the host protocol from a supervisor
+program plus a typed `*.host.lua` configuration — with connectors for the wall clock,
+SQLite, crypto (including JWT-HS256) and an HTTP listener, each off until the config and
+a capability grant wire it. `doc/Host.md` is the contract it implements.
 
 The rest of `doc/` is about building Diluvium rather than using it:
 `doc/Messaging.md` is the messaging and swarm design (and §18 the known defects),

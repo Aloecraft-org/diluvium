@@ -1,6 +1,6 @@
 /*
 ** dhost_crypto.c
-** The crypto connector: host:crypto/*. The primitives an API server needs to
+** The crypto connector: the host:crypto family. The primitives an API server needs to
 ** mint and check auth tokens, with the one property the whole system exists
 ** to give -- the signing key lives in the host and never in a guest. A
 ** program is granted host:crypto/jwt_sign, which is the right to ask for a

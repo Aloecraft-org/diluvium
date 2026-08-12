@@ -371,12 +371,16 @@ static void pump_replies (dh_host *h, dh_http *x) {
 }
 
 /* Count the pollfds a turn needs: one listen socket per listener, plus every
-   connection that has socket work (READING/WRITING; WAITING has none). */
-static int poll_capacity (dh_http *x) {
-  int total = x->n;
+   connection that has socket work (READING/WRITING; WAITING has none). Returned
+   as size_t and accumulated as one, so the allocation sizes below are unsigned
+   by type -- max_conns is bounded 1..4096 at config load and n <= 8, so the sum
+   is a few tens of thousands at most, but the analyzer cannot see those bounds
+   and would otherwise read a signed count as a possibly-huge object size. */
+static size_t poll_capacity (dh_http *x) {
+  size_t total = (size_t)x->n;
   int li;
   for (li = 0; li < x->n; li++)
-    total += x->l[li].max_conns;
+    total += (size_t)x->l[li].max_conns;
   return total;
 }
 
@@ -385,14 +389,21 @@ int dh_http_poll (dh_host *h, int timeout_ms) {
   struct pollfd *fds;
   int *li_of;                          /* which listener each fd belongs to */
   int *ci_of;                          /* conn index, or -1 for a listen fd */
-  int cap, nfds = 0, i, li, rc;
+  int nfds = 0, i, li, rc;
+  size_t cap;
   if (x == NULL)
     return 0;
   pump_replies(h, x);
   cap = poll_capacity(x);
-  fds = (struct pollfd *)calloc((size_t)cap, sizeof(struct pollfd));
-  li_of = (int *)calloc((size_t)cap, sizeof(int));
-  ci_of = (int *)calloc((size_t)cap, sizeof(int));
+  /* Bounded by config: n <= DH_MAX_LISTENERS and each max_conns <= 4096, so cap
+     <= DH_MAX_LISTENERS * 4097. The guard refuses an impossible count and lets
+     the optimizer see the allocations are small rather than reading the signed
+     config inputs as a near-SIZE_MAX object size. */
+  if (cap == 0 || cap > (size_t)DH_MAX_LISTENERS * 4097)
+    return 0;
+  fds = (struct pollfd *)calloc(cap, sizeof(struct pollfd));
+  li_of = (int *)calloc(cap, sizeof(int));
+  ci_of = (int *)calloc(cap, sizeof(int));
   if (fds == NULL || li_of == NULL || ci_of == NULL) {
     free(fds); free(li_of); free(ci_of);
     return 0;
