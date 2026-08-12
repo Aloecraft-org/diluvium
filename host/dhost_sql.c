@@ -352,6 +352,14 @@ int dh_sql_open (dh_host *h, char *err, size_t errcap) {
     return -1;
   }
   sqlite3_busy_timeout(s->db, 2000);
+  /* SQL-level load_extension is off by default, but say so out loud: this
+     turns off both the SQL function and the C entry point, so the dlopen
+     path a stock libsqlite3.a links in is unreachable as well as
+     unauthorized. (The link-time 'dlopen in a static binary' warning is
+     about that path existing, not being taken; a static musl build does not
+     even warn, and to remove the symbol entirely one compiles SQLite with
+     -DSQLITE_OMIT_LOAD_EXTENSION.) */
+  sqlite3_db_config(s->db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, NULL);
   sqlite3_set_authorizer(s->db, sql_authorizer, s);
   /* Belt to the authorizer's braces: no ATTACH means no reaching another
      file even if a future SQLite classified one differently. */

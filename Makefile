@@ -505,11 +505,18 @@ dshim_check: _build_step0
 HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
   $(CURDIR)/host/dhost_sql.c $(CURDIR)/host/picohttpparser.c
 
+# No -DLUA_USE_LINUX, and so no -ldl: that flag turns on Lua's package.loadlib,
+# which the host has no use for -- guests are sealed (no 'package'), the config
+# runs in an empty environment, and the host loads no C modules. Leaving it out
+# drops the one 'dlopen' reference in the whole binary, which is both a smaller
+# attack surface and what makes a static link clean (a static glibc binary that
+# pulls dlopen warns and needs matching glibc libs at runtime; a static musl one
+# would carry a capability it never uses).
 build_host: _build_step0
-	gcc -O2 -Wall -DMAKE_LIB -DLUA_USE_LINUX -I$(CURDIR)/.data -I$(CURDIR)/host \
+	gcc -O2 -Wall -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
 	  -o $(CURDIR)/dist/diluvium-host \
 	  $(HOST_SRCS) $(CURDIR)/host/dhost_main.c \
-	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
+	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3
 	@echo "dist/diluvium-host"
 
 host_check: _build_step0
@@ -519,15 +526,17 @@ host_check: _build_step0
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
 	@cd $(CURDIR)/test && $(CURDIR)/dist/host_check
 
-# The host as one fully static musl binary, for a lean Alpine box (fetch1).
-# Run INSIDE an Alpine container -- 'host/build-musl.sh' drives the container;
+# The host as one fully static binary, for a lean Alpine box (fetch1). Run
+# INSIDE an Alpine container -- 'host/build-musl.sh' drives the container;
 # this target is what runs within it, where 'gcc' is musl-gcc and
 # 'sqlite-static' provides libsqlite3.a. Fully static, so the artifact runs on
 # an older Alpine (3.15) than it was built on -- no libc, no shared sqlite to
-# match. No -ldl: musl folds dlopen into libc. Uses only pre-3.8 SQLite calls,
-# so an older system libsqlite3.a would serve too.
+# match. No -DLUA_USE_LINUX (see build_host): the host loads no C modules, so
+# there is no 'dlopen' to make a static link warn or drag glibc libs in -- this
+# target builds clean even on a glibc box, though musl is the intended libc.
+# Uses only pre-3.8 SQLite calls, so an older system libsqlite3.a serves too.
 build_host_musl: _build_step0
-	gcc -O2 -Wall -static -DMAKE_LIB -DLUA_USE_LINUX \
+	gcc -O2 -Wall -static -DMAKE_LIB \
 	  -I$(CURDIR)/.data -I$(CURDIR)/host \
 	  -o $(CURDIR)/dist/diluvium-host-musl \
 	  $(HOST_SRCS) $(CURDIR)/host/dhost_main.c \
