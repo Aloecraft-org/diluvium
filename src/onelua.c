@@ -133,6 +133,7 @@
 #include "dmsgpack.c"
 #include "dqueue.c"
 #include "dendpoint.c"
+#include "dbytes.c"
 #include "dshim.c"
 #include "dsnap.c"
 #include "dlibs.c"

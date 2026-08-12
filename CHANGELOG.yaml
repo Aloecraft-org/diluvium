@@ -56,6 +56,63 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "5.5.1_build6"
+    tag: v5.5.1_build6
+    status: unreleased
+    stable: false
+    mirror: false
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **In development.** One guest-runtime change and the rest host-side.
+
+      A guest library, `bytes`, closes a gap the sealed sandbox had from
+      the start: no way to encode bytes as text. It answers `tohex` /
+      `fromhex`, `tobase64` / `frombase64`, and `tobase64url` /
+      `frombase64url` (the JWT and URL alphabet, unpadded), all pure
+      computation and so a library rather than a hostcall -- nothing about
+      them reaches outside the instance or is nondeterministic, so no
+      capability is involved. The decoders are strict about the alphabet
+      and a truncated final group, lenient about a final group's unused
+      bits, and refuse a bad byte with its position rather than skipping
+      it. Until now a program that met a base64 or hex string at an edge --
+      a JWT segment, an HTTP body, a nonce printed for a human -- had to
+      carry a table-driven codec in Lua; `crypto/random` returned hex for
+      the same reason.
+
+      Host-side, two additions since build5. The crypto connector gains
+      `host:crypto/jwt_sign` and `host:crypto/jwt_verify` alongside
+      `random`, `hash` and `hmac`: JWT-HS256, minted and checked with the
+      key in the host and never in a guest, the header fixed so
+      alg-confusion has no field to set, and the host owning `iat`/`exp`.
+      The configured secret signs nothing directly -- two subkeys are
+      derived from it, one for `hmac` and one for the JWT MAC -- so a
+      program holding only `host:crypto/hmac` cannot use it as an oracle to
+      forge a token, which it otherwise could. And the listener connector
+      accepts an array of blocks, so a deployment that cannot bind at
+      runtime pre-binds a block of ports up front; they share one poll and
+      one connection-token space, so replies route correctly whether the
+      ports share a queue or not.
+
+    upgrading: |
+      **Snapshots taken by 5.5.1_build5 and earlier are refused by a build
+      with the `bytes` library.** Its functions join the permanents set
+      (they must, or a program holding one could not be snapshotted at
+      all), which moves the permanents fingerprint the snapshot header
+      carries -- the same mechanism, and the same clean format-mismatch
+      refusal, as build5's endpoint-metatable move. Nothing half-loads,
+      and there is no converter. `DILUVIUM_SNAP_FORMAT` and
+      `DS_THREAD_VERSION` are unchanged from build5; only the permanents
+      list grew.
+
+      **Bytecode is unaffected.** `LUAC_FORMAT` stays 0x46; chunks compiled
+      by build5 load without recompiling.
+
+      **The `bytes` global is new.** A program that used `bytes` as a
+      global name of its own now shadows the library; guests that kept to
+      locals are unaffected, and the library is only present inside an
+      instance, as `queue` and `msgpack` are.
+
   - version: "5.5.1_build5"
     tag: v5.5.1_build5
     date: 2026-08-12

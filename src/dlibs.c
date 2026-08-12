@@ -16,12 +16,14 @@
 #include "dmsgpack.h"
 #include "dqueue.h"
 #include "dendpoint.h"
+#include "dbytes.h"
 
 
 static const luaL_Reg diluvium_libs[] = {
   {"msgpack", luaopen_dmsgpack},
   {"queue", luaopen_dqueue},
   {"endpoint", luaopen_dendpoint},
+  {"bytes", luaopen_dbytes},
   {NULL, NULL}
 };
 

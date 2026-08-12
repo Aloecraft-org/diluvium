@@ -96,6 +96,7 @@ secure_function|run||
 sort|run||
 strings|run||
 test_analysis|run||
+test_bytes|run||
 test_compound|run||
 test_defer|run||
 test_determinism|run||

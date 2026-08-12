@@ -175,6 +175,33 @@ references, prototypes, backreferences, closures, threads. They are refused in *
 directions, including for a wrapper you mutate after construction, so a program cannot
 produce bytes that only the runtime is supposed to mean something by.
 
+### Text encodings: `bytes`
+
+`msgpack` is for what crosses a queue; `bytes` is for what a program meets at an
+edge — a JWT segment, an HTTP body, a nonce printed for a human — where the
+carrier is text, not bytes. It converts, and nothing more:
+
+```lua
+bytes.tohex("abc")            --> "616263"
+bytes.fromhex("616263")       --> "abc"        (odd length or non-digit: error)
+
+bytes.tobase64("foobar")      --> "Zm9vYmFy"
+bytes.frombase64("Zm8=")      --> "fo"
+
+bytes.tobase64url("foobar")   --> "Zm9vYmFy"   (the '-'/'_' alphabet, no padding)
+bytes.frombase64url("Zg")     --> "f"
+```
+
+All six take and return byte strings — a Lua string already is one. It is a
+library and not a hostcall on purpose: these are functions of their input and
+nothing else, so they need no capability and reach nothing outside the instance.
+The decoders are strict about the alphabet and about a truncated final group,
+and name the position of a bad byte rather than skipping it; they tolerate a
+missing `=` pad and, on `base64url`, expect none. The signing bytes a JWT is
+built from are exactly `bytes.tobase64url` of a payload and of a MAC, so a guest
+holding `host:crypto/*` (§7) can assemble and read tokens without a codec of its
+own.
+
 ---
 
 ## 3. Queues
