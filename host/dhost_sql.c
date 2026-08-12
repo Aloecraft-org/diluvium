@@ -225,7 +225,7 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
     return DH_CALL_ERROR;
   }
   /* NUL-terminate a copy: the cursor's bytes are a slice of the request. */
-  zsql = (char *)sqlite3_malloc64(sqllen + 1);
+  zsql = (char *)sqlite3_malloc((int)(sqllen + 1));
   if (zsql == NULL) {
     snprintf(detail, detailcap, "no memory for the statement");
     return DH_CALL_ERROR;
@@ -277,7 +277,7 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
     sqlite3_finalize(st);
     dh_map(value, 2);
     dh_str(value, "changes");
-    dh_int(value, (int64_t)sqlite3_changes64(s->db));
+    dh_int(value, (int64_t)sqlite3_changes(s->db));
     dh_str(value, "rowid");
     dh_int(value, (int64_t)sqlite3_last_insert_rowid(s->db));
     return DH_CALL_OK;
@@ -332,7 +332,7 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
 }
 
 int dh_sql_open (dh_host *h, char *err, size_t errcap) {
-  dh_sql *s = (dh_sql *)sqlite3_malloc64(sizeof(dh_sql));
+  dh_sql *s = (dh_sql *)sqlite3_malloc((int)sizeof(dh_sql));
   int flags;
   if (s == NULL) {
     snprintf(err, errcap, "no memory for the sql connector");

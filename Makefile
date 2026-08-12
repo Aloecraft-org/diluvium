@@ -519,6 +519,22 @@ host_check: _build_step0
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
 	@cd $(CURDIR)/test && $(CURDIR)/dist/host_check
 
+# The host as one fully static musl binary, for a lean Alpine box (fetch1).
+# Run INSIDE an Alpine container -- 'host/build-musl.sh' drives the container;
+# this target is what runs within it, where 'gcc' is musl-gcc and
+# 'sqlite-static' provides libsqlite3.a. Fully static, so the artifact runs on
+# an older Alpine (3.15) than it was built on -- no libc, no shared sqlite to
+# match. No -ldl: musl folds dlopen into libc. Uses only pre-3.8 SQLite calls,
+# so an older system libsqlite3.a would serve too.
+build_host_musl: _build_step0
+	gcc -O2 -Wall -static -DMAKE_LIB -DLUA_USE_LINUX \
+	  -I$(CURDIR)/.data -I$(CURDIR)/host \
+	  -o $(CURDIR)/dist/diluvium-host-musl \
+	  $(HOST_SRCS) $(CURDIR)/host/dhost_main.c \
+	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c \
+	  -lsqlite3 -lm
+	@echo "dist/diluvium-host-musl"
+
 # What a resident instance costs, printed rather than asserted. 18.2's profile A
 # drops hibernation, so density is bounded by the resident figure and that figure
 # had never been measured -- see the header of test/footprint.c for why this
