@@ -11,6 +11,20 @@ than rediscovering the same five facts. It is not a plan and it does not claim a
 these are easy. Where something is genuinely open, it says which way the evidence
 points and what would settle it.
 
+**Updated for 5.5.1_build5's preparation, and lab's role grew while this file
+slept.** `doc/Host.md` now defines the host protocol, and lab is its *JavaScript
+implementation* — the host-outside-module strategy over the new
+`diluvium_swarm_wasi.wasm`, with the swarm ABI exported, the host vtable crossing
+the boundary as `env` imports, and `setSwarmHost`/`instantiate` in the JS binding
+as the seam. That recasts capability 1 below from "needs a host" to "the host
+exists as a protocol; lab implements it in JS", adds a fourth capability this
+brief predates — **hostcall connectors** (`doc/Hostcall.md`): mock in JS what
+production wires natively, same guest either way — and gives the panel and the
+notebook-to-agents composer a contract to sit on. §1's wasm half is rewritten
+below to record what was actually built, including where this file's prediction
+was wrong. The debugger sections (§2b, §3) stand: nothing about hooks, yields or
+the one-slot problem moved.
+
 Everything asserted here about the core was checked against this tree at the line
 cited. Where a claim is inherited from `doc/Messaging.md` rather than checked, it says
 so — that document's §17 exists because the first draft of it was written against an
@@ -88,53 +102,54 @@ sandbox should never pay for. Three options, in the order I would consider them:
    the CLI false. If you choose this, correct §4.1 in the same commit rather than
    leaving the document ahead of the tree.
 
-### The same decision, again, for wasm
+**Since `doc/Host.md`, option 1 has a name and a bigger job.** The plan of record
+is a *generic host* — one binary implementing the host protocol from
+configuration plus a supervisor program, native and compiled to wasm32-wasi,
+subsuming `examples/discofetch/swarmd.c` (frozen pending deletion) rather than
+adding a lab-only sibling. So the question here is no longer "which binary
+carries the swarm layer for lab" but "is lab's native form anything other than
+the generic host with a REPL and a renderer attached" — and the current answer
+is no: build the generic host second, after its protocol has been exercised by
+lab's JS implementation, and let `diluvium lab`'s native story be that binary.
 
-The three options above are about the *native* binary. The wasi target
-needs the question asked separately, and it is the more urgent of the two
-— because it has already been answered, by default, and nobody chose the
-answer.
+### The same decision, again, for wasm — decided, built, and predicted wrong
 
-`libdiluvium_wasi.wasm` is linked from `onelua.o + wasm_stubs.o +
-analyze.o + diluvium_api.o` (`Makefile:199`). `dvs.c` is in none of them.
-So the browser build has no swarm layer, and that follows from this
-section's first sentence rather than from anything anyone weighed.
+What this section used to say: the browser build had no swarm layer by
+accident, "a wasm host cannot supply `dvs_host`'s three function pointers
+from JavaScript", *so the host has to be C, compiled in*, behind a
+three-function door (`swarm_start`/`swarm_step`/`swarm_next_event`).
 
-It is worth deciding deliberately now, because the wasi artifact stopped
-being a REPL toy at `5.5.1_build3`: it carries all 27 `dv_*` exports and
-registers `queue`, `endpoint` and `msgpack` as guest globals. A browser
-host can already run budgeted instances and drain queues. The swarm layer
-is the *only* missing tier, and it is missing for a reason that is
-nowhere written down.
+The first half was right and is fixed: `dvs.c` is now in both wasm
+archives, and `diluvium_swarm_wasi.wasm` is the separate artifact §12.1
+anticipated — separate for a harder reason than the layer boundary, as it
+turned out, because the shim's `env` imports are *mandatory*, and linked
+into `diluvium_wasi.wasm` they would have broken `wasmtime
+diluvium_wasi.wasm` and every other pure-WASI consumer.
 
-**A wasm host cannot supply `dvs_host`'s three function pointers from
-JavaScript.** In wasm a function pointer is a table index — the same
-problem that produced `dv_endpoint_allow`, recorded under §13 with the
-note that it "was found by writing the wasmtime binding". So the host has
-to be C, compiled in, exactly as `test/dvs_check.c:102` already is.
-Concretely, in `wasm_stubs.c` beside `init_lua` and `run_lua`:
-
-```
-swarm_start(const char *code)  -> dvs_new + dvs_root
-swarm_step(void)               -> dvs_step; returns whether anything ran
-swarm_next_event(void)         -> drain one system/events record as
-                                  msgpack or JSON; the caller frees it
-```
-
-plus `dvs.c` on the wasi compile line. That is the same forty lines this
-section already prices for the CLI, with a three-function door instead of
-a command.
-
-`doc/Messaging.md` §12.1 already plans a separate
-`diluvium-swarm-<version>-<triple>.wasm`, which is option 1 in wasm form
-and keeps §4.1's boundary intact. If that is the answer, say so here, so
-that the browser build's silence stops reading as an oversight.
+The second half was wrong in the way worth recording. The premise held —
+a JS host indeed cannot make a C function pointer — but "the host has to
+be C" did not follow. `src/dvs_shim.c` inverts it: the *trampolines* are
+C, twenty lines, declared as imports from module `"env"`
+(`js_host_create` / `js_host_destroy` / `js_host_drive`, the
+`_diluvium_write` pattern), and `dvsjs_new` stands in for `dvs_new`. The
+host — the actual duties: drive, roster, pump — is JavaScript, supplied
+at instantiation and installed with `setSwarmHost`. So the decision this
+section asked for came out *neither* of the ways it offered: not a C host
+compiled in, not a swarm-less browser build, but the host protocol
+(`doc/Host.md`) implemented in JS over a C seam. The dedicated door this
+section sketched was never built and is not needed; the swarm ABI is
+exported whole (`--export-all`), and `bindings/js/test/swarm.integration.mjs`
+is the proof-of-life — deliberately not in CI until it has passed once,
+per the `verify_wasm` lesson.
 
 **There is a consumer waiting.** `diluvium-lab` renders `system/events`
 records in §9.2's exact shape — `event`, `id`, `detail` — and on
 `build3` it feeds that renderer from a real `queue.declare`/`push`/`pop`
-loop. What it cannot do is make anything spawn. Whichever option is
-chosen, the transport changes there and nothing else does.
+loop. What it could not do was make anything spawn; with the swarm module
+and `setSwarmHost`, now it can. The panel's queries are `doc/Host.md`
+duty 3, with the one agreed stub: a hibernated instance shows its budget
+and cached size but no usage figure, until the swarm API learns to read
+the count from the snapshot header.
 
 ### Where the command goes
 
@@ -407,12 +422,14 @@ Two further consequences, both **read rather than run**, and flagged as such:
 
 In this order, because each answer constrains the next:
 
-1. **Which binary carries the swarm layer** (§1) — and, separately,
-   **which wasm artifact does**. Same question, two platforms, and the
-   wasm one has been answered by accident since before anyone asked it.
-   Everything else in `lab` sits on top of a host, so this decides
-   whether `lab` is a target, a flag, or the default — on each of the two
-   platforms that now has a real consumer.
+1. ~~**Which binary carries the swarm layer** (§1) — and, separately,
+   **which wasm artifact does**.~~ **Both answered.** The wasm artifact is
+   `diluvium_swarm_wasi.wasm`, deliberately separate, with the host in
+   JavaScript over the `env`-import seam — see §1's correction for why the
+   mechanism is not the one this file predicted. The native binary is the
+   generic host of `doc/Host.md`, built second, once lab's JS host has
+   exercised the protocol. What remains of this item is execution order,
+   not a decision.
 
 2. ~~**Guest-side or host-side debugger.**~~ **Settled by §3.4, and not by preference:**
    a Lua hook cannot yield, and `dv.h` exposes no `lua_State`, so the debugger lives
@@ -433,8 +450,25 @@ In this order, because each answer constrains the next:
    re-entry trick first; it is the only unproven step, and if it does not work the REPL
    and the debugger stop being one mechanism.
 
-None of this needs `doc/Messaging.md`'s open defects fixed first. Profile A (§18.2) is
-enough to build a lab on, and a lab does not hibernate.
+When this file said "none of this needs `doc/Messaging.md`'s open defects fixed
+first — profile A is enough to build a lab on, and a lab does not hibernate", it
+was hedging against a block that has since closed. Every audit finding is fixed,
+hibernation is on by default, and a lab now *does* touch it: the swarm panel
+shows hibernated instances (budget and cached size; usage stubbed per
+`doc/Host.md` duty 3), and a lab that persists a session across a browser reload
+would be the first real consumer of host-owned snapshot bytes. The debugger
+half is unchanged by all of that — a program stopped at a breakpoint still
+cannot hibernate, and that remains right rather than a limitation to fix.
+
+Two contracts now bound what lab builds, and both were written before any lab
+code exists so that lab cannot bake in their absence: `doc/Host.md` (the duties,
+the roster-from-callbacks pattern, the panel queries) and `doc/Hostcall.md` (the
+request/reply encoding — the correlation token is required from the *first*
+prototyped connector, JS mocks included; a token-less prototype is the mistake
+that document exists to prevent). The notebook-to-agents composer is lab
+tooling with one runtime-imposed rule: agent functions must take their state as
+a parameter and capture nothing, because a spawn ships source or bytecode, never
+a closure.
 
 ## 5. How the claims here were checked
 
