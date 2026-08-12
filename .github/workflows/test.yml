@@ -202,6 +202,13 @@ jobs:
       - name: Build libdiluvium-swarm and check its symbol boundary
         run: make build_swarm_lib
 
+      # A runtime file added to onelua.c but not to src/makefile's AUX_O (or
+      # the reverse) links in one build and not the other. Catch it here, at
+      # the source, before the platform build below fails at link with a
+      # symbol name three layers removed from the missing entry.
+      - name: Check the amalgamation and per-file source lists agree
+        run: python3 script/check_source_lists.py
+
       # The release build catches what the amalgamation hides: a file that uses a
       # core macro without including its header compiles in onelua.c and fails
       # here. Two such bugs reached the tree before this was in the sweep.

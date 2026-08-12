@@ -64,21 +64,30 @@ releases:
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
-      **In development.** One guest-runtime change and the rest host-side.
+      **In development.** Three guest libraries and the rest host-side.
 
-      A guest library, `bytes`, closes a gap the sealed sandbox had from
-      the start: no way to encode bytes as text. It answers `tohex` /
-      `fromhex`, `tobase64` / `frombase64`, and `tobase64url` /
-      `frombase64url` (the JWT and URL alphabet, unpadded), all pure
-      computation and so a library rather than a hostcall -- nothing about
-      them reaches outside the instance or is nondeterministic, so no
-      capability is involved. The decoders are strict about the alphabet
-      and a truncated final group, lenient about a final group's unused
-      bits, and refuse a bad byte with its position rather than skipping
-      it. Until now a program that met a base64 or hex string at an edge --
-      a JWT segment, an HTTP body, a nonce printed for a human -- had to
-      carry a table-driven codec in Lua; `crypto/random` returned hex for
-      the same reason.
+      The sealed sandbox met text edges -- a JWT segment, an HTTP body, a
+      config, a timestamp for a human -- with no tools for them, because the
+      libraries that would have them (`os`, and any C-module loader) are the
+      ones sealing takes away. Three new libraries fill that in, all pure
+      computation and so libraries rather than hostcalls: nothing about them
+      reaches outside the instance or is nondeterministic, so none needs a
+      capability.
+
+      `bytes` transcodes: `tohex`/`fromhex`, `tobase64`/`frombase64`,
+      `tobase64url`/`frombase64url` (the JWT and URL alphabet, unpadded),
+      and `urlencode`/`urldecode` (RFC 3986 percent-encoding). The decoders
+      are strict about the alphabet and a truncated group and name a bad
+      byte's position rather than skipping it. `json` is the whole-value
+      codec that sits beside `msgpack`: `json.encode`/`json.decode`, with
+      the array-or-object question settled by a documented heuristic and a
+      decoder that is bounded in depth and strict about the number grammar,
+      because it reads bytes a client sent. `time` is the pure half of the
+      clock -- the reading of it stays the `host:time` connector, but
+      `time.iso`, `time.parse`, `time.fields` and `time.of` convert between
+      Unix seconds, ISO 8601 and broken-down UTC fields, the calendar
+      arithmetic `os.date` used to do. `crypto/random` returning hex was the
+      first sign the gap was real; these close it.
 
       Host-side, two additions since build5. The crypto connector gains
       `host:crypto/jwt_sign` and `host:crypto/jwt_verify` alongside
@@ -96,22 +105,21 @@ releases:
 
     upgrading: |
       **Snapshots taken by 5.5.1_build5 and earlier are refused by a build
-      with the `bytes` library.** Its functions join the permanents set
-      (they must, or a program holding one could not be snapshotted at
-      all), which moves the permanents fingerprint the snapshot header
-      carries -- the same mechanism, and the same clean format-mismatch
-      refusal, as build5's endpoint-metatable move. Nothing half-loads,
-      and there is no converter. `DILUVIUM_SNAP_FORMAT` and
-      `DS_THREAD_VERSION` are unchanged from build5; only the permanents
-      list grew.
+      with these libraries.** Their functions join the permanents set (they
+      must, or a program holding one could not be snapshotted at all), which
+      moves the permanents fingerprint the snapshot header carries -- the
+      same mechanism, and the same clean format-mismatch refusal, as
+      build5's endpoint-metatable move. Nothing half-loads, and there is no
+      converter. `DILUVIUM_SNAP_FORMAT` and `DS_THREAD_VERSION` are
+      unchanged from build5; only the permanents list grew.
 
       **Bytecode is unaffected.** `LUAC_FORMAT` stays 0x46; chunks compiled
       by build5 load without recompiling.
 
-      **The `bytes` global is new.** A program that used `bytes` as a
-      global name of its own now shadows the library; guests that kept to
-      locals are unaffected, and the library is only present inside an
-      instance, as `queue` and `msgpack` are.
+      **The `bytes`, `json` and `time` globals are new.** A program that
+      used one of those as a global name of its own now shadows the library;
+      guests that kept to locals are unaffected, and the libraries are only
+      present inside an instance, as `queue` and `msgpack` are.
 
   - version: "5.5.1_build5"
     tag: v5.5.1_build5

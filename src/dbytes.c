@@ -190,6 +190,68 @@ static int b_frombase64url (lua_State *L) {
 }
 
 
+/* ---- percent-encoding (RFC 3986) ------------------------------------ */
+
+/* The one place hex is uppercase: RFC 3986 says a producer should emit
+   %XX in upper case, even though a reader must accept either. */
+static const char HEXU[] = "0123456789ABCDEF";
+
+static int is_unreserved (int c) {
+  return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+         (c >= '0' && c <= '9') ||
+         c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+static int b_urlencode (lua_State *L) {
+  size_t n, i;
+  const char *s = luaL_checklstring(L, 1, &n);
+  luaL_Buffer b;
+  luaL_buffinit(L, &b);
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (is_unreserved(c))
+      luaL_addchar(&b, (char)c);
+    else {
+      char e[3];
+      e[0] = '%'; e[1] = HEXU[c >> 4]; e[2] = HEXU[c & 0x0f];
+      luaL_addlstring(&b, e, 3);
+    }
+  }
+  luaL_pushresult(&b);
+  return 1;
+}
+
+/* Decode %XX escapes. Generic RFC 3986: '+' is a literal plus, not a space --
+   that is the application/x-www-form-urlencoded convention, and a query value
+   that wants it does a '+' -> ' ' pass of its own first. A truncated or
+   non-hex escape is an error, not a passed-through '%'. */
+static int b_urldecode (lua_State *L) {
+  size_t n, i;
+  const char *s = luaL_checklstring(L, 1, &n);
+  luaL_Buffer b;
+  luaL_buffinit(L, &b);
+  for (i = 0; i < n; i++) {
+    if (s[i] == '%') {
+      int hi, lo;
+      if (i + 2 >= n)
+        return luaL_error(L, "bytes.urldecode: a truncated %% escape at "
+                          "position %d", (int)i + 1);
+      hi = hexval((unsigned char)s[i + 1]);
+      lo = hexval((unsigned char)s[i + 2]);
+      if (hi < 0 || lo < 0)
+        return luaL_error(L, "bytes.urldecode: a non-hex %% escape at "
+                          "position %d", (int)i + 1);
+      luaL_addchar(&b, (char)((hi << 4) | lo));
+      i += 2;
+    }
+    else
+      luaL_addchar(&b, s[i]);
+  }
+  luaL_pushresult(&b);
+  return 1;
+}
+
+
 /* ---- registration ---------------------------------------------------- */
 
 static const luaL_Reg bytes_lib[] = {
@@ -199,6 +261,8 @@ static const luaL_Reg bytes_lib[] = {
   {"frombase64",    b_frombase64},
   {"tobase64url",   b_tobase64url},
   {"frombase64url", b_frombase64url},
+  {"urlencode",     b_urlencode},
+  {"urldecode",     b_urldecode},
   {NULL, NULL}
 };
 

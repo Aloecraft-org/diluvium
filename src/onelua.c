@@ -134,6 +134,8 @@
 #include "dqueue.c"
 #include "dendpoint.c"
 #include "dbytes.c"
+#include "djson.c"
+#include "dtime.c"
 #include "dshim.c"
 #include "dsnap.c"
 #include "dlibs.c"

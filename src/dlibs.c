@@ -17,6 +17,8 @@
 #include "dqueue.h"
 #include "dendpoint.h"
 #include "dbytes.h"
+#include "djson.h"
+#include "dtime.h"
 
 
 static const luaL_Reg diluvium_libs[] = {
@@ -24,6 +26,8 @@ static const luaL_Reg diluvium_libs[] = {
   {"queue", luaopen_dqueue},
   {"endpoint", luaopen_dendpoint},
   {"bytes", luaopen_dbytes},
+  {"json", luaopen_djson},
+  {"time", luaopen_dtime},
   {NULL, NULL}
 };
 

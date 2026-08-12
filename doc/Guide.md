@@ -190,9 +190,12 @@ bytes.frombase64("Zm8=")      --> "fo"
 
 bytes.tobase64url("foobar")   --> "Zm9vYmFy"   (the '-'/'_' alphabet, no padding)
 bytes.frombase64url("Zg")     --> "f"
+
+bytes.urlencode("a b/c")      --> "a%20b%2Fc"  (RFC 3986; a space is %20)
+bytes.urldecode("a%20b")      --> "a b"        ('+' stays a literal '+')
 ```
 
-All six take and return byte strings — a Lua string already is one. It is a
+All of them take and return byte strings — a Lua string already is one. It is a
 library and not a hostcall on purpose: these are functions of their input and
 nothing else, so they need no capability and reach nothing outside the instance.
 The decoders are strict about the alphabet and about a truncated final group,
@@ -201,6 +204,48 @@ missing `=` pad and, on `base64url`, expect none. The signing bytes a JWT is
 built from are exactly `bytes.tobase64url` of a payload and of a MAC, so a guest
 holding `host:crypto/*` (§7) can assemble and read tokens without a codec of its
 own.
+
+### Structured text: `json`
+
+`json` is to text what `msgpack` is to the wire — the whole-value codec, for the
+edge that speaks JSON rather than a queue.
+
+```lua
+json.encode({ ok = true, ids = {1, 2, 3} })   --> {"ok":true,"ids":[1,2,3]}
+json.decode('{"n": 42, "xs": [1, null, 3]}')  --> { n = 42, xs = { 1, nil, 3 } }
+```
+
+Two things to hold in mind, both from Lua rather than from JSON. A table is
+encoded as an **array** when its keys are exactly `1..n`, an **object** when they
+are all strings, an object when it is empty, and is an **error** otherwise — a
+table with a hole or a mix of key kinds has no clean JSON form, and the encoder
+says so rather than guessing. And JSON `null` decodes to `nil`, which in an array
+leaves a hole exactly as a `nil` always does; a program that must keep null
+distinct from absent should check before decoding, or carry that data in
+`msgpack`, which has its own null. The decoder reads bytes that may come from
+outside, so it is strict — a malformed number, a control byte in a string,
+trailing bytes, or nesting past a fixed depth are each refused, not accepted into
+a wrong value.
+
+### Time, in UTC: `time`
+
+Reading the clock is a capability — it is nondeterministic, so it is the
+`host:time` connector (§7) and lands in the message log where a replay can
+reproduce it. Turning a moment you already have into fields or a string is *not*
+nondeterministic, and that is what `time` does, all in UTC:
+
+```lua
+time.iso(1786554000)                      --> "2026-08-12T17:00:00Z"
+time.parse("2026-08-12T18:00:00+01:00")   --> 1786554000      (the offset applied)
+time.fields(0)   --> { year=1970, month=1, day=1, hour=0, min=0, sec=0,
+                       wday=5, yday=1 }              (wday 1=Sunday..7=Saturday)
+time.of({ year = 2026, month = 8, day = 12, hour = 17 })  --> 1786554000
+```
+
+Seconds, not milliseconds — the unit `os.time` and a JWT's `exp` already speak;
+`host:time` answers in milliseconds, so divide by 1000 at the boundary. `time.of`
+and `time.parse` refuse an impossible date (Feb 29 in a common year, a month past
+12) rather than rolling it over.
 
 ---
 

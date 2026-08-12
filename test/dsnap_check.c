@@ -1406,7 +1406,7 @@ static void a_c_function_is_named_not_copied (lua_State *L) {
   int base = lua_gettop(L);
   int copy;
   if (!build(L, "return {p = print, ins = table.insert, fmt = string.format,"
-                " hex = bytes.tohex}"))
+                " hex = bytes.tohex, je = json.encode, ti = time.iso}"))
     return;
   copy = roundtrip_named(L, __func__);
   if (copy == 0) return;
@@ -1435,6 +1435,18 @@ static void a_c_function_is_named_not_copied (lua_State *L) {
   lua_getfield(L, -1, "tohex");
   ok(lua_topointer(L, -3) == lua_topointer(L, -1),
      "and 'bytes.tohex', a guest-library function");
+  lua_pop(L, 3);
+  at(L, copy, "je");
+  lua_getglobal(L, "json");
+  lua_getfield(L, -1, "encode");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "and 'json.encode'");
+  lua_pop(L, 3);
+  at(L, copy, "ti");
+  lua_getglobal(L, "time");
+  lua_getfield(L, -1, "iso");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "and 'time.iso'");
   lua_settop(L, base);
 }
 

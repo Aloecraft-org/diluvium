@@ -81,6 +81,20 @@ eq(bytes.tobase64url("fo"), "Zm8", "b64url drops padding, two-char tail")
 eq(bytes.frombase64url("Zg"), "f", "unb64url without padding")
 eq(bytes.frombase64url("--__"), hi, "unb64url of the alphabet-specific chars")
 
+-- ---- percent-encoding (RFC 3986) -----------------------------------------
+
+eq(bytes.urlencode("aA0-_.~"), "aA0-_.~", "urlencode leaves unreserved alone")
+eq(bytes.urlencode("a b"), "a%20b", "urlencode a space is %20, not '+'")
+eq(bytes.urlencode("/?&="), "%2F%3F%26%3D", "urlencode reserved, upper-case hex")
+eq(bytes.urlencode("caf\u{e9}"), "caf%C3%A9", "urlencode a UTF-8 byte pair")
+eq(bytes.urldecode("a%20b"), "a b", "urldecode %20")
+eq(bytes.urldecode("a+b"), "a+b", "urldecode leaves '+' literal (not form-decoding)")
+eq(bytes.urldecode("caf%C3%A9"), "caf\u{e9}", "urldecode back to UTF-8")
+eq(bytes.urldecode(bytes.urlencode("the/quick?brown=fox&x=1 2")),
+   "the/quick?brown=fox&x=1 2", "url round-trip")
+refuses(bytes.urldecode, "%zz")("urldecode refuses a non-hex escape")
+refuses(bytes.urldecode, "abc%4")("urldecode refuses a truncated escape")
+
 -- ---- round-trips over the byte range -------------------------------------
 
 local corpus = {
