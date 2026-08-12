@@ -82,5 +82,19 @@ end
 eq(time.iso(1786554000123 // 1000), "2026-08-12T17:00:00Z",
    "host:time ms / 1000 formats as seconds")
 
+-- The extremes the round-trips above do not reach: the widest epochs must not
+-- overflow the day arithmetic, and time.of must refuse a year that would.
+do
+    local f = time.fields(math.mininteger)
+    ok(f.hour >= 0 and f.hour <= 23 and f.sec >= 0 and f.sec <= 59,
+       "fields(math.mininteger) stays in range, no overflow")
+    ok(type(time.iso(math.mininteger)) == "string", "iso(math.mininteger)")
+    ok(type(time.iso(math.maxinteger)) == "string", "iso(math.maxinteger)")
+end
+ok(pcall(time.of, {year = math.maxinteger, month = 1, day = 1}) == false,
+   "of refuses a year that would overflow the epoch")
+ok(pcall(time.of, {year = 1000000000000000000, month = 1, day = 1}) == false,
+   "of refuses an absurd year rather than wrapping it")
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then os.exit(1) end

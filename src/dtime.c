@@ -21,6 +21,14 @@
 
 #define SECS_PER_DAY 86400
 
+/* Past this the epoch-second result would overflow int64. The bound has room
+   to spare -- 250 billion years each way, past any real use and most of the
+   int64 second range time.fields can hand back -- and unlike the other fields
+   'year' is otherwise unbounded, so time.of must check it before the date
+   arithmetic multiplies it up. time.parse needs no such guard: it reads at
+   most four year digits. */
+#define YEAR_ABS_MAX 250000000000LL
+
 
 /* Days since 1970-01-01 for a proleptic-Gregorian y-m-d (m in 1..12, d in
    1..31). Hinnant, public domain. */
@@ -74,7 +82,11 @@ static long long floordiv (long long a, long long b) {
 static int t_fields (lua_State *L) {
   long long sec = (long long)luaL_checkinteger(L, 1);
   long long days = floordiv(sec, SECS_PER_DAY);
-  int sod = (int)(sec - days * SECS_PER_DAY);              /* [0, 86399] */
+  /* Second-of-day by modulo, not sec - days*SECS_PER_DAY: that wide multiply
+     overflows int64 for a sec near LLONG_MIN, where the floored 'days' makes
+     the product more negative than sec. The modulo cannot overflow. */
+  long long rem = sec % SECS_PER_DAY;
+  int sod = (int)(rem < 0 ? rem + SECS_PER_DAY : rem);     /* [0, 86399] */
   long long y;
   int m, d;
   long long jan1;
@@ -127,6 +139,8 @@ static int t_of (lua_State *L) {
     return luaL_error(L, "time.of: 'year' is required and must be an integer");
   y = (long long)lua_tointeger(L, -1);
   lua_pop(L, 1);
+  if (y < -YEAR_ABS_MAX || y > YEAR_ABS_MAX)
+    return luaL_error(L, "time.of: 'year' is out of the representable range");
   mon  = field_int(L, "month", 1, 0, 1, 12);
   day  = field_int(L, "day", 1, 0, 1, 31);
   hour = field_int(L, "hour", 0, 0, 0, 23);
@@ -146,7 +160,8 @@ static int t_of (lua_State *L) {
 static int t_iso (lua_State *L) {
   long long sec = (long long)luaL_checkinteger(L, 1);
   long long days = floordiv(sec, SECS_PER_DAY);
-  int sod = (int)(sec - days * SECS_PER_DAY);
+  long long rem = sec % SECS_PER_DAY;                      /* see t_fields */
+  int sod = (int)(rem < 0 ? rem + SECS_PER_DAY : rem);
   long long y;
   int m, d;
   char buf[40];

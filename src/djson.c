@@ -236,20 +236,35 @@ static int encode_value (lua_State *L, int idx, eb *b, int depth) {
   }
 }
 
+/* Free the buffer when its userdata is collected -- the safety net for the
+   one throw the encoder cannot otherwise guard: an OOM inside the final
+   lua_pushlstring, which longjmps past an ordinary free(). */
+static int eb_gc (lua_State *L) {
+  eb *b = (eb *)lua_touserdata(L, 1);
+  if (b != NULL) { free(b->p); b->p = NULL; }
+  return 0;
+}
+
 static int json_encode (lua_State *L) {
-  eb b;
+  eb *b;
   luaL_checkany(L, 1);
   if (lua_gettop(L) > 1)
     return luaL_error(L, "json.encode takes one value");
-  b.p = NULL; b.len = 0; b.cap = 0; b.err[0] = '\0';
-  if (encode_value(L, 1, &b, 0) != 0) {
-    char msg[192];
-    memcpy(msg, b.err, sizeof(msg));
-    free(b.p);
-    return luaL_error(L, "json.encode: %s", msg);
+  /* The buffer's one heap block lives under a userdata, so __gc frees it on
+     any throw -- a bad value mid-encode, or an OOM in the push below -- rather
+     than leaking (and, since the block is off Lua's books, leaking unbudgeted
+     host memory a sandboxed guest could grow on purpose). */
+  b = (eb *)lua_newuserdatauv(L, sizeof(eb), 0);
+  b->p = NULL; b->len = 0; b->cap = 0; b->err[0] = '\0';
+  if (luaL_newmetatable(L, "diluvium.json.eb")) {
+    lua_pushcfunction(L, eb_gc);
+    lua_setfield(L, -2, "__gc");
   }
-  lua_pushlstring(L, b.p != NULL ? b.p : "", b.len);
-  free(b.p);
+  lua_setmetatable(L, -2);
+  if (encode_value(L, 1, b, 0) != 0)
+    return luaL_error(L, "json.encode: %s", b->err);   /* __gc frees b->p */
+  lua_pushlstring(L, b->p != NULL ? b->p : "", b->len);
+  free(b->p); b->p = NULL;              /* success: free now; __gc no-ops */
   return 1;
 }
 
