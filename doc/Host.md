@@ -17,9 +17,12 @@ instances, parents, capabilities and budgets. The standalone `diluvium`
 executable is none of these: it runs a script unsealed in its own state, and
 the boundary machinery is never engaged.
 
-`examples/discofetch/swarmd.c` is the reference implementation of this protocol
-today, and is scheduled to dissolve into the generic host — a supervisor
-program plus configuration — once that exists. It should not grow.
+The **generic host** (`host/`, `make build_host`) is the reference
+implementation of this protocol: one binary that drives a deployment from a
+supervisor program plus a typed `*.host.lua` configuration, so a deployment is
+data, not C. `host/dhost.c` is the core (construction, the drive loop, the
+roster, the hostcall pump); the listener, SQLite and crypto connectors live
+beside it. Read it as the worked example of the duties below.
 
 ## The duties
 

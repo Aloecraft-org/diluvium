@@ -5,8 +5,8 @@
 ** This is the C implementation of the host protocol -- the same contract
 ** lab's JavaScript host implements over the wasm boundary -- and the whole
 ** point of it being generic is that a deployment is a supervisor program plus
-** a *.host.lua configuration, never C. examples/discofetch/swarmd.c is the
-** bespoke ancestor this exists to retire.
+** a *.host.lua configuration, never C. It replaces the bespoke per-deployment
+** C host each deployment used to hand-write.
 **
 ** Layering: this sits where any host sits, outside the sandbox, speaking
 ** dv_* and dvs_* plus the msgpack codec's public cursor. It includes no Lua
@@ -180,7 +180,7 @@ typedef struct dh_host {
 } dh_host;
 
 /* Roster entry -- also the per-instance ctx 'create' returns, which must be
-   non-NULL or 'destroy' is never called (swarmd.c documents the trap). */
+   non-NULL or 'destroy' is never called (dvs guards it on a non-NULL ctx). */
 struct dh_slot {
   dvs_id id;
   int has_deadline;                     /* a guest wait with a timeout */

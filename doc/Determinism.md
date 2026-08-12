@@ -184,7 +184,7 @@ contained and messages are copied rather than shared. The prototype used corouti
 one state for simplicity and said so.
 
 So what remains genuinely open is the scheduler itself: sequence numbers, the ordering
-rule, and whether the swarm or only each process must replay. `examples/discofetch`'s
-host is the naive version of the same loop — it drives every instance once per step, in
-id order, which is deterministic by accident rather than by design and says nothing
-about what a good rule would be.
+rule, and whether the swarm or only each process must replay. A single-threaded host
+that drives every instance once per step, in id order, is the naive version of the same
+loop — deterministic by accident rather than by design, and it says nothing about what a
+good rule would be.
