@@ -10,7 +10,7 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
-## [5.5.1_build5] - unreleased
+## [5.5.1_build5] - 2026-08-12
 
 `v5.5.1_build5` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 

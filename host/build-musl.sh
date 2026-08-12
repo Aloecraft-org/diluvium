@@ -38,11 +38,19 @@ $ENGINE cp "$CID:/src/dist/diluvium-host-musl" dist/diluvium-host-musl
 echo
 echo "=== dist/diluvium-host-musl ==="
 ls -la dist/diluvium-host-musl
-# Prove it is static and identify the arch, without needing 'file'.
+# Prove it is static and identify the arch, without needing 'file'. On Alpine
+# 'ldd' is ld-musl, which answers "Not a valid dynamic program" for a static
+# binary -- that is the success signal, not an error, so interpret it rather
+# than print it raw.
 if command -v "$ENGINE" >/dev/null 2>&1; then
-  $ENGINE run --rm -v "$REPO_ROOT/dist:/d" "$TAG" \
-    sh -c 'ldd /d/diluvium-host-musl 2>&1 | head -1; \
-           echo "arch: $(uname -m)"' || true
+  $ENGINE run --rm -v "$REPO_ROOT/dist:/d" "$TAG" sh -c '
+    out=$(ldd /d/diluvium-host-musl 2>&1 || true)
+    case "$out" in
+      *"Not a valid dynamic program"*|*"not a dynamic executable"*)
+        echo "static: confirmed -- no shared-library dependencies" ;;
+      *) echo "dynamic dependencies (NOT fully static): $out" ;;
+    esac
+    echo "arch: $(uname -m)  (must match the target box)"' || true
 fi
 echo
 echo "scp dist/diluvium-host-musl to the Alpine box, alongside a *.host.lua"
