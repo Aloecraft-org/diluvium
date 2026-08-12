@@ -58,13 +58,15 @@ repo: Aloecraft-org/diluvium
 releases:
   - version: "5.5.1_build6"
     tag: v5.5.1_build6
-    status: unreleased
-    stable: false
-    mirror: false
+    date: 2026-08-12
+    status: released
+    stable: true
+    mirror: true
+    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
-      **In development.** Three guest libraries and the rest host-side.
+      **Three guest libraries and the rest host-side.**
 
       The sealed sandbox met text edges -- a JWT segment, an HTTP body, a
       config, a timestamp for a human -- with no tools for them, because the
@@ -127,7 +129,6 @@ releases:
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |

@@ -10,11 +10,11 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
-## [5.5.1_build6] - unreleased (prerelease)
+## [5.5.1_build6] - 2026-08-12
 
 `v5.5.1_build6` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
-**In development.** Three guest libraries and the rest host-side.
+**Three guest libraries and the rest host-side.**
 
 The sealed sandbox met text edges -- a JWT segment, an HTTP body, a
 config, a timestamp for a human -- with no tools for them, because the
