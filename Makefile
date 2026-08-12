@@ -222,7 +222,16 @@ _wasm_build_step3: _wasm_build_compiler_obj
 	@# at instantiation. Pure-WASI consumers keep the module they had; a host
 	@# on the far side of the boundary loads this one and supplies the env
 	@# imports (the JS binding's instantiate() always does).
-	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua_wasi.o analyze_wasi.o diluvium_api_wasi.o wasm_stubs_wasi.o dvs_wasi.o dvs_shim_wasi.o -o diluvium_swarm_wasi.wasm $(BUILD_WASM_OPT)"
+	@#
+	@# 1 MiB shadow stack, because dvs_step does not fit wasm-ld's 64 KiB
+	@# default. 'drain' has a uint8_t[DVS_MAX_REQUEST_BYTES] (32 KiB) that the
+	@# compiler inlines beside 'spawn's cap array, so dvs_step's frame
+	@# underflows a 64 KiB stack on entry -- and the trap surfaces as an
+	@# out-of-bounds read in dv_queue_lookup one call in, not where the frame
+	@# blew, which is what made this a two-hour bug. Bisected: traps at 64 KiB,
+	@# runs a three-child swarm at 96 KiB. The instance-only modules above
+	@# carry no dvs.c and keep the default. Only this line needs the flag.
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua_wasi.o analyze_wasi.o diluvium_api_wasi.o wasm_stubs_wasi.o dvs_wasi.o dvs_shim_wasi.o -o diluvium_swarm_wasi.wasm $(BUILD_WASM_OPT) -Wl,-z,stack-size=1048576"
 	
 	@echo '=== Building Compiler (luac.wasm) - No stubs needed ==='
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) oneluac_wasi.o analyze_wasi.o -o luac_wasi.wasm -lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export=malloc -Wl,--export=free"
