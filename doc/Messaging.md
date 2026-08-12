@@ -2945,11 +2945,12 @@ What it leaves behind is the real item:
       drains and an answer on a queue it pushes to, which is measured working against
       this tree today with no new machinery, and which gets replay for free because
       requests and answers are then already in the log. `doc/Determinism.md` carries the
-      design, the measurement, and the one thing with a deadline: **reserve a
-      correlation token in the request encoding before the first hostcall ships**, since
-      a guest may have several outstanding and replies arrive in whatever order the host
-      answers. (The earlier "reserve a `pending` status" was shaped by assuming a
-      synchronous handler; see §17.) Until this exists, a program that genuinely needs a
+      design and the measurement, and the one thing with a deadline — **reserve a
+      correlation token in the request encoding before the first hostcall ships** — is
+      met: `doc/Hostcall.md` is the encoding, token required, written before any host
+      shipped a handler, and `doc/Host.md` is the protocol both planned hosts (lab's JS
+      and the generic C one) implement. What remains of this item is the host-side
+      connectors themselves. Until a host ships them, a program that genuinely needs a
       clock has only `DV_FLAG_UNSAFE_STDLIB`, which is why that flag is scaffolding
       rather than a configuration.
 

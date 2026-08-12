@@ -142,7 +142,10 @@ when it wakes.
 
 ### What must be reserved before the first hostcall ships
 
-The deadline is real; what it applies to changed.
+The deadline is real; what it applies to changed. **And it is now met:
+`doc/Hostcall.md` is the reservation** — the request/reply encoding with the
+correlation token as a required field, written before any host shipped a
+handler. What follows is the reasoning that document rests on.
 
 **A correlation token, in the request and echoed in the reply.** This is the item with the
 deadline now. Under the queue shape a guest may have several requests outstanding — that
