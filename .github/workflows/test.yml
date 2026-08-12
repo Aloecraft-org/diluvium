@@ -202,6 +202,13 @@ jobs:
       - name: Build libdiluvium-swarm and check its symbol boundary
         run: make build_swarm_lib
 
+      # A runtime file added to onelua.c but not to src/makefile's AUX_O (or
+      # the reverse) links in one build and not the other. Catch it here, at
+      # the source, before the platform build below fails at link with a
+      # symbol name three layers removed from the missing entry.
+      - name: Check the amalgamation and per-file source lists agree
+        run: python3 script/check_source_lists.py
+
       # The release build catches what the amalgamation hides: a file that uses a
       # core macro without including its header compiles in onelua.c and fails
       # here. Two such bugs reached the tree before this was in the sweep.
@@ -458,6 +465,10 @@ jobs:
         run: |
           set -eu
           BIN=$(ls dist/diluvium_linux_x86_64 dist/diluvium 2>/dev/null | head -1)
+          # A build that half-succeeds leaves no binary here; fail on that
+          # rather than handing the fuzzer an empty --bin (a cryptic
+          # PermissionError from subprocess) that reads as a fuzzer fault.
+          test -n "$BIN" || { echo "no release binary in dist/ -- the build step did not produce one" >&2; exit 1; }
           ./script/fuzz_exec.py --bin "$BIN" --rounds 200 --seed 7 --allowed 0
 
       # The attack-rate companion to fuzz_exec's accident rate. It finds the
@@ -471,6 +482,7 @@ jobs:
         run: |
           set -eu
           BIN=$(ls dist/diluvium_linux_x86_64 dist/diluvium 2>/dev/null | head -1)
+          test -n "$BIN" || { echo "no release binary in dist/ -- the build step did not produce one" >&2; exit 1; }
           ./script/fuzz_struct.py --bin "$BIN" --allowed 0
 
   changelog:

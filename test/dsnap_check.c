@@ -1405,7 +1405,8 @@ static void a_closure_using_globals_survives (lua_State *L) {
 static void a_c_function_is_named_not_copied (lua_State *L) {
   int base = lua_gettop(L);
   int copy;
-  if (!build(L, "return {p = print, ins = table.insert, fmt = string.format}"))
+  if (!build(L, "return {p = print, ins = table.insert, fmt = string.format,"
+                " hex = bytes.tohex, je = json.encode, ti = time.iso}"))
     return;
   copy = roundtrip_named(L, __func__);
   if (copy == 0) return;
@@ -1425,6 +1426,27 @@ static void a_c_function_is_named_not_copied (lua_State *L) {
   lua_getfield(L, -1, "format");
   ok(lua_topointer(L, -3) == lua_topointer(L, -1),
      "and 'string.format'");
+  lua_pop(L, 3);
+  /* A guest-library C function is named too -- 'bytes' is in DS_MODULES, so a
+     program that holds one across a snapshot is not refused for an unnamed
+     permanent. Without that entry this line is the one that fails. */
+  at(L, copy, "hex");
+  lua_getglobal(L, "bytes");
+  lua_getfield(L, -1, "tohex");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "and 'bytes.tohex', a guest-library function");
+  lua_pop(L, 3);
+  at(L, copy, "je");
+  lua_getglobal(L, "json");
+  lua_getfield(L, -1, "encode");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "and 'json.encode'");
+  lua_pop(L, 3);
+  at(L, copy, "ti");
+  lua_getglobal(L, "time");
+  lua_getfield(L, -1, "iso");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "and 'time.iso'");
   lua_settop(L, base);
 }
 

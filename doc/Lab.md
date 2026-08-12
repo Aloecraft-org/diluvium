@@ -19,7 +19,8 @@ the boundary as `env` imports, and `setSwarmHost`/`instantiate` in the JS bindin
 as the seam. That recasts capability 1 below from "needs a host" to "the host
 exists as a protocol; lab implements it in JS", adds a fourth capability this
 brief predates — **hostcall connectors** (`doc/Hostcall.md`): mock in JS what
-production wires natively, same guest either way — and gives the panel and the
+production wires natively, same guest either way, worked end to end for SQLite
+in §1a below — and gives the panel and the
 notebook-to-agents composer a contract to sit on. §1's wasm half is rewritten
 below to record what was actually built, including where this file's prediction
 was wrong. The debugger sections (§2b, §3) stand: nothing about hooks, yields or
@@ -161,6 +162,171 @@ name (`src/lua.c:450`), so `lab` would be taken as a filename. Decide deliberate
 between `--lab` (fits the existing parser) and `lab` (fits `diluvium serve`, which the
 same discussions want) — and if it is the second, the dispatch has to happen before
 `collectargs`, not inside it.
+
+---
+
+## 1a. Connectors in the JS host — SQLite, worked
+
+**Read, not run: the wasm module this needs is built in the wasi-sdk
+container, so none of the code below has executed here. The C connector it
+mirrors (`host/dhost_sql.c`) has, under `make host_check`, and the
+confinement table names exactly where the JS side cannot follow it.**
+
+`doc/Hostcall.md`'s fourth capability is a connector: the guest pushes
+`{tok, call, args}` to an exported `host/calls` queue and waits on
+`host/replies`; the host drains the first, answers, and pushes
+`{tok, status, value|detail}` to the second. `host/dhost.c` is the reference
+pump (`pump_instance` + `answer`); a JS host is the same seven steps in
+JavaScript, over the swarm module's exported `dv_*`/`dvs_*` surface. Nothing
+in the guest can tell the two hosts apart, which is the acceptance test.
+
+### The pump, in JS
+
+The swarm host installed with `setSwarmHost` already keeps a roster — it
+must, because `create`/`destroy` are where a host learns which instances
+exist (§1, and `host_create` in `dhost.c`). Give each turn of the lab loop a
+second pass, after `dvs_step`, that pumps every rostered instance:
+
+```js
+const CALLS = "host/calls", REPLIES = "host/replies";
+const roster = new Set();               // filled by create/destroy callbacks
+
+// A guest inst pointer -> queue helpers. The malloc/peek/release dance is
+// index.js's popRaw/pushRaw, unwrapped for a swarm-provided pointer.
+function queueId(ex, inst, name) {
+  const b = new TextEncoder().encode(name);
+  const p = ex.malloc(b.length + 1);
+  new Uint8Array(ex.memory.buffer, p, b.length + 1).set([...b, 0]);
+  try { return ex.dv_queue_lookup(inst, p); } finally { ex.free(p); }
+}
+
+function pump(ex, sw, id, connectors) {
+  const inst = ex.dvs_instance(sw, id);
+  if (inst === 0) return;               // hibernated: its calls wait with it
+  const calls = queueId(ex, inst, CALLS);
+  if (calls === 0) return;              // this program declares no calls queue
+  const replies = queueId(ex, inst, REPLIES);
+  for (;;) {
+    // Backpressure first: never drain a request we cannot answer, or a
+    // stateful connector re-runs on the retry (dhost.c's pump_instance).
+    if (replies !== 0 && queueFull(ex, inst, replies)) break;
+    const req = peekRaw(ex, inst, calls);   // decode() of the peeked bytes
+    if (req === undefined) break;
+    const reply = answer(ex, sw, id, req, connectors);
+    releaseRaw(ex, inst, calls);
+    if (replies !== 0) pushBytes(ex, inst, replies, encode(reply));
+  }
+}
+```
+
+`answer` is the routing and the gate, and it is the part a prototype must not
+shortcut, because it is the whole security model:
+
+```js
+function answer(ex, sw, id, req, connectors) {
+  const { tok, call, args } = req;
+  if (typeof tok !== "number" || typeof call !== "string")
+    return { tok, status: "malformed", detail: "tok and call are required" };
+  // The capability check is the runtime's, not the host's: "host:" + call,
+  // against this instance's grant. A connector never sees a call the caller
+  // does not hold -- attenuation through spawns is already applied.
+  if (!holds(ex, sw, id, "host:" + call))
+    return { tok, status: "denied", detail: `does not hold host:${call}` };
+  const conn = connectors[call.split("/")[0]];   // route on the prefix
+  if (!conn) return { tok, status: "denied", detail: `no connector for ${call}` };
+  try {
+    return { tok, status: "ok", value: conn(call, args) };
+  } catch (e) {
+    return { tok, status: "error", detail: String(e.message ?? e) };
+  }
+}
+
+function holds(ex, sw, id, cap) {
+  const b = new TextEncoder().encode(cap);
+  const p = ex.malloc(b.length + 1);
+  new Uint8Array(ex.memory.buffer, p, b.length + 1).set([...b, 0]);
+  try { return ex.dvs_holds(sw, id, p) === 1; } finally { ex.free(p); }
+}
+```
+
+Two rules from `doc/Hostcall.md` that a prototype gets wrong by omission:
+every drained request is answered (denied, error and malformed included — a
+dropped request is invisible backpressure), and the correlation `tok` is
+echoed on every reply from the very first connector, JS mocks included.
+
+### `sqlConnector(db)` — the factory
+
+A connector is just the `(call, args) => value` function `answer` routes to.
+For SQLite in Node, `db` is a `node:sqlite` `DatabaseSync`; in the browser it
+is a `sql.js` `Database`. The factory closes over it and answers the two
+calls `host:sql/*` splits into:
+
+```js
+// db.prepare(sql) -> stmt with .all(...params) / .run(...params); adjust the
+// two method names if your driver differs (node:sqlite and better-sqlite3
+// match; sql.js uses db.exec / stmt.getAsObject and needs a thin adapter).
+export function sqlConnector(db, { readwrite = false, maxRows = 1024 } = {}) {
+  return (call, args = {}) => {
+    const isExec = call === "sql/exec";
+    if (call !== "sql/query" && !isExec)
+      throw new Error(`the sql connector answers sql/query and sql/exec`);
+    if (isExec && !readwrite)
+      throw new Error(`this database is read-only; sql/exec is not wired`);
+
+    const sql = args.sql;
+    if (typeof sql !== "string") throw new Error("args.sql must be a string");
+    if (sql.includes("\0")) throw new Error("the statement has an embedded NUL");
+    guardOneStatement(sql);             // see the checklist: text-level here
+    const params = args.params ?? [];
+
+    const stmt = db.prepare(sql);
+    if (!isExec && stmt.reader === false) // node:sqlite exposes .reader; else
+      throw new Error("sql/query is for reads; this writes (sql/exec)");
+    // param count must match exactly -- too few silently NULL-binds the rest,
+    // the same truncation the row cap refuses (dhost_sql.c bind_params).
+    guardParamCount(stmt, params);
+
+    if (isExec) {
+      const r = stmt.run(...params);
+      return { changes: Number(r.changes), rowid: Number(r.lastInsertRowid) };
+    }
+    const rows = stmt.all(...params);
+    if (rows.length > maxRows)
+      throw new Error(`result passed the ${maxRows}-row cap; page with LIMIT`);
+    const cols = rows.length ? Object.keys(rows[0]) : columnNames(stmt);
+    return { cols, rows: rows.map((r) => cols.map((c) => r[c])) };
+  };
+}
+```
+
+Wire it once the DB is open:
+`pump(ex, sw, rootId, { sql: sqlConnector(db, { readwrite: false }) })`.
+
+### The confinement checklist — and the one line the JS host cannot copy
+
+`host/dhost_sql.c` earns its confinement from three SQLite primitives that
+`node:sqlite` and `sql.js` **do not expose**. That is the prototype's real
+ceiling, and the reason the JS SQL path is "fine for prototyping" and not
+for production. Each row is a thing to verify, not assume:
+
+| Confinement | How C does it | JS host |
+|---|---|---|
+| No ATTACH / DETACH | `sqlite3_set_authorizer` DENY + `SQLITE_LIMIT_ATTACHED = 0` | **No authorizer in the JS drivers.** Text-gate: reject a statement whose first keyword is `ATTACH`/`DETACH`. Weaker — the C comment explains why a regex is the wrong tool, and it is; this is the floor, not the target. |
+| No BEGIN / COMMIT / SAVEPOINT (no cross-call transaction on a shared handle) | authorizer DENY on `SQLITE_TRANSACTION`/`SAVEPOINT` | Same text-gate. Also give **each guest its own connection** if you can, so a leaked transaction cannot span guests. |
+| No PRAGMA | authorizer DENY on `SQLITE_PRAGMA` | Text-gate `PRAGMA`. (Some are connection-state changes — `writable_schema`, `foreign_keys` — so this is not cosmetic.) |
+| query vs exec split | `sqlite3_stmt_readonly` after prepare — SQLite's own classification | `stmt.reader` on `node:sqlite` is the honest equivalent; if your driver lacks it, the split degrades to the text-gate and is weaker. |
+| One statement per call | `sqlite3_prepare_v2` returns a `tail`; refuse non-whitespace after it | The JS drivers prepare **one** statement and ignore the rest — so you must reject trailing text yourself, or a second statement rides in unauthorized and silently unrun. |
+| Extension loading off | `sqlite3_db_config(ENABLE_LOAD_EXTENSION, 0)` | Off by default in both drivers; do not turn it on. |
+| Read-only means read-only | `sqlite3_open_v2(..., SQLITE_OPEN_READONLY)` | Open the file read-only (`node:sqlite`: `{ readOnly: true }`). `sql.js` runs from a byte image with no file to protect, so "read-only" there is only the query/exec split — note the difference. |
+| Row cap refuses, never truncates | count while stepping, refuse past `max_rows` | `rows.length > maxRows` **after** `.all()` — the whole result already materialized in memory. For a real cap, append `LIMIT maxRows+1` and check, or step a cursor; `.all()` past a hostile `max_rows` is a memory DoS the C host does not have. |
+
+The takeaway a lab session needs before it starts: **the JS SQL connector
+enforces the same *contract* as the C one — same two calls, same reply
+shapes, same capability names — but not the same *confinement*, because the
+authorizer has no JavaScript.** Build to the contract so the guest cannot
+tell, gate the escapes as well as the text allows, give each guest its own
+connection, and do not point it at a database that matters until the native
+generic host (`host/dhost_sql.c`, already built) is what runs in production.
 
 ---
 

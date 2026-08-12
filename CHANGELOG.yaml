@@ -56,13 +56,79 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "5.5.1_build6"
+    tag: v5.5.1_build6
+    date: 2026-08-12
+    status: released
+    stable: true
+    mirror: true
+    latest: true
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **Three guest libraries and the rest host-side.**
+
+      The sealed sandbox met text edges -- a JWT segment, an HTTP body, a
+      config, a timestamp for a human -- with no tools for them, because the
+      libraries that would have them (`os`, and any C-module loader) are the
+      ones sealing takes away. Three new libraries fill that in, all pure
+      computation and so libraries rather than hostcalls: nothing about them
+      reaches outside the instance or is nondeterministic, so none needs a
+      capability.
+
+      `bytes` transcodes: `tohex`/`fromhex`, `tobase64`/`frombase64`,
+      `tobase64url`/`frombase64url` (the JWT and URL alphabet, unpadded),
+      and `urlencode`/`urldecode` (RFC 3986 percent-encoding). The decoders
+      are strict about the alphabet and a truncated group and name a bad
+      byte's position rather than skipping it. `json` is the whole-value
+      codec that sits beside `msgpack`: `json.encode`/`json.decode`, with
+      the array-or-object question settled by a documented heuristic and a
+      decoder that is bounded in depth and strict about the number grammar,
+      because it reads bytes a client sent. `time` is the pure half of the
+      clock -- the reading of it stays the `host:time` connector, but
+      `time.iso`, `time.parse`, `time.fields` and `time.of` convert between
+      Unix seconds, ISO 8601 and broken-down UTC fields, the calendar
+      arithmetic `os.date` used to do. `crypto/random` returning hex was the
+      first sign the gap was real; these close it.
+
+      Host-side, two additions since build5. The crypto connector gains
+      `host:crypto/jwt_sign` and `host:crypto/jwt_verify` alongside
+      `random`, `hash` and `hmac`: JWT-HS256, minted and checked with the
+      key in the host and never in a guest, the header fixed so
+      alg-confusion has no field to set, and the host owning `iat`/`exp`.
+      The configured secret signs nothing directly -- two subkeys are
+      derived from it, one for `hmac` and one for the JWT MAC -- so a
+      program holding only `host:crypto/hmac` cannot use it as an oracle to
+      forge a token, which it otherwise could. And the listener connector
+      accepts an array of blocks, so a deployment that cannot bind at
+      runtime pre-binds a block of ports up front; they share one poll and
+      one connection-token space, so replies route correctly whether the
+      ports share a queue or not.
+
+    upgrading: |
+      **Snapshots taken by 5.5.1_build5 and earlier are refused by a build
+      with these libraries.** Their functions join the permanents set (they
+      must, or a program holding one could not be snapshotted at all), which
+      moves the permanents fingerprint the snapshot header carries -- the
+      same mechanism, and the same clean format-mismatch refusal, as
+      build5's endpoint-metatable move. Nothing half-loads, and there is no
+      converter. `DILUVIUM_SNAP_FORMAT` and `DS_THREAD_VERSION` are
+      unchanged from build5; only the permanents list grew.
+
+      **Bytecode is unaffected.** `LUAC_FORMAT` stays 0x46; chunks compiled
+      by build5 load without recompiling.
+
+      **The `bytes`, `json` and `time` globals are new.** A program that
+      used one of those as a global name of its own now shadows the library;
+      guests that kept to locals are unaffected, and the libraries are only
+      present inside an instance, as `queue` and `msgpack` are.
+
   - version: "5.5.1_build5"
     tag: v5.5.1_build5
     date: 2026-08-12
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |

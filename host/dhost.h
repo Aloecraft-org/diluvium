@@ -70,9 +70,10 @@ int dh_nil (dh_buf *b);
 #define DH_MAX_CAPS      16
 #define DH_NAME_MAX      128
 #define DH_PATH_MAX      512
+#define CRYPTO_KEY_INLINE 256
+#define DH_MAX_LISTENERS 8
 
 typedef struct dh_listener_cfg {
-  int enabled;
   int port;
   char bind_addr[DH_NAME_MAX];          /* default 127.0.0.1: the LB's side */
   char queue[DH_NAME_MAX];              /* requests land here, on the root */
@@ -89,6 +90,15 @@ typedef struct dh_sql_cfg {
   long max_rows;                        /* result cap; the fork bomb, in rows */
 } dh_sql_cfg;
 
+typedef struct dh_crypto_cfg {
+  int enabled;
+  char key[CRYPTO_KEY_INLINE];          /* inline key (dev); "" if unset */
+  size_t keylen;
+  char key_env[DH_NAME_MAX];            /* env var holding the key */
+  char key_file[DH_PATH_MAX];           /* file holding the key */
+  long default_ttl;                     /* jwt_sign ttl when the call omits it */
+} dh_crypto_cfg;
+
 typedef struct dh_config {
   char supervisor[DH_PATH_MAX];         /* required: the root program's file */
   uint32_t max_instances;
@@ -100,8 +110,12 @@ typedef struct dh_config {
   uint64_t instructions;                /* the root's budget; 0 = none */
   uint64_t memory_kb;
   int time_connector;                   /* connectors = { time = true } */
-  dh_listener_cfg listener;             /* connectors = { listen = {...} } */
+  dh_listener_cfg listeners[DH_MAX_LISTENERS]; /* connectors.listen: a block,
+                                           or an array of blocks (pre-bind a
+                                           block of ports) */
+  size_t nlisteners;                    /* 0 = no listener */
   dh_sql_cfg sql;                       /* connectors = { sql = {...} } */
+  dh_crypto_cfg crypto;                 /* connectors = { crypto = {...} } */
 } dh_config;
 
 /* 0 on success. Nonzero leaves a sentence in 'err' saying which key and why
@@ -162,6 +176,7 @@ typedef struct dh_host {
                                            pointers dvs hands back */
   void *listener;                       /* the http connector's state, or NULL */
   void *sqlctx;                         /* the sql connector's state, or NULL */
+  void *cryptoctx;                      /* the crypto connector's state, or NULL */
 } dh_host;
 
 /* Roster entry -- also the per-instance ctx 'create' returns, which must be
@@ -212,5 +227,8 @@ int dh_http_next_timeout (dh_host *h);
 
 int dh_sql_open (dh_host *h, char *err, size_t errcap);
 void dh_sql_close (dh_host *h);
+
+int dh_crypto_open (dh_host *h, char *err, size_t errcap);
+void dh_crypto_close (dh_host *h);
 
 #endif

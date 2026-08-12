@@ -36,12 +36,21 @@ int main (int argc, char **argv) {
     fprintf(stderr, "%s: %s\n", argv[1], err);
     return 1;
   }
-  fprintf(stderr, "diluvium-host: supervisor '%s' up"
-                  "%s%s%s\n",
-          cfg.supervisor,
-          cfg.listener.enabled ? ", listening" : "",
-          cfg.sql.enabled ? ", sql wired" : "",
-          cfg.time_connector ? ", time wired" : "");
+  {
+    char listening[48];
+    listening[0] = '\0';
+    if (cfg.nlisteners == 1)
+      snprintf(listening, sizeof(listening), ", listening on 1 port");
+    else if (cfg.nlisteners > 1)
+      snprintf(listening, sizeof(listening), ", listening on %d ports",
+               (int)cfg.nlisteners);
+    fprintf(stderr, "diluvium-host: supervisor '%s' up%s%s%s%s\n",
+            cfg.supervisor,
+            listening,
+            cfg.sql.enabled ? ", sql wired" : "",
+            cfg.crypto.enabled ? ", crypto wired" : "",
+            cfg.time_connector ? ", time wired" : "");
+  }
   for (;;) {
     int alive = dh_host_turn(&h);
     int timeout = dh_host_poll_timeout(&h);
