@@ -35,19 +35,36 @@ known-failure set is empty and stays that way.
 that made it off by default is struck rather than edited, which is
 what its own text asked for.
 
-The release also lays the first stones of the host story:
-`doc/Hostcall.md` reserves the hostcall encoding -- correlation
-token required from the first prototype -- and `doc/Host.md`
-states the protocol both planned hosts implement, the lab
-JavaScript host and the generic C one, with the acceptance test
-that a guest cannot tell them apart. And the swarm layer now
-reaches WebAssembly: a new `diluvium_swarm_wasi.wasm` carries it
-with the host vtable crossing the boundary as "env" imports, so a
-swarm can be driven by a JavaScript host -- which is exactly what
-lab picks up.
+The release also builds out the host story. `doc/Hostcall.md`
+reserves the hostcall encoding -- correlation token required from
+the first prototype -- and `doc/Host.md` states the protocol both
+planned hosts implement, the lab JavaScript host and the generic C
+one, with the acceptance test that a guest cannot tell them apart.
+The swarm layer reaches WebAssembly: a new
+`diluvium_swarm_wasi.wasm` carries it with the host vtable crossing
+the boundary as "env" imports, so a swarm can be driven by a
+JavaScript host -- which is what lab picks up. And the generic host
+itself now exists (`host/`, `make build_host`): a deployment is a
+supervisor program plus a typed `*.host.lua` configuration, not C,
+with connectors for the wall clock, SQLite and an HTTP listener,
+each off until wired and gated by the capability grammar.
 
 ### Added
 
+- **The generic host** (`host/`, `make build_host`): the host
+  protocol as one configurable binary, so a deployment is a
+  supervisor program plus a `*.host.lua` configuration rather than
+  bespoke C. The config is Lua's syntax without its power --
+  evaluated in an empty environment, every unknown key refused by
+  name -- and typed by a LuaCATS schema (`host/types/host.lua`).
+  Three connectors, all off until wired and each gated by a
+  `host:` capability the same way queues are gated: the wall clock,
+  SQLite (`sql/query` reads, `sql/exec` writes, confined to one
+  file by an authorizer), and an HTTP listener behind a
+  TLS-terminating load balancer (a request is a message, a message
+  is a response, `conn` echoed like a hostcall token).
+  `examples/discofetch/swarmd.c` is the bespoke ancestor this
+  retires.
 - **The swarm layer reaches WebAssembly.** `dvs.c` joins both wasm
   archives, and `diluvium_swarm_wasi.wasm` is a new artifact
   carrying it plus `dvs_shim.c`: a JavaScript host cannot make the
