@@ -512,7 +512,8 @@ dshim_check: _build_step0
 # the pinned amalgamation is the full-variant packaging decision and lands
 # with it. Built from src via .data like everything else.
 HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
-  $(CURDIR)/host/dhost_sql.c $(CURDIR)/host/picohttpparser.c
+  $(CURDIR)/host/dhost_sql.c $(CURDIR)/host/dhost_crypto.c \
+  $(CURDIR)/host/picohttpparser.c
 
 # No -DLUA_USE_LINUX, and so no -ldl: that flag turns on Lua's package.loadlib,
 # which the host has no use for -- guests are sealed (no 'package'), the config

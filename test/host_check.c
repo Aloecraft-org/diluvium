@@ -477,6 +477,118 @@ static void sql_confinement_holds (void) {
 }
 
 
+/* --------------------------------------------------------------- crypto */
+
+/*
+** The crypto connector, cross-checked against an independent implementation.
+** The reference tokens below were minted by Python's stdlib hmac/base64 with
+** the same key this config sets, so the C verifier reading them proves it
+** speaks standard JWT-HS256 -- not merely that it agrees with itself. The
+** guest also mints a token the test prints, which the surrounding script
+** feeds back to Python: C -> Python interop, the other direction. Every
+** verdict is the guest's, in Lua, because the guest is who these calls serve.
+*/
+#define KEY_STR "test-signing-key-at-least-16-bytes-long"
+#define SHA_ABC "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+#define HMAC_ABC "519166e67384c6497d65b27b29db4939c854589e300a6b765cc8ad091109634b"
+#define JWT_VALID "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJib2IiLCJyb2xlIjoidXNlciIsImlhdCI6MTAwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.sKBSENU4l7AFMTB-1nSX-CqUTQiLp_TZ_ZRxGvOVKbY"
+#define JWT_EXPIRED "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJvbGQiLCJpYXQiOjEwMDAsImV4cCI6MTU3NzgzNjgwMH0.r_QxcWqqyCwQaj5sew2nGfe2qMQjboWRjt2ykZ4TCIk"
+#define JWT_WRONGKEY "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJldmlsIiwiZXhwIjo0MTAyNDQ0ODAwfQ.pVFbRf5aZyxATrGHpqWqgmnusxt4DhRS9Ntv6nEfm84"
+
+static void crypto_signs_and_verifies_standard_jwts (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], line[512];
+  {
+    char src[3000];
+    snprintf(src, sizeof(src),
+      "local calls = queue.declare('host/calls', {cap=16, exported=true})\n"
+      "local replies = queue.declare('host/replies', {cap=16})\n"
+      "local log = queue.declare('log', {cap=16, exported=true})\n"
+      "local park = queue.declare('park', {cap=1})\n"
+      "local function ask(r) queue.push(calls, r)\n"
+      "  local _, m = queue.wait({replies}, 5000); return m end\n"
+      "local v = {}\n"
+      "v[#v+1] = (ask({tok=1, call='crypto/hash', args={data='abc'}}).value\n"
+      "  == '%s')\n"
+      "v[#v+1] = (ask({tok=2, call='crypto/hmac', args={data='abc'}}).value\n"
+      "  == '%s')\n"
+      "local r1 = ask({tok=3, call='crypto/random', args={bytes=16}}).value\n"
+      "local r2 = ask({tok=4, call='crypto/random', args={bytes=16}}).value\n"
+      "v[#v+1] = (type(r1)=='string' and #r1==32 and r1 ~= r2)\n"
+      "local tok = ask({tok=5, call='crypto/jwt_sign',\n"
+      "  args={claims={sub='alice', role='admin'}}}).value\n"
+      "local ver = ask({tok=6, call='crypto/jwt_verify',\n"
+      "  args={token=tok}}).value\n"
+      "v[#v+1] = (ver.valid==true and ver.claims.sub=='alice'\n"
+      "  and ver.claims.role=='admin' and type(ver.claims.exp)=='number'\n"
+      "  and ver.claims.iat ~= nil)\n"
+      "local vt = ask({tok=7, call='crypto/jwt_verify',\n"
+      "  args={token=tok..'x'}}).value\n"
+      "v[#v+1] = (vt.valid==false and vt.reason=='signature')\n"
+      "local vp = ask({tok=8, call='crypto/jwt_verify',\n"
+      "  args={token='%s'}}).value\n"
+      "v[#v+1] = (vp.valid==true and vp.claims.sub=='bob'\n"
+      "  and vp.claims.role=='user')\n"
+      "local ve = ask({tok=9, call='crypto/jwt_verify',\n"
+      "  args={token='%s'}}).value\n"
+      "v[#v+1] = (ve.valid==false and ve.reason=='expired')\n"
+      "local vw = ask({tok=10, call='crypto/jwt_verify',\n"
+      "  args={token='%s'}}).value\n"
+      "v[#v+1] = (vw.valid==false and vw.reason=='signature')\n"
+      "queue.push(log, 'TOKEN:' .. tok)\n"
+      "local good = true\n"
+      "for i=1,#v do if not v[i] then good=false end end\n"
+      "if good then queue.push(log, 'good') else\n"
+      "  local t={} for i=1,#v do t[i]=tostring(v[i]) end\n"
+      "  queue.push(log, 'bad:'..table.concat(t,',')) end\n"
+      "queue.wait({park})\n",
+      SHA_ABC, HMAC_ABC, JWT_VALID, JWT_EXPIRED, JWT_WRONGKEY);
+    fixture("sup_crypto.lua", src);
+  }
+  {
+    char cfgsrc[640];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_crypto.lua',\n"
+             "  caps = { 'host:crypto/*' },\n"
+             "  connectors = { crypto = { key = '%s', default_ttl = 3600 } }\n"
+             "}\n", tmpdir, KEY_STR);
+    fixture("crypto.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/crypto.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the crypto deployment opens");
+      return;
+    }
+  }
+  /* First log line is the guest-minted token (printed for the script's
+     Python cross-check), second is the verdict. */
+  if (run_until_log(&h, line, sizeof(line), 200) &&
+      strncmp(line, "TOKEN:", 6) == 0) {
+    printf("MINTED %s\n", line + 6);      /* the script greps this line */
+  }
+  else {
+    ok(0, "the crypto guest produced a token");
+    dh_host_close(&h);
+    return;
+  }
+  {
+    int got = pop_log(&h, line, sizeof(line));
+    ok(got && strcmp(line, "good") == 0,
+       "hash and hmac match a reference impl, random is fresh hex, a signed "
+       "token round-trips, tampering and a wrong key and an expired token "
+       "are each refused by reason, and a Python-minted token verifies");
+    if (got && strcmp(line, "good") != 0)
+      printf("      (guest said: %s)\n", line);
+  }
+  dh_host_close(&h);
+}
+
+
 /* ------------------------------------------------------------------ http */
 
 static void a_request_becomes_a_message_and_a_message_an_answer (void) {
@@ -666,6 +778,7 @@ int main (void) {
   a_guest_wait_timeout_is_fired_by_the_host_clock();
   sql_query_and_exec_split_along_the_grant();
   sql_confinement_holds();
+  crypto_signs_and_verifies_standard_jwts();
   a_request_becomes_a_message_and_a_message_an_answer();
   the_listener_refuses_injection_and_smuggling();
   printf("\n%d checks, %d failed\n", checks, failures);

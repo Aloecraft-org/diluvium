@@ -61,6 +61,10 @@ static int dh_grow (dh_buf *b, size_t need) {
 }
 
 int dh_raw (dh_buf *b, const void *p, size_t n) {
+  if (n == 0)
+    return 0;                           /* memcpy(_, NULL, 0) is UB; an empty
+                                           string or array reaches here with a
+                                           NULL, unallocated side buffer */
   if (dh_grow(b, n) != 0)
     return -1;
   memcpy(b->p + b->len, p, n);
@@ -273,7 +277,10 @@ int dh_config_load (const char *path, dh_config *out, char *err,
     "hibernation", "caps", "budget", "connectors", NULL
   };
   static const char *const budget_keys[] = { "instructions", "memory_kb", NULL };
-  static const char *const conn_keys[] = { "time", "listen", "sql", NULL };
+  static const char *const conn_keys[] = { "time", "listen", "sql", "crypto",
+                                           NULL };
+  static const char *const crypto_keys[] = { "key", "key_env", "key_file",
+                                             "default_ttl", NULL };
   static const char *const listen_keys[] = {
     "port", "bind", "queue", "reply_queue", "max_body", "deadline_ms",
     "max_conns", NULL
@@ -485,6 +492,60 @@ int dh_config_load (const char *path, dh_config *out, char *err,
         lua_pop(L, 2); goto done;
       }
       out->sql.max_rows = (long)n;
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "crypto");
+    if (!lua_isnil(L, -1)) {
+      int sources = 0;
+      if (!lua_istable(L, -1) ||
+          cfg_known_keys(L, -1, crypto_keys, "config.connectors.crypto", err,
+                         errcap) != 0) {
+        if (!lua_istable(L, -1))
+          cfg_fail(err, errcap, "config.connectors.crypto must be a "
+                                "table%s%s", "", "");
+        lua_pop(L, 2);
+        goto done;
+      }
+      out->crypto.enabled = 1;
+      out->crypto.default_ttl = 3600;
+      /* Exactly one key source. Inline 'key' is for dev; key_file and key_env
+         keep the secret out of the config file, which is the shape a real
+         deployment wants. */
+      lua_getfield(L, -1, "key");
+      if (lua_type(L, -1) == LUA_TSTRING) {
+        size_t kn;
+        const char *ks = lua_tolstring(L, -1, &kn);
+        if (kn > sizeof(out->crypto.key)) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.crypto.key is too long%s%s",
+                   "", "");
+          goto done;
+        }
+        memcpy(out->crypto.key, ks, kn);
+        out->crypto.keylen = kn;
+        sources++;
+      }
+      lua_pop(L, 1);
+      if (cfg_str(L, -1, "key_env", out->crypto.key_env,
+                  sizeof(out->crypto.key_env), 0, "config.connectors.crypto",
+                  err, errcap) != 0) { lua_pop(L, 2); goto done; }
+      if (out->crypto.key_env[0] != '\0') sources++;
+      if (cfg_str(L, -1, "key_file", out->crypto.key_file,
+                  sizeof(out->crypto.key_file), 0, "config.connectors.crypto",
+                  err, errcap) != 0) { lua_pop(L, 2); goto done; }
+      if (out->crypto.key_file[0] != '\0') sources++;
+      if (sources != 1) {
+        lua_pop(L, 2);
+        cfg_fail(err, errcap, "config.connectors.crypto needs exactly one of "
+                              "key_file, key_env or key%s%s", "", "");
+        goto done;
+      }
+      n = out->crypto.default_ttl;
+      if (cfg_num(L, -1, "default_ttl", &n, 1, 315360000,
+                  "config.connectors.crypto", err, errcap) != 0) {
+        lua_pop(L, 2); goto done;
+      }
+      out->crypto.default_ttl = (long)n;
     }
     lua_pop(L, 1);
   }
@@ -854,6 +915,10 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
     dh_host_close(h);
     return -1;
   }
+  if (cfg->crypto.enabled && dh_crypto_open(h, err, errcap) != 0) {
+    dh_host_close(h);
+    return -1;
+  }
   if (cfg->listener.enabled && dh_http_open(h, err, errcap) != 0) {
     dh_host_close(h);
     return -1;
@@ -882,6 +947,7 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
 void dh_host_close (dh_host *h) {
   dh_http_close(h);
   dh_sql_close(h);
+  dh_crypto_close(h);
   if (h->sw != NULL) {
     dvs_free(h->sw);                   /* releases slots via host_destroy */
     h->sw = NULL;
