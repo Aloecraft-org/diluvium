@@ -180,6 +180,52 @@ static void a_config_is_typed_data_and_typos_are_refused (void) {
   ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
      strstr(err, "path") != NULL,
      "a sql block without a database path is refused");
+
+  /* One listen block, the back-compatible shape, is one listener. */
+  p = fixture("one_listen.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  listen = { port = 8080, queue = 'in' } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) == 0 &&
+     cfg.nlisteners == 1 && cfg.listeners[0].port == 8080 &&
+     strcmp(cfg.listeners[0].queue, "in") == 0 &&
+     cfg.listeners[0].max_conns == 64,
+     "a single listen block is one listener, defaults filled");
+
+  /* An array of blocks pre-binds a block of ports. */
+  p = fixture("many_listen.host.lua",
+    "return { supervisor = 's.lua', connectors = { listen = {\n"
+    "  { port = 8080 }, { port = 8081 }, { port = 8082, max_conns = 8 },\n"
+    "} } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) == 0 &&
+     cfg.nlisteners == 3 && cfg.listeners[0].port == 8080 &&
+     cfg.listeners[2].port == 8082 && cfg.listeners[2].max_conns == 8 &&
+     strcmp(cfg.listeners[1].queue, "http_in") == 0,
+     "an array of listen blocks pre-binds a block of ports");
+
+  /* Two listeners on one port name the mistake instead of failing at bind. */
+  p = fixture("dupport.host.lua",
+    "return { supervisor = 's.lua', connectors = { listen = {\n"
+    "  { port = 8080 }, { port = 8080 } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "repeats a port") != NULL,
+     "two listeners on one port are refused by name, not left to bind");
+
+  /* A block with no port is refused whether alone or in the array. */
+  p = fixture("noport.host.lua",
+    "return { supervisor = 's.lua', connectors = { listen = {\n"
+    "  { queue = 'in' } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "port is required") != NULL,
+     "a listener without a port is refused");
+
+  /* Past the host's port block, refused rather than silently clipped. */
+  p = fixture("toomany.host.lua",
+    "return { supervisor = 's.lua', connectors = { listen = {\n"
+    "  {port=1},{port=2},{port=3},{port=4},{port=5},\n"
+    "  {port=6},{port=7},{port=8},{port=9} } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "more than") != NULL,
+     "more listeners than the host can hold are refused, not clipped");
 }
 
 
@@ -481,26 +527,40 @@ static void sql_confinement_holds (void) {
 
 /*
 ** The crypto connector, cross-checked against an independent implementation.
-** The reference tokens below were minted by Python's stdlib hmac/base64 with
-** the same key this config sets, so the C verifier reading them proves it
-** speaks standard JWT-HS256 -- not merely that it agrees with itself. The
-** guest also mints a token the test prints, which the surrounding script
-** feeds back to Python: C -> Python interop, the other direction. Every
-** verdict is the guest's, in Lua, because the guest is who these calls serve.
+** The reference tokens below were minted by Python's stdlib hmac/base64, so
+** the C verifier reading them proves it speaks standard JWT-HS256 -- not
+** merely that it agrees with itself. The guest also mints a token the test
+** prints, which the surrounding script feeds back to Python: C -> Python
+** interop, the other direction. Every verdict is the guest's, in Lua, because
+** the guest is who these calls serve.
+**
+** The host does not sign with the configured secret directly: it derives one
+** subkey for crypto/hmac and another for the JWT MAC (so crypto/hmac cannot
+** forge a JWT). The reference values below are therefore keyed by those
+** DERIVED subkeys, computed the same deterministic way -- the tokens are
+** still bit-for-bit standard HS256, their secret is just HMAC(master, label).
+**   k_hmac = HMAC-SHA256(KEY_STR, "diluvium/crypto/hmac/v1")
+**   k_jwt  = HMAC-SHA256(KEY_STR, "diluvium/crypto/jwt-hs256/v1")
+** JWT_WRONGKEY is signed with an unrelated key, so it must fail on signature.
 */
 #define KEY_STR "test-signing-key-at-least-16-bytes-long"
 #define SHA_ABC "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
-#define HMAC_ABC "519166e67384c6497d65b27b29db4939c854589e300a6b765cc8ad091109634b"
-#define JWT_VALID "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJib2IiLCJyb2xlIjoidXNlciIsImlhdCI6MTAwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.sKBSENU4l7AFMTB-1nSX-CqUTQiLp_TZ_ZRxGvOVKbY"
-#define JWT_EXPIRED "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJvbGQiLCJpYXQiOjEwMDAsImV4cCI6MTU3NzgzNjgwMH0.r_QxcWqqyCwQaj5sew2nGfe2qMQjboWRjt2ykZ4TCIk"
-#define JWT_WRONGKEY "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJldmlsIiwiZXhwIjo0MTAyNDQ0ODAwfQ.pVFbRf5aZyxATrGHpqWqgmnusxt4DhRS9Ntv6nEfm84"
+#define HMAC_ABC "cafdbc2f03808a8615e9f159cdb630c498bd8b637d0ca1ecf14ad1d280d1c942"
+#define JWT_VALID "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJib2IiLCJyb2xlIjoidXNlciIsImlhdCI6MTAwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.eys7cRcxPhiyFeD-vCiCRK6hAO-C603ji9_zhpragYw"
+#define JWT_EXPIRED "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJvbGQiLCJpYXQiOjEwMDAsImV4cCI6MTU3NzgzNjgwMH0.fbO8Q4-YQr6OAyVQr3_f3SCc6n4mSPoMExFVVdODwis"
+#define JWT_WRONGKEY "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJldmlsIiwiZXhwIjo0MTAyNDQ0ODAwfQ.otYbev9GDLSM3sRSwbG4k4KD2D8yitSCp46ClmEHQa0"
+/* Signed with the RAW configured secret, not the derived JWT subkey. A design
+   that signed JWTs with the master directly -- or that let crypto/hmac and the
+   JWT MAC share a key -- would accept this. The fixed host must reject it on
+   signature: that is the regression guard for the forging-oracle fix. */
+#define JWT_RAWKEY "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJtYWxsb3J5Iiwicm9sZSI6ImFkbWluIiwiZXhwIjo0MTAyNDQ0ODAwfQ.1HQKQlHpUfXhWSpqvc5WFhXOvE_0Go8W7PW2HmnfeLA"
 
 static void crypto_signs_and_verifies_standard_jwts (void) {
   dh_config cfg;
   dh_host h;
   char err[512], line[512];
   {
-    char src[3000];
+    char src[3600];
     snprintf(src, sizeof(src),
       "local calls = queue.declare('host/calls', {cap=16, exported=true})\n"
       "local replies = queue.declare('host/replies', {cap=16})\n"
@@ -536,6 +596,11 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
       "local vw = ask({tok=10, call='crypto/jwt_verify',\n"
       "  args={token='%s'}}).value\n"
       "v[#v+1] = (vw.valid==false and vw.reason=='signature')\n"
+      "-- a token signed with the RAW secret must be rejected: the JWT MAC key\n"
+      "-- is derived, so crypto/hmac cannot be used to forge one\n"
+      "local vr = ask({tok=11, call='crypto/jwt_verify',\n"
+      "  args={token='%s'}}).value\n"
+      "v[#v+1] = (vr.valid==false and vr.reason=='signature')\n"
       "queue.push(log, 'TOKEN:' .. tok)\n"
       "local good = true\n"
       "for i=1,#v do if not v[i] then good=false end end\n"
@@ -543,7 +608,7 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
       "  local t={} for i=1,#v do t[i]=tostring(v[i]) end\n"
       "  queue.push(log, 'bad:'..table.concat(t,',')) end\n"
       "queue.wait({park})\n",
-      SHA_ABC, HMAC_ABC, JWT_VALID, JWT_EXPIRED, JWT_WRONGKEY);
+      SHA_ABC, HMAC_ABC, JWT_VALID, JWT_EXPIRED, JWT_WRONGKEY, JWT_RAWKEY);
     fixture("sup_crypto.lua", src);
   }
   {
@@ -764,6 +829,98 @@ static void the_listener_refuses_injection_and_smuggling (void) {
 }
 
 
+/*
+** Two pre-bound ports feeding one shared queue. This is the shape a
+** deployment reaches for when it cannot bind at runtime: bind the block up
+** front, let one supervisor loop serve them all. The crux is that both
+** connections' replies travel through a single reply queue, so each must
+** reach the connection its 'conn' token names and no other -- a token that
+** is unique across listeners, not merely within one.
+*/
+static void two_ports_pre_bound_route_by_token (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512];
+  int a, b, i;
+  struct sockaddr_in aa, ba;
+  char ra[2048], rb[2048];
+  size_t ga = 0, gb = 0;
+  int sa = 0, sb = 0;
+  fixture("sup_two.lua",
+    "local inq = queue.declare('http_in', {cap = 8})\n"
+    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "while true do\n"
+    "  local _, m, why = queue.wait({inq})\n"
+    "  if why == 'ok' then\n"
+    "    queue.push(outq, {conn = m.conn, status = 200,\n"
+    "      body = 'saw ' .. m.path, content_type = 'text/plain'})\n"
+    "  end\n"
+    "end\n");
+  {
+    char cfgsrc[512];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_two.lua',\n"
+             "  connectors = { listen = {\n"
+             "    { port = 18475, deadline_ms = 3000 },\n"
+             "    { port = 18476, deadline_ms = 3000 } } } }\n", tmpdir);
+    fixture("two.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/two.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the two-port deployment opens (are 18475-6 free?)");
+      return;
+    }
+  }
+  a = socket(AF_INET, SOCK_STREAM, 0);
+  b = socket(AF_INET, SOCK_STREAM, 0);
+  memset(&aa, 0, sizeof(aa)); aa.sin_family = AF_INET;
+  aa.sin_port = htons(18475); inet_pton(AF_INET, "127.0.0.1", &aa.sin_addr);
+  memset(&ba, 0, sizeof(ba)); ba.sin_family = AF_INET;
+  ba.sin_port = htons(18476); inet_pton(AF_INET, "127.0.0.1", &ba.sin_addr);
+  if (connect(a, (struct sockaddr *)&aa, sizeof(aa)) != 0 ||
+      connect(b, (struct sockaddr *)&ba, sizeof(ba)) != 0) {
+    ok(0, "clients connect to both pre-bound ports");
+    close(a); close(b); dh_host_close(&h); return;
+  }
+  fcntl(a, F_SETFL, O_NONBLOCK);
+  fcntl(b, F_SETFL, O_NONBLOCK);
+  ra[0] = rb[0] = '\0';
+  for (i = 0; i < 600 && (ga < sizeof(ra) - 1 || gb < sizeof(rb) - 1); i++) {
+    ssize_t n;
+    dh_host_turn(&h);
+    dh_http_poll(&h, 5);
+    if (!sa) {
+      static const char req[] = "GET /alpha HTTP/1.1\r\nHost: c\r\n\r\n";
+      if (write(a, req, sizeof(req) - 1) == (ssize_t)(sizeof(req) - 1)) sa = 1;
+    }
+    if (!sb) {
+      static const char req[] = "GET /beta HTTP/1.1\r\nHost: c\r\n\r\n";
+      if (write(b, req, sizeof(req) - 1) == (ssize_t)(sizeof(req) - 1)) sb = 1;
+    }
+    n = read(a, ra + ga, sizeof(ra) - 1 - ga);
+    if (n > 0) { ga += (size_t)n; ra[ga] = '\0'; }
+    n = read(b, rb + gb, sizeof(rb) - 1 - gb);
+    if (n > 0) { gb += (size_t)n; rb[gb] = '\0'; }
+    if (strstr(ra, "saw /alpha") && strstr(rb, "saw /beta"))
+      break;
+  }
+  ok(strstr(ra, "HTTP/1.1 200 OK") != NULL && strstr(ra, "saw /alpha") != NULL,
+     "a request on the first pre-bound port is answered with its own path");
+  ok(strstr(rb, "HTTP/1.1 200 OK") != NULL && strstr(rb, "saw /beta") != NULL,
+     "a request on the second pre-bound port is answered with its own path");
+  ok(strstr(ra, "/beta") == NULL && strstr(rb, "/alpha") == NULL,
+     "replies route by token, so two ports sharing one queue do not cross");
+  if (strstr(ra, "saw /alpha") == NULL || strstr(rb, "saw /beta") == NULL)
+    printf("      (A: %.80s | B: %.80s)\n", ra, rb);
+  close(a); close(b);
+  dh_host_close(&h);
+}
+
+
 int main (void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/host_check_XXXXXX");
   if (mkdtemp(tmpdir) == NULL) {
@@ -781,6 +938,7 @@ int main (void) {
   crypto_signs_and_verifies_standard_jwts();
   a_request_becomes_a_message_and_a_message_an_answer();
   the_listener_refuses_injection_and_smuggling();
+  two_ports_pre_bound_route_by_token();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }

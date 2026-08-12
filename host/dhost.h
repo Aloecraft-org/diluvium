@@ -71,9 +71,9 @@ int dh_nil (dh_buf *b);
 #define DH_NAME_MAX      128
 #define DH_PATH_MAX      512
 #define CRYPTO_KEY_INLINE 256
+#define DH_MAX_LISTENERS 8
 
 typedef struct dh_listener_cfg {
-  int enabled;
   int port;
   char bind_addr[DH_NAME_MAX];          /* default 127.0.0.1: the LB's side */
   char queue[DH_NAME_MAX];              /* requests land here, on the root */
@@ -110,7 +110,10 @@ typedef struct dh_config {
   uint64_t instructions;                /* the root's budget; 0 = none */
   uint64_t memory_kb;
   int time_connector;                   /* connectors = { time = true } */
-  dh_listener_cfg listener;             /* connectors = { listen = {...} } */
+  dh_listener_cfg listeners[DH_MAX_LISTENERS]; /* connectors.listen: a block,
+                                           or an array of blocks (pre-bind a
+                                           block of ports) */
+  size_t nlisteners;                    /* 0 = no listener */
   dh_sql_cfg sql;                       /* connectors = { sql = {...} } */
   dh_crypto_cfg crypto;                 /* connectors = { crypto = {...} } */
 } dh_config;

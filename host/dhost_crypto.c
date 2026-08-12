@@ -24,12 +24,21 @@
 **    -- there is no header field a token can set to change how it is checked.
 **  - The host owns iat and exp. jwt_sign drops any iat/exp/nbf a guest put in
 **    its claims and injects its own from the host clock and ttl, so a guest
-**    cannot mint a token that never expires.
+**    cannot mint a token that never expires. verify requires an integer exp,
+**    so a token with no enforceable expiry is treated as one that has none.
 **  - verify checks the HMAC before it decodes or parses anything, so the JSON
 **    parser only ever runs on bytes this host signed with its own key.
+**  - The configured secret is never used to sign directly. Two independent
+**    subkeys are derived from it -- one for crypto/hmac, one for the JWT MAC
+**    -- so that crypto/hmac (a general "sign these bytes" grant) cannot be
+**    used as an oracle to forge a JWT: the two grants sign under different
+**    keys, and neither subkey discloses the other or the master. Without this,
+**    a program holding only host:crypto/hmac could HMAC a JWT signing-input
+**    itself and assemble a token, bypassing host:crypto/jwt_sign entirely.
 */
 
 #include <errno.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,9 +54,14 @@
 #define JWT_MAX_JSON       6144
 #define JSON_MAX_DEPTH     32
 
+/* Domain-separation labels: the master secret signs nothing directly, it only
+   keys these two derivations. Versioned, so a future scheme can coexist. */
+#define KDF_LABEL_HMAC "diluvium/crypto/hmac/v1"
+#define KDF_LABEL_JWT  "diluvium/crypto/jwt-hs256/v1"
+
 typedef struct dh_crypto {
-  unsigned char key[CRYPTO_KEY_MAX];
-  size_t keylen;
+  unsigned char k_hmac[DILUVIUM_SHA256_SIZE];   /* keys crypto/hmac */
+  unsigned char k_jwt[DILUVIUM_SHA256_SIZE];    /* keys the JWT MAC */
   long default_ttl;
 } dh_crypto;
 
@@ -202,13 +216,18 @@ static long b64url_decode (const char *in, size_t n, unsigned char *out,
     else if (have == 3) {
       c2 = b64_val((unsigned char)in[i + 2]);
       if (c2 < 0) return -1;
-      if ((c1 & 0x0f) != 0 && 0) {}     /* low bits need not be zero to decode */
+      /* Three sextets carry 18 bits into 2 bytes; the last sextet's low 2
+         bits are unused and canonical base64url leaves them zero. Reject a
+         non-canonical encoding rather than silently accept two spellings of
+         one byte string -- strict, as the header promises. */
+      if ((c2 & 0x03) != 0) return -1;
       if (o + 2 > cap) return -1;
       out[o++] = (unsigned char)((c0 << 2) | (c1 >> 4));
       out[o++] = (unsigned char)((c1 << 4) | (c2 >> 2));
       i += 3;
     }
-    else { /* have == 2 */
+    else { /* have == 2: two sextets, 12 bits into 1 byte; c1's low 4 unused */
+      if ((c1 & 0x0f) != 0) return -1;
       if (o + 1 > cap) return -1;
       out[o++] = (unsigned char)((c0 << 2) | (c1 >> 4));
       i += 2;
@@ -272,7 +291,11 @@ static int emit_json (diluvium_mp_cursor *c, dh_buf *o, int depth) {
     }
     case DILUVIUM_MP_FLOAT: {
       char b[32];
-      int n = snprintf(b, sizeof(b), "%.17g", t.f);
+      int n;
+      if (!isfinite(t.f))
+        return -1;                      /* nan/inf have no JSON form, and would
+                                           mint a token that fails its own parse */
+      n = snprintf(b, sizeof(b), "%.17g", t.f);
       dh_raw(o, b, (size_t)n);
       return 0;
     }
@@ -631,7 +654,8 @@ static dh_call_status do_hmac (dh_crypto *k, dh_buf *value,
     snprintf(detail, dcap, "crypto/hmac: args.data must be a string");
     return DH_CALL_ERROR;
   }
-  hmac_sha256(k->key, k->keylen, (const unsigned char *)t.p, t.len, mac);
+  hmac_sha256(k->k_hmac, sizeof(k->k_hmac), (const unsigned char *)t.p, t.len,
+              mac);
   to_hex(mac, DILUVIUM_SHA256_SIZE, hex);
   dh_str(value, hex);
   return DH_CALL_OK;
@@ -699,7 +723,14 @@ static dh_call_status do_jwt_sign (dh_crypto *k, dh_buf *value,
       int m = snprintf(tail, sizeof(tail), "%s\"iat\":%lld,\"exp\":%lld}",
                        first ? "" : ",", (long long)iat,
                        (long long)(iat + ttl));
-      dh_raw(&payload, tail, (size_t)m);
+      /* The one append that must not silently fail: it carries exp. A
+         truncated payload here would be a validly-signed token with no
+         expiry, so an allocation failure is an error, not a shorter token. */
+      if (dh_raw(&payload, tail, (size_t)m) != 0) {
+        snprintf(detail, dcap, "crypto/jwt_sign: out of memory");
+        dh_buf_free(&payload);
+        return DH_CALL_ERROR;
+      }
     }
   }
   if (payload.len > JWT_MAX_JSON) {
@@ -713,7 +744,7 @@ static dh_call_status do_jwt_sign (dh_crypto *k, dh_buf *value,
   dh_raw(&token, JWT_HEADER_B64, sizeof(JWT_HEADER_B64) - 1);
   dh_raw(&token, ".", 1);
   b64url_encode(payload.p, payload.len, &token);
-  hmac_sha256(k->key, k->keylen, token.p, token.len, mac);
+  hmac_sha256(k->k_jwt, sizeof(k->k_jwt), token.p, token.len, mac);
   dh_raw(&token, ".", 1);
   b64url_encode(mac, DILUVIUM_SHA256_SIZE, &token);
 
@@ -775,7 +806,7 @@ static dh_call_status do_jwt_verify (dh_crypto *k, dh_buf *value,
   /* HMAC over "header.payload" -- everything before the last dot -- and a
      constant-time compare against the token's signature, BEFORE decoding or
      parsing anything. */
-  hmac_sha256(k->key, k->keylen, (const unsigned char *)tok,
+  hmac_sha256(k->k_jwt, sizeof(k->k_jwt), (const unsigned char *)tok,
               (size_t)(dot2 - tok), mac);
   dh_buf_init(&esig);
   b64url_encode(mac, DILUVIUM_SHA256_SIZE, &esig);
@@ -814,7 +845,14 @@ static dh_call_status do_jwt_verify (dh_crypto *k, dh_buf *value,
         tt.kind == DILUVIUM_MP_INT) { nbf = tt.i; have_nbf = 1; }
   }
   now = now_secs();
-  if (have_exp && now >= exp) { dh_buf_free(&claims);
+  /* An integer exp is required. A signed token without one has no enforceable
+     expiry; treating it as valid would make a missing or string-typed exp a
+     forever-token. Every token this host mints carries one, so this only ever
+     rejects a foreign or crafted token. */
+  if (!have_exp)              { dh_buf_free(&claims);
+                                verify_fail(value, "expired");
+                                return DH_CALL_OK; }
+  if (now >= exp)             { dh_buf_free(&claims);
                                 verify_fail(value, "expired");
                                 return DH_CALL_OK; }
   if (have_nbf && now < nbf)  { dh_buf_free(&claims);
@@ -856,6 +894,8 @@ static dh_call_status conn_crypto (void *ud, dvs_id id, const char *call,
 int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
   dh_crypto *k = (dh_crypto *)calloc(1, sizeof(dh_crypto));
   const dh_crypto_cfg *cfg = &h->cfg.crypto;
+  unsigned char master[CRYPTO_KEY_MAX];
+  size_t masterlen = 0;
   if (k == NULL) {
     snprintf(err, errcap, "no memory for the crypto connector");
     return -1;
@@ -869,11 +909,11 @@ int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
       free(k);
       return -1;
     }
-    n = fread(k->key, 1, sizeof(k->key), f);
+    n = fread(master, 1, sizeof(master), f);
     fclose(f);
     /* Trim one trailing newline, the common shape of a key file. */
-    if (n > 0 && k->key[n - 1] == '\n') n--;
-    k->keylen = n;
+    if (n > 0 && master[n - 1] == '\n') n--;
+    masterlen = n;
   }
   else if (cfg->key_env[0] != '\0') {
     const char *v = getenv(cfg->key_env);
@@ -883,22 +923,33 @@ int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
       free(k);
       return -1;
     }
-    k->keylen = strlen(v);
-    if (k->keylen > sizeof(k->key)) k->keylen = sizeof(k->key);
-    memcpy(k->key, v, k->keylen);
+    masterlen = strlen(v);
+    if (masterlen > sizeof(master)) masterlen = sizeof(master);
+    memcpy(master, v, masterlen);
   }
   else if (cfg->keylen > 0) {
-    k->keylen = cfg->keylen;
-    memcpy(k->key, cfg->key, cfg->keylen);
+    masterlen = cfg->keylen;
+    if (masterlen > sizeof(master)) masterlen = sizeof(master);
+    memcpy(master, cfg->key, masterlen);
   }
-  if (k->keylen < 16) {
+  if (masterlen < 16) {
     snprintf(err, errcap, "crypto: the signing key is missing or shorter than "
                           "16 bytes (set one of key_file, key_env, key)");
+    memset(master, 0, sizeof(master));
     free(k);
     return -1;
   }
+  /* Derive the two working subkeys and forget the master: nothing signs with
+     it directly, so it need not outlive this call. Distinct labels keep the
+     crypto/hmac grant from doubling as a JWT-forging oracle. */
+  hmac_sha256(master, masterlen, (const unsigned char *)KDF_LABEL_HMAC,
+              sizeof(KDF_LABEL_HMAC) - 1, k->k_hmac);
+  hmac_sha256(master, masterlen, (const unsigned char *)KDF_LABEL_JWT,
+              sizeof(KDF_LABEL_JWT) - 1, k->k_jwt);
+  memset(master, 0, sizeof(master));
   if (dh_register(h, "crypto", conn_crypto, k) != 0) {
     snprintf(err, errcap, "could not register the crypto connector");
+    memset(k, 0, sizeof(*k));
     free(k);
     return -1;
   }
@@ -908,9 +959,13 @@ int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
 
 void dh_crypto_close (dh_host *h) {
   dh_crypto *k = (dh_crypto *)h->cryptoctx;
+  /* Neither the subkeys nor the host's own copy of the configured secret
+     linger. The inline-key config path (dev) leaves the master in h->cfg;
+     wipe it here too, so close is the last place any of it lives. */
+  memset(h->cfg.crypto.key, 0, sizeof(h->cfg.crypto.key));
+  h->cfg.crypto.keylen = 0;
   if (k == NULL)
     return;
-  /* The key does not linger in freed memory. */
   memset(k, 0, sizeof(*k));
   free(k);
   h->cryptoctx = NULL;

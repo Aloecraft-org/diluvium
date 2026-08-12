@@ -39,11 +39,18 @@
 ---wired connector answers only programs that hold the grant.
 ---@class diluvium.HostConnectors
 ---@field time boolean?                        # wall-clock ms via {call="time"}
----@field listen diluvium.HostListen?          # inbound HTTP, behind the LB
+---@field listen (diluvium.HostListen|diluvium.HostListen[])?  # inbound HTTP
 ---@field sql diluvium.HostSql?                # SQLite, host-side
+---@field crypto diluvium.HostCrypto?          # random/hash/hmac/JWT, host-side
 
+---A listener, or an array of them. A v1 host binds at startup and never at
+---runtime, so a deployment that will want several ports pre-binds the block
+---here -- `listen = { {port=8080}, {port=8081} }` -- rather than binding one
+---later. Up to 8. Ports must differ; queue names need not (all ports feeding
+---one supervisor loop is the common case, and `conn` stays unique across
+---them). A single block is still just `listen = { port = 8080 }`.
 ---@class diluvium.HostListen
----@field port integer                # required; 1..65535
+---@field port integer                # required; 1..65535, unique per host
 ---@field bind string?                # IPv4 literal (default "127.0.0.1")
 ---@field queue string?               # requests land here, on the root
 ---                                   # (default "http_in"): {conn, method,
@@ -62,3 +69,16 @@
 ---                                   # read-only and leaves sql/exec unwired
 ---@field max_rows integer?           # results past this REFUSE, never
 ---                                   # truncate (default 1024)
+
+---The crypto connector answers host:crypto/random, /hash, /hmac, /jwt_sign
+---and /jwt_verify. The signing key never leaves the host: exactly one of
+---key_file (the deployment shape), key_env, or key (inline, for dev) names
+---it, and it must be at least 16 bytes. jwt_sign owns iat and exp -- a guest
+---cannot forge a longer expiry -- and jwt_verify fixes the algorithm to
+---HS256, so an "alg":"none" token is just an invalid one.
+---@class diluvium.HostCrypto
+---@field key string?                 # inline key (dev only); >= 16 bytes
+---@field key_env string?             # name of an env var holding the key
+---@field key_file string?            # path to a file holding the key
+---@field default_ttl integer?        # jwt_sign ttl when a call omits it
+---                                   # (seconds; default 3600)

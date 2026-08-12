@@ -255,19 +255,59 @@ static int cfg_num (lua_State *L, int idx, const char *key, int64_t *out,
   return rc;
 }
 
+static void listener_defaults (dh_listener_cfg *l) {
+  memset(l, 0, sizeof(*l));
+  l->port = 0;
+  strcpy(l->bind_addr, "127.0.0.1");
+  strcpy(l->queue, "http_in");
+  strcpy(l->reply_queue, "http_out");
+  l->max_body = 65536;
+  l->conn_deadline_ms = 10000;
+  l->max_conns = 64;
+}
+
 static void cfg_defaults (dh_config *c) {
   memset(c, 0, sizeof(*c));
   c->max_instances = 64;
   c->spawns_per_step = 4;
   c->hibernation = 1;
-  c->listener.port = 0;
-  strcpy(c->listener.bind_addr, "127.0.0.1");
-  strcpy(c->listener.queue, "http_in");
-  strcpy(c->listener.reply_queue, "http_out");
-  c->listener.max_body = 65536;
-  c->listener.conn_deadline_ms = 10000;
-  c->listener.max_conns = 64;
+  c->nlisteners = 0;
   c->sql.max_rows = 1024;
+}
+
+/* Parse one listener block at 'idx' into 'l' (defaults already applied). The
+   keys have already been vetted against listen_keys. 'where' names the block
+   for refusals -- "config.connectors.listen" for the single form, or
+   "config.connectors.listen[2]" for an array element. */
+static int cfg_listener (lua_State *L, int idx, dh_listener_cfg *l,
+                         const char *where, char *err, size_t errcap) {
+  int64_t n = 0;
+  if (cfg_num(L, idx, "port", &n, 1, 65535, where, err, errcap) != 0)
+    return -1;
+  if (n == 0)
+    return cfg_fail(err, errcap, "%s.port is required%s", where, "");
+  l->port = (int)n;
+  if (cfg_str(L, idx, "bind", l->bind_addr, sizeof(l->bind_addr), 0,
+              where, err, errcap) != 0 ||
+      cfg_str(L, idx, "queue", l->queue, sizeof(l->queue), 0,
+              where, err, errcap) != 0 ||
+      cfg_str(L, idx, "reply_queue", l->reply_queue, sizeof(l->reply_queue), 0,
+              where, err, errcap) != 0)
+    return -1;
+  n = l->max_body;
+  if (cfg_num(L, idx, "max_body", &n, 1, 16 * 1024 * 1024, where, err, errcap)
+      != 0)
+    return -1;
+  l->max_body = (long)n;
+  n = l->conn_deadline_ms;
+  if (cfg_num(L, idx, "deadline_ms", &n, 1, 3600000, where, err, errcap) != 0)
+    return -1;
+  l->conn_deadline_ms = (long)n;
+  n = l->max_conns;
+  if (cfg_num(L, idx, "max_conns", &n, 1, 4096, where, err, errcap) != 0)
+    return -1;
+  l->max_conns = (int)n;
+  return 0;
 }
 
 int dh_config_load (const char *path, dh_config *out, char *err,
@@ -404,56 +444,77 @@ int dh_config_load (const char *path, dh_config *out, char *err,
     lua_pop(L, 1);
     lua_getfield(L, -1, "listen");
     if (!lua_isnil(L, -1)) {
-      if (!lua_istable(L, -1) ||
-          cfg_known_keys(L, -1, listen_keys, "config.connectors.listen",
-                         err, errcap) != 0) {
-        if (!lua_istable(L, -1))
-          cfg_fail(err, errcap, "config.connectors.listen must be a "
-                                "table%s%s", "", "");
+      int is_array;
+      if (!lua_istable(L, -1)) {
+        cfg_fail(err, errcap, "config.connectors.listen must be a table (one "
+                              "listener) or an array of them%s%s", "", "");
         lua_pop(L, 2);
         goto done;
       }
-      n = 0;
-      if (cfg_num(L, -1, "port", &n, 1, 65535, "config.connectors.listen",
-                  err, errcap) != 0 || n == 0) {
-        if (n == 0)
-          cfg_fail(err, errcap, "config.connectors.listen.port is "
-                                "required%s%s", "", "");
-        lua_pop(L, 2);
-        goto done;
+      /* An array of blocks when [1] is a table -- the pre-bind-a-block-of-
+         ports shape; a single block otherwise, the back-compatible one. */
+      lua_rawgeti(L, -1, 1);
+      is_array = lua_istable(L, -1);
+      lua_pop(L, 1);
+      if (is_array) {
+        lua_Integer len = (lua_Integer)lua_rawlen(L, -1);
+        lua_Integer i;
+        if (len > DH_MAX_LISTENERS) {
+          cfg_fail(err, errcap, "config.connectors.listen holds more than this "
+                                "host's %s ports%s", "8", "");
+          lua_pop(L, 2);
+          goto done;
+        }
+        for (i = 1; i <= len; i++) {
+          char where[48];
+          dh_listener_cfg *l = &out->listeners[out->nlisteners];
+          size_t j;
+          snprintf(where, sizeof(where), "config.connectors.listen[%d]",
+                   (int)i);
+          lua_rawgeti(L, -1, i);
+          if (!lua_istable(L, -1)) {
+            cfg_fail(err, errcap, "%s must be a table%s", where, "");
+            lua_pop(L, 3);
+            goto done;
+          }
+          if (cfg_known_keys(L, -1, listen_keys, where, err, errcap) != 0) {
+            lua_pop(L, 3);
+            goto done;
+          }
+          listener_defaults(l);
+          if (cfg_listener(L, -1, l, where, err, errcap) != 0) {
+            lua_pop(L, 3);
+            goto done;
+          }
+          /* No two listeners on one port: the second bind would fail with an
+             errno, but a config refusal names the mistake instead. */
+          for (j = 0; j < out->nlisteners; j++) {
+            if (out->listeners[j].port == l->port) {
+              cfg_fail(err, errcap, "%s repeats a port already bound%s",
+                       where, "");
+              lua_pop(L, 3);
+              goto done;
+            }
+          }
+          out->nlisteners++;
+          lua_pop(L, 1);
+        }
       }
-      out->listener.port = (int)n;
-      out->listener.enabled = 1;
-      if (cfg_str(L, -1, "bind", out->listener.bind_addr,
-                  sizeof(out->listener.bind_addr), 0,
-                  "config.connectors.listen", err, errcap) != 0 ||
-          cfg_str(L, -1, "queue", out->listener.queue,
-                  sizeof(out->listener.queue), 0,
-                  "config.connectors.listen", err, errcap) != 0 ||
-          cfg_str(L, -1, "reply_queue", out->listener.reply_queue,
-                  sizeof(out->listener.reply_queue), 0,
-                  "config.connectors.listen", err, errcap) != 0) {
-        lua_pop(L, 2);
-        goto done;
+      else {
+        dh_listener_cfg *l = &out->listeners[0];
+        if (cfg_known_keys(L, -1, listen_keys, "config.connectors.listen",
+                           err, errcap) != 0) {
+          lua_pop(L, 2);
+          goto done;
+        }
+        listener_defaults(l);
+        if (cfg_listener(L, -1, l, "config.connectors.listen", err, errcap)
+            != 0) {
+          lua_pop(L, 2);
+          goto done;
+        }
+        out->nlisteners = 1;
       }
-      n = out->listener.max_body;
-      if (cfg_num(L, -1, "max_body", &n, 1, 16 * 1024 * 1024,
-                  "config.connectors.listen", err, errcap) != 0) {
-        lua_pop(L, 2); goto done;
-      }
-      out->listener.max_body = (long)n;
-      n = out->listener.conn_deadline_ms;
-      if (cfg_num(L, -1, "deadline_ms", &n, 1, 3600000,
-                  "config.connectors.listen", err, errcap) != 0) {
-        lua_pop(L, 2); goto done;
-      }
-      out->listener.conn_deadline_ms = (long)n;
-      n = out->listener.max_conns;
-      if (cfg_num(L, -1, "max_conns", &n, 1, 4096,
-                  "config.connectors.listen", err, errcap) != 0) {
-        lua_pop(L, 2); goto done;
-      }
-      out->listener.max_conns = (int)n;
     }
     lua_pop(L, 1);
     lua_getfield(L, -1, "sql");
@@ -919,7 +980,7 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
     dh_host_close(h);
     return -1;
   }
-  if (cfg->listener.enabled && dh_http_open(h, err, errcap) != 0) {
+  if (cfg->nlisteners > 0 && dh_http_open(h, err, errcap) != 0) {
     dh_host_close(h);
     return -1;
   }
