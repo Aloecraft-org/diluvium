@@ -425,7 +425,50 @@ export const Diluvium = {
   },
 };
 
-async function instantiate(wasm, { wasiWrite } = {}) {
+// ## The swarm host, across the boundary
+//
+// `dvs_new` takes a vtable of C function pointers, which JavaScript cannot
+// make -- the same wall `dv_set_notify` hit above. The runtime's answer is
+// `src/dvs_shim.c`: the trampolines live on the C side, declared as imports
+// from module "env" (`js_host_create` / `js_host_destroy` / `js_host_drive`),
+// and `dvsjs_new` is the constructor a wasm host calls instead of `dvs_new`.
+// A module containing the shim cannot instantiate without those imports, so
+// `instantiate` always supplies them, late-bound the way the WASI shim
+// late-binds memory: install the real host with `setSwarmHost` after
+// instantiation, before anything calls `dvs_step`. The defaults are honest
+// rather than convenient -- `drive` without an installed host throws by name,
+// because an instance silently dropped by a missing host is the kind of
+// failure this tree refuses to ship.
+//
+// One caution that is the boundary's, not this file's: a host callback runs
+// *inside* `dvs_step`, and a JavaScript exception thrown from it unwinds the
+// wasm stack mid-step. Treat callbacks as code that must not throw; the
+// throwing default exists to catch a missing host during development, not as
+// an error-handling channel.
+const swarmHosts = new WeakMap();
+
+/** Install the swarm host for an instantiated module: an object with
+ * `drive(id, instPtr, ctx)` (required; return truthy to keep the instance,
+ * falsy when it is finished -- an undefined return throws, so a forgotten
+ * `return` cannot silently kill instances), and optionally `create(id,
+ * instPtr)` returning a numeric ctx, and `destroy(id, ctx)`. */
+export function setSwarmHost(instance, host) {
+  const ref = swarmHosts.get(instance);
+  if (!ref) {
+    throw new DiluviumError(
+      "setSwarmHost: this instance was not created by instantiate(), so it has no env trampolines"
+    );
+  }
+  ref.current = host;
+}
+
+/** Instantiate a Diluvium wasm module and return the raw WebAssembly
+ * instance: exports (including `dvs_*` and `dvsjs_new` when the module is the
+ * swarm build), linear memory, `malloc`/`free`. `Diluvium.load` is the
+ * comfortable path for one instance; this is the layer a host -- lab's swarm
+ * host in particular -- builds on, paired with `setSwarmHost`. Exported
+ * because hiding it would just make hosts re-implement the WASI plumbing. */
+export async function instantiate(wasm, { wasiWrite } = {}) {
   if (wasm && wasm.exports) return wasm; // already instantiated
 
   // The module is linked against the wasi-sdk's libc, so it imports
@@ -439,10 +482,39 @@ async function instantiate(wasm, { wasiWrite } = {}) {
 
   const wasi = wasiPreview1(wasiWrite ? { write: wasiWrite } : {});
   wasi.complete(module);
+  const hostRef = { current: null };
   const instance = await WebAssembly.instantiate(module, {
     [WASI_MODULE]: wasi.imports,
+    // Supplied whether or not this module contains the swarm shim: extra
+    // import modules are ignored, missing ones fail instantiation.
+    env: {
+      js_host_create: (ud, id, inst) => {
+        const h = hostRef.current;
+        return h && h.create ? h.create(id, inst) | 0 : 0;
+      },
+      js_host_destroy: (ud, id, ctx) => {
+        const h = hostRef.current;
+        if (h && h.destroy) h.destroy(id, ctx);
+      },
+      js_host_drive: (ud, id, inst, ctx) => {
+        const h = hostRef.current;
+        if (!h || typeof h.drive !== "function") {
+          throw new DiluviumError(
+            "no swarm host installed: call setSwarmHost(instance, host) before dvs_step drives anything"
+          );
+        }
+        const keep = h.drive(id, inst, ctx);
+        if (keep === undefined) {
+          throw new DiluviumError(
+            "swarm host drive() returned undefined; return truthy to keep the instance, falsy when it is finished"
+          );
+        }
+        return keep ? 1 : 0;
+      },
+    },
   });
   wasi.attach(instance);
+  swarmHosts.set(instance, hostRef);
 
   // The wasm build is not a WASI reactor, so its constructors have to be run by
   // hand -- the same thing doc/repl-reference.html records about run_lua. This is

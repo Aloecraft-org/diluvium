@@ -1,8 +1,18 @@
 /* wasm_stubs.c — browser stubs for wasm32-unknown-unknown
- * 
+ *
  * Provides minimal C library surface so Lua compiles and runs
  * basic scripts. File I/O returns errors. OS functions are no-ops.
  * malloc/realloc/free come from the Rust side (dlmalloc).
+ *
+ * Symbols the CONSUMER must supply, because this file uses or omits them
+ * rather than defining them: strlen, memcpy, memset (this file itself calls
+ * the first two), and — since the swarm layer joined this archive —
+ * snprintf and vsnprintf, which dvs.c uses to word its error messages and
+ * which are not stubbable the way sprintf below is: a formatter that
+ * returns an empty string would turn every swarm refusal into silence,
+ * and a silent refusal is the failure mode this tree exists to avoid.
+ * wasi-libc provides all five in the WASI build; a browser embedder links
+ * its own (dlmalloc-style single-file printf implementations exist).
  */
 
 #include <stdio.h>
@@ -140,6 +150,26 @@ void *calloc(size_t nmemb, size_t size) {
 int strcmp(const char *s1, const char *s2) {
     while (*s1 && (*s1 == *s2)) { s1++; s2++; }
     return *(unsigned char *)s1 - *(unsigned char *)s2;
+}
+
+/* The swarm layer (dvs.c) matches capability prefixes with strncmp, and
+   clang's wasm32 codegen emits calls to memcmp where a native build inlines
+   the comparison -- measured on the object, not present in the source text.
+   Same freestanding style as the rest. */
+int strncmp(const char *s1, const char *s2, size_t n) {
+    while (n && *s1 && (*s1 == *s2)) { s1++; s2++; n--; }
+    if (n == 0) return 0;
+    return *(unsigned char *)s1 - *(unsigned char *)s2;
+}
+
+int memcmp(const void *a, const void *b, size_t n) {
+    const unsigned char *pa = (const unsigned char *)a;
+    const unsigned char *pb = (const unsigned char *)b;
+    while (n--) {
+        if (*pa != *pb) return *pa - *pb;
+        pa++; pb++;
+    }
+    return 0;
 }
 
 int strcoll(const char *s1, const char *s2) {

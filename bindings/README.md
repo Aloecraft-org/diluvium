@@ -74,6 +74,24 @@ from `dv_layout` instead of a constant, and every allocation inside the guest's
 memory goes through one `Scratch` scope rather than being freed by hand at each
 call site.
 
+### The swarm module
+
+`dist/diluvium_swarm_wasi.wasm` is the swarm layer's artifact, and it is a
+*separate* module on purpose: `dvs_new` takes C function pointers a JavaScript
+host cannot make, so `src/dvs_shim.c` puts the trampolines on the C side as
+mandatory `env` imports (`js_host_create` / `js_host_destroy` /
+`js_host_drive`) and exports `dvsjs_new` in `dvs_new`'s place. Mandatory means
+mandatory — linked into `diluvium_wasi.wasm` those imports would break
+`wasmtime diluvium_wasi.wasm` and every other pure-WASI consumer, which is why
+they live in their own artifact. The wrapper's `instantiate()` supplies the
+`env` trampolines always (they are inert for modules that don't import them);
+`setSwarmHost(instance, host)` installs the real host — `drive(id, inst, ctx)`
+required, `create`/`destroy` optional — and the default `drive` throws by
+name, so a forgotten host is a message rather than a silently dropped
+instance. `js/test/swarm.integration.mjs` is the proof-of-life for all of it,
+and is deliberately not in CI until it has passed once somewhere (the
+`verify_wasm` lesson): run it by hand against a built module first.
+
 ## WASI under wasmtime
 
 `rust/diluvium-wasmtime`. Rust, but **not the `diluvium` crate** — a third

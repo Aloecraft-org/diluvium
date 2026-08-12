@@ -112,10 +112,13 @@ _wasm_build_step2:
 	-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-deprecated-declarations"
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c diluvium_api.c -o diluvium_api_wasi.o $(WASM_LLVM_OPT) \
 		-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS -Wno-deprecated-declarations"
+	@echo '=== Step 2b: Compile the swarm layer ==='
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c dvs.c -o dvs_wasi.o $(WASM_LLVM_OPT) -fPIC"
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) -c dvs_shim.c -o dvs_shim_wasi.o $(WASM_LLVM_OPT)"
 
 _wasi_static_lib: _build_step0 _wasm_build_step1 _wasm_build_step2
 	@echo '=== Creating Static Archive and Extracting WASI Libs ==='
-	$(PODMAN_BUILD_WASM) "/opt/wasi-sdk/bin/llvm-ar rcs /data/libdiluvium_wasi.a /data/onelua_wasi.o /data/wasm_stubs_wasi.o /data/diluvium_api_wasi.o /data/analyze_wasi.o"
+	$(PODMAN_BUILD_WASM) "/opt/wasi-sdk/bin/llvm-ar rcs /data/libdiluvium_wasi.a /data/onelua_wasi.o /data/wasm_stubs_wasi.o /data/diluvium_api_wasi.o /data/analyze_wasi.o /data/dvs_wasi.o /data/dvs_shim_wasi.o"
 	@cp .data/libdiluvium_wasi.a dist/libdiluvium_wasi.a
 
 	@echo '=== Pulling WASI/C libs from container ==='
@@ -180,8 +183,21 @@ _wasm_unknown_build: _build_step0
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) --target=wasm32-unknown-unknown \
 		-c wasm_stubs_unknown.c -o wasm_stubs_wasm_unknown.o -O3 \
 		$(WASI_INCLUDES) -D__wasi__"
+
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) --target=wasm32-unknown-unknown \
+		-c dvs.c -o dvs_wasm_unknown.o -O3 \
+		$(WASI_INCLUDES) \
+		-DDILUVIUM_AS_LIBRARY \
+		-DLUA_USE_C89 \
+		-DL_tmpnam=32 \
+		-D__wasi__ \
+		-Wno-deprecated-declarations"
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) --target=wasm32-unknown-unknown \
+		-c dvs_shim.c -o dvs_shim_wasm_unknown.o -O3 \
+		$(WASI_INCLUDES) -D__wasi__"
 	$(PODMAN_BUILD_WASM) "/opt/wasi-sdk/bin/llvm-ar rcs /data/libdiluvium_wasm_unknown.a \
-		/data/onelua_wasm_unknown.o /data/analyze_wasm_unknown.o /data/wasm_stubs_wasm_unknown.o"
+		/data/onelua_wasm_unknown.o /data/analyze_wasm_unknown.o /data/wasm_stubs_wasm_unknown.o \
+		/data/dvs_wasm_unknown.o /data/dvs_shim_wasm_unknown.o"
 	@cp .data/libdiluvium_wasm_unknown.a dist/libdiluvium_wasm_unknown.a
 
 _wasm_build_compiler_obj:
@@ -197,12 +213,23 @@ _wasm_build_step3: _wasm_build_compiler_obj
 	
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua_wasi.o analyze_wasi.o diluvium_api_wasi.o wasm_stubs_wasi.o -o diluvium_wasi.wasm $(BUILD_WASM_OPT)"
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua_wasi.o analyze_wasi.o diluvium_api_wasi.o wasm_stubs_wasi.o -o libdiluvium_wasi.wasm $(BUILD_WASM_OPT) -Wl,--no-entry -Wl,--allow-undefined"
+
+	@echo '=== Linking the swarm module (host-outside-module: JS/lab) ==='
+	@# A separate artifact on purpose. dvs_shim.c declares three "env" imports
+	@# for the host trampolines, and a wasm module's imports are mandatory --
+	@# linking the shim into diluvium_wasi.wasm would make `wasmtime
+	@# diluvium_wasi.wasm`, and everything else that supplies only WASI, fail
+	@# at instantiation. Pure-WASI consumers keep the module they had; a host
+	@# on the far side of the boundary loads this one and supplies the env
+	@# imports (the JS binding's instantiate() always does).
+	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) onelua_wasi.o analyze_wasi.o diluvium_api_wasi.o wasm_stubs_wasi.o dvs_wasi.o dvs_shim_wasi.o -o diluvium_swarm_wasi.wasm $(BUILD_WASM_OPT)"
 	
 	@echo '=== Building Compiler (luac.wasm) - No stubs needed ==='
 	$(PODMAN_BUILD_WASM) "$(WASI_CLANG) oneluac_wasi.o analyze_wasi.o -o luac_wasi.wasm -lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export=malloc -Wl,--export=free"
 
 	@cp .data/diluvium_wasi.wasm dist/diluvium_wasi.wasm
 	@cp .data/libdiluvium_wasi.wasm dist/libdiluvium_wasi.wasm
+	@cp .data/diluvium_swarm_wasi.wasm dist/diluvium_swarm_wasi.wasm
 	@cp .data/luac_wasi.wasm dist/diluvium_compiler_wasi.wasm
 
 # Audit finding 29. Every path here named a file no target produces -- onelua.o
