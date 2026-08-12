@@ -68,12 +68,36 @@ button produced it.
 **5. Hostcalls.** The encoding is `doc/Hostcall.md` and is the contract; the
 host's half is: drain each guest's request queue, dispatch on `call` against
 that guest's granted capabilities (`host:time`-style grants, same attenuating
-grammar as everything else), run the connector, push the reply with `tok`
-echoed verbatim. Every drained request is answered — `ok`, `denied`, `error`
-or `malformed` — never dropped. Connectors are all off by default; a
-deployment's configuration names the ones it wires, and lab wires JavaScript
-functions where production wires system calls. The correlation token is load-
-bearing from the very first prototype: do not ship a handler without it.
+grammar as everything else — `dvs_holds` exists precisely so a host mediating
+its own resources asks the same question the swarm asks about queues), run
+the connector, push the reply with `tok` echoed verbatim. Every drained
+request is answered — `ok`, `denied`, `error` or `malformed` — never dropped.
+Connectors are all off by default; a deployment's configuration names the
+ones it wires, and lab wires JavaScript functions where production wires
+system calls. The correlation token is load-bearing from the very first
+prototype: do not ship a handler without it.
+
+The queue names are conventions this protocol fixes, so guests are portable
+between hosts: a guest that makes hostcalls declares **`host/calls`**
+(exported, `on_full = "reject"`) and waits on **`host/replies`**. A guest
+that declares no `host/calls` makes no hostcalls and costs the pump nothing;
+one that declares no reply queue has asked questions with nowhere to hear
+answers, which becomes its own diagnostic. A hibernated instance's pending
+calls sleep in its queues and are answered after it wakes — the pump reads
+resident instances only, which is correct rather than lazy: the reply
+belongs in the log of the residency that reads it.
+
+**The replay boundary, for connectors with state.** A hostcall reply is a
+message, so it is in the log, so **a replay replays logged replies — it does
+not re-execute connectors.** For pure connectors (time, rng) the distinction
+is invisible. For stateful ones it is the whole point and cuts both ways:
+replaying a run does not double-apply its `sql/exec` writes, *and* the
+database's current contents are not what the replayed queries would see —
+the database is **outside the replay boundary**, an external system the log
+happens to describe. A deployment that needs the store itself reproducible
+layers that on top (its own idempotency keys, snapshots of the database
+beside the log); the host protocol promises only that the *program's*
+execution replays.
 
 **6. Hibernation policy.** The mechanism is the runtime's; *when* is the
 host's. `wake_on_message` delivery is already handled by the swarm layer; what
@@ -100,18 +124,30 @@ particular exposes JavaScript *only* as hostcall connectors, never as FFI —
 the moment a JS function is callable without crossing the queue, sealing,
 capabilities, metering and replay all have a hole in them at once.
 
-## Configuration, sketched
+## Configuration — decided, typed, and enforced
 
-What the generic host reads instead of being edited; the JS host takes the
-same shape as an object. Indicative, not final:
+A deployment is a `*.host.lua` file returning one table, typed by the
+LuaCATS schema in `host/types/host.lua` (so an editor completes keys and
+catches typos ahead of time) and annotated examples in
+`host/example.host.lua`. The JS host takes the same shape as an object.
 
-```
-supervisor   = "supervisor.lua"        -- the root program
-max_instances = 64
-spawns_per_step = 4
-identity     = "prod-cluster-7"        -- optional; stamps snapshots
-hibernation  = "on"                    -- or "off": policy, not capability
-budget       = { instructions = 5e6, memory_kb = 512 }   -- the root's
-caps         = { "lifecycle", "queue:*", "host:time" }   -- the ceiling
-connectors   = { time = true }         -- everything absent is off
-```
+Lua's syntax without Lua's power, and the power is removed by construction
+rather than convention: the host evaluates the file in an **empty
+environment**, text mode only — there is nothing to call, so the file can
+declare and cannot compute — and then refuses any key it does not know **by
+name**, because an unknown key is a typo about to become a silent default.
+One file, one context: the config is host property; guest programs are their
+own `.lua` files and are never inlined into it.
+
+The listener's message shapes, which are the other convention guests are
+written against: a completed request arrives on the configured queue
+(default `http_in`) as `{conn, method, path, body}`, and a response leaves
+on the reply queue (default `http_out`) as `{conn, status, body,
+content_type?}` — `conn` echoed verbatim, the hostcall token discipline
+applied to traffic. The port is topology and comes from this file, never
+from a guest: a guest cannot read a socket, and a listener that hibernated
+with its program would be host state pretending otherwise.
+
+The C implementation is `host/` (`make build_host`, `make host_check`);
+`test/host_check.c` drives every duty end to end, the listener over a real
+socket.

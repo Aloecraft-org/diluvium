@@ -499,6 +499,26 @@ dshim_check: _build_step0
 	  $(CURDIR)/test/dshim_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dshim_check
 
+# The generic host: doc/Host.md as a binary. Links the system sqlite for now;
+# the pinned amalgamation is the full-variant packaging decision and lands
+# with it. Built from src via .data like everything else.
+HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
+  $(CURDIR)/host/dhost_sql.c $(CURDIR)/host/picohttpparser.c
+
+build_host: _build_step0
+	gcc -O2 -Wall -DMAKE_LIB -DLUA_USE_LINUX -I$(CURDIR)/.data -I$(CURDIR)/host \
+	  -o $(CURDIR)/dist/diluvium-host \
+	  $(HOST_SRCS) $(CURDIR)/host/dhost_main.c \
+	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
+	@echo "dist/diluvium-host"
+
+host_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
+	  -o $(CURDIR)/dist/host_check \
+	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \
+	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
+	@cd $(CURDIR)/test && $(CURDIR)/dist/host_check
+
 # What a resident instance costs, printed rather than asserted. 18.2's profile A
 # drops hibernation, so density is bounded by the resident figure and that figure
 # had never been measured -- see the header of test/footprint.c for why this

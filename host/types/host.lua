@@ -1,0 +1,64 @@
+---The generic host's configuration schema, as LuaCATS annotations.
+---
+---A deployment's `*.host.lua` file returns one `diluvium.HostConfig` table.
+---These annotations never run: they exist so lua-language-server can complete
+---keys and catch typos in the editor, ahead of the host's own refusal --
+---which is stricter, because the host also refuses at runtime what an editor
+---only warns about. The file is evaluated in an EMPTY environment, so it can
+---declare and cannot compute: no `os`, no `require`, not even `tostring`.
+---One file, one context: this file's context is the HOST, and guest programs
+---(the `supervisor`, anything it spawns) are ordinary `.lua` in their own
+---files, never inlined here.
+---
+---Usage, at the top of a deployment file:
+---
+---  ---@type diluvium.HostConfig
+---  return {
+---    supervisor = "supervisor.lua",
+---    caps = { "lifecycle", "queue:*", "host:time" },
+---    connectors = { time = true },
+---  }
+
+---@class diluvium.HostConfig
+---@field supervisor string           # the root program's file; required
+---@field max_instances integer?      # swarm table bound (default 64)
+---@field spawns_per_step integer?    # 9.5's lifecycle rate limit (default 4)
+---@field identity string?            # stamps snapshots; omit for unstamped
+---@field hibernation ("on"|"off")?   # policy, not capability (default "on")
+---@field caps string[]?              # the root's ceiling; children attenuate
+---@field budget diluvium.HostBudget? # the root's; 0/omitted means none
+---@field connectors diluvium.HostConnectors?  # everything absent is OFF
+
+---@class diluvium.HostBudget
+---@field instructions integer?      # lifetime VM instructions, not per-step
+---@field memory_kb integer?
+
+---Connectors are all off by default; naming one wires it. Which *calls* a
+---program may make is still the capability grammar's question ("host:time",
+---"host:sql/query", attenuating through spawns like everything else) -- a
+---wired connector answers only programs that hold the grant.
+---@class diluvium.HostConnectors
+---@field time boolean?                        # wall-clock ms via {call="time"}
+---@field listen diluvium.HostListen?          # inbound HTTP, behind the LB
+---@field sql diluvium.HostSql?                # SQLite, host-side
+
+---@class diluvium.HostListen
+---@field port integer                # required; 1..65535
+---@field bind string?                # IPv4 literal (default "127.0.0.1")
+---@field queue string?               # requests land here, on the root
+---                                   # (default "http_in"): {conn, method,
+---                                   # path, body}
+---@field reply_queue string?         # responses drain from here (default
+---                                   # "http_out"): {conn, status, body,
+---                                   # content_type?}
+---@field max_body integer?           # refuse bigger bodies (default 65536)
+---@field deadline_ms integer?        # per-connection; the host's own timeout
+---                                   # logic (default 10000)
+---@field max_conns integer?          # table bound (default 64)
+
+---@class diluvium.HostSql
+---@field path string                 # the database file; required
+---@field mode ("read"|"readwrite")?  # default "read"; "read" opens the file
+---                                   # read-only and leaves sql/exec unwired
+---@field max_rows integer?           # results past this REFUSE, never
+---                                   # truncate (default 1024)
