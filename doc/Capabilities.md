@@ -58,11 +58,20 @@ simply *the root's parent*. Then:
   the operator ceiling above the root is an *optional override* for the day you
   run a program you did not write.
 
-The one thing that genuinely stays host-side is **resource wiring** — the DB
-path, the `fs` root, the signing key — because those are machine facts (the same
-program on two boxes needs two paths) and a program declaring its own key path is
-a footgun even when trusted. That is a few lines, not a config file: caps and
-quantitative limits go in the program, resource scopes stay with the host.
+The one thing that genuinely stays host-side is **resource wiring** — but as a
+*scope*, not an application detail. The host grants a **place**: a directory for
+`fs`, a directory (or path) the sql connector may open databases within, the
+signing key. The program then **names the resource it wants inside that scope** —
+which database file, which path — and the connector resolves that name against
+the granted scope and refuses anything that escapes it. The config must not carry
+the application's own filename; that a program is locked to one absolute file
+from launch (build5/6's `path = "example.db"`) is the concrete wrong this fixes,
+and naming the scope instead of the file is also how a program gets *more than
+one* database. Those are machine facts (the same program on two boxes needs two
+directories) and a program declaring its own key path is a footgun even when
+trusted. So: caps and quantitative limits go in the program, resource *scopes*
+stay with the host, and the program names its resources within them. (build7
+Part 2 is the first cut of this for `sql` and `fs`.)
 
 ## 3. Mechanics vs. expression — why build7 is not throwaway
 
@@ -147,3 +156,31 @@ Design carried from the analyzer discussion: an instruction budget is
 deterministic and replayable; wall-clock time is not. Anything that must replay
 bit-exactly is bounded by the former and never the latter — which is exactly why
 `exec` (§5) sits outside the replay/budget guarantees and says so.
+
+## 8. Ergonomics: the mechanism is not the surface
+
+Capability testing made this undeniable, so it goes here as a first-class
+principle: **the mechanism is not the surface a programmer should touch.** The
+hostcall boundary — a request pushed onto a queue, a reply awaited on another —
+exists for real reasons (sealing, capability gating, replay) and is not
+negotiable. But requiring a program to *hand-roll* that queue pair, size it,
+correlate tokens, and know the magic queue names is a failure, not a feature. It
+takes hours of study to write "create a table, write a value, read it back," and
+that voids the accessibility claim the project rests on.
+
+- **A `host` guest library** owns the queue plumbing so a program writes
+  `host.sql.exec(...)` and never sees a queue or a token. It is the first thing
+  build7 builds (Part 1), and every example and capability test is written
+  against it, so the code we ship *models* the good pattern instead of teaching
+  the raw one.
+- **The queues stay the substrate, not the interface.** They remain the flexible
+  thing that can put anything at either end; they are simply no longer what a
+  program reaches for. Queues were never meant to be the *only* hostcall boundary.
+- **The endgame is a natural `await`.** Because we own the language, the honest
+  fix for async-looking hostcalls is language-level: an `await`-style keyword the
+  guest library's internals collapse into, so eventually not even the library
+  hand-rolls push/wait. That is a language-design effort (roadmap), and Part 1 is
+  deliberately shaped so it slots in without changing call sites.
+- **Tooling counts as surface.** Guest globals (`queue`, `json`, `host`, …) ship
+  LuaCATS type defs so an editor stops flagging them as unknown. A surface the
+  linter can't see is not finished.

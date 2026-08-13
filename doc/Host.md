@@ -82,7 +82,10 @@ prototype: do not ship a handler without it.
 
 The queue names are conventions this protocol fixes, so guests are portable
 between hosts: a guest that makes hostcalls declares **`host/calls`**
-(exported, `on_full = "reject"`) and waits on **`host/replies`**. A guest
+(exported, `on_full = "reject"`) and waits on **`host/replies`**. These names,
+and the token discipline, are what the build7 `host` guest library encapsulates
+(`doc/BUILD7.md` §1) — they remain the protocol, but a program should reach them
+through `host.sql.exec(...)` and never declare these queues by hand. A guest
 that declares no `host/calls` makes no hostcalls and costs the pump nothing;
 one that declares no reply queue has asked questions with nowhere to hear
 answers, which becomes its own diagnostic. A hibernated instance's pending
@@ -137,8 +140,12 @@ catches typos ahead of time) and annotated examples in
 **This form is a way-station.** `doc/Capabilities.md` is the direction: the
 separate config artifact gives way to one configuration shape an instance takes
 at every depth — the host being the root's parent — with grants expressed as
-capability / permission / scope and attenuation the only rule. What follows
-describes the config as it ships in build5/build6.
+capability / permission / scope and attenuation the only rule. Two nearer changes
+land first, in build7 (`doc/BUILD7.md`): connector config grants a **scope** (a
+directory the program opens its files within) rather than naming an exact file,
+and a **`host` guest library** becomes the surface a program actually uses, so
+the raw queue idiom below is the *mechanism*, not what anyone should hand-write.
+What follows describes the config as it ships in build5/build6.
 
 Lua's syntax without Lua's power, and the power is removed by construction
 rather than convention: the host evaluates the file in an **empty
