@@ -289,14 +289,55 @@ jobs:
         run: |
           set -eu
           auth="Authorization: Bearer $GH_TOKEN"
-          rel=$(curl -sf -H "$auth" -H "Accept: application/vnd.github+json" \
-            "$API/repos/$REPO/releases/tags/$TAG")
-          id=$(printf '%s' "$rel" | sed -n 's/.*"id":[[:space:]]*\([0-9]\{1,\}\).*/\1/p' | head -1)
-          [ -n "$id" ] || { echo "::error::could not find release id for $TAG"; exit 1; }
-          curl -sf -X PATCH -H "$auth" -H "Accept: application/vnd.github+json" \
+
+          # Every request here reports its status. The previous version used
+          # 'curl -sf', which prints NOTHING on a non-2xx and exits 22 -- so
+          # any failure in this step killed the job under 'set -eu' with a
+          # blank log, which is how a release failure became unreadable once
+          # already. A step that can fail should be able to say why.
+          say() { echo "$@" >&2; }
+
+          # The tag lookup retries: the release was created by the step
+          # immediately above, and GitHub's read path can 404 for a moment
+          # after a write. A momentary 404 is not a failed release.
+          id=''
+          n=0
+          while [ "$n" -lt 6 ]; do
+            n=$((n + 1))
+            code=$(curl -s -o rel.json -w '%{http_code}' \
+              -H "$auth" -H "Accept: application/vnd.github+json" \
+              "$API/repos/$REPO/releases/tags/$TAG") || {
+                say "attempt $n: curl failed to reach the API"; sleep 5; continue; }
+            if [ "$code" = "200" ]; then
+              # Parse the id as JSON rather than by regex. A '"id":' pattern
+              # over the raw body is ambiguous -- the payload carries the
+              # author's id and one per uploaded asset, and which one a
+              # regex reaches depends on whether the response arrives on one
+              # line or many. That is not something to leave to chance.
+              id=$(python3 -c 'import json,sys; print(json.load(open("rel.json"))["id"])')
+              break
+            fi
+            say "attempt $n: GET releases/tags/$TAG -> HTTP $code"
+            [ "$n" -lt 6 ] && sleep 5
+          done
+
+          if [ -z "$id" ]; then
+            say "::error::could not resolve a release id for $TAG after $n attempts (last HTTP $code)"
+            say "the release itself may exist -- check the Releases page before re-running"
+            head -c 400 rel.json >&2 2>/dev/null || true
+            exit 1
+          fi
+
+          code=$(curl -s -o patch.json -w '%{http_code}' \
+            -X PATCH -H "$auth" -H "Accept: application/vnd.github+json" \
             "$API/repos/$REPO/releases/$id" \
-            -d "{\"draft\":$WANT_DRAFT,\"prerelease\":$WANT_PRERELEASE}" >/dev/null
-          echo "set draft=$WANT_DRAFT prerelease=$WANT_PRERELEASE on $TAG"
+            -d "{\"draft\":$WANT_DRAFT,\"prerelease\":$WANT_PRERELEASE}")
+          if [ "$code" != "200" ]; then
+            say "::error::PATCH releases/$id -> HTTP $code"
+            head -c 400 patch.json >&2 2>/dev/null || true
+            exit 1
+          fi
+          echo "set draft=$WANT_DRAFT prerelease=$WANT_PRERELEASE on $TAG (release $id)"
 
   # Make the outcome of a rehearsal run obvious from the run page.
   summary:
