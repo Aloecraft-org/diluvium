@@ -1,0 +1,76 @@
+-- Grammar showcase: every Diluvium addition alongside stock Lua.
+-- Open this file in VS Code to eyeball the highlighting.
+
+local name <const> = "diluvium"
+local greeting = $"Hello, {name}!"
+local pi = 3.14159
+print($'pi is {pi::%.2f}, brace literals: \{not interpolated\}')
+print($"nested: {("inner" .. $"deep {name}")}")
+
+-- Null coalescing and safe navigation
+local config = nil
+local port = config?.server?.port ?? 8080
+port ??= 9090
+
+-- Compound assignment
+local total = 0
+total += 10
+total -= 1
+total *= 2
+total //= 3
+total %= 7
+total ^= 2
+local flags = 0
+flags |= 0x04
+flags &= 0xFF
+flags <<= 1
+flags >>= 1
+local label = "dl"
+label ..= "ua"
+
+-- Switch (contextual keyword, no fallthrough)
+switch port do
+    case 8080, 8081 then
+        print("dev")
+    case 443 then
+        print("tls")
+    default
+        print($"unexpected: {port}")
+end
+
+-- Defer
+do
+    defer print("second")
+    defer do
+        print("first (reverse order)")
+    end
+end
+
+-- Secure function (statement form; `local ~function` works too)
+local ~function reveal()
+    local password = "hunter2"
+    return $"psst: {password}"
+end
+print(reveal())
+
+-- Diluvium libraries
+local q = queue.declare("jobs")
+queue.push(q, { kind = "greet", body = json.encode({ msg = greeting }) })
+local job = queue.pop(q)
+local decoded = json.decode(job.body)
+local packed = msgpack.encode(decoded)
+print(bytes.tohex(packed))
+
+-- Stock Lua still highlights: long strings, labels, goto, varargs
+local long = [==[
+  a long string, [[nested brackets]] included
+]==]
+
+local function variadic(...)
+    local n = select("#", ...)
+    ::again::
+    if n > 0 then n = n - 1; goto again end
+    return long
+end
+
+variadic(1, 2, 3)

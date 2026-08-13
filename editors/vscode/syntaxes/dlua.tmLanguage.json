@@ -1,0 +1,298 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Diluvium",
+  "scopeName": "source.dlua",
+  "patterns": [
+    { "include": "#shebang" },
+    { "include": "#general" }
+  ],
+  "repository": {
+    "general": {
+      "patterns": [
+        { "include": "#comment" },
+        { "include": "#fstring" },
+        { "include": "#string" },
+        { "include": "#number" },
+        { "include": "#label" },
+        { "include": "#function-definition" },
+        { "include": "#secure-function" },
+        { "include": "#keyword" },
+        { "include": "#constant" },
+        { "include": "#support-library" },
+        { "include": "#support-function" },
+        { "include": "#operator" },
+        { "include": "#function-call" },
+        { "include": "#identifier" }
+      ]
+    },
+    "shebang": {
+      "match": "\\A(#!).*$",
+      "name": "comment.line.shebang.dlua",
+      "captures": {
+        "1": { "name": "punctuation.definition.comment.dlua" }
+      }
+    },
+    "comment": {
+      "patterns": [
+        {
+          "begin": "--\\[(=*)\\[",
+          "end": "\\]\\1\\]",
+          "name": "comment.block.dlua",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.begin.dlua" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.comment.end.dlua" } }
+        },
+        {
+          "begin": "--",
+          "end": "$",
+          "name": "comment.line.double-dash.dlua",
+          "beginCaptures": { "0": { "name": "punctuation.definition.comment.dlua" } }
+        }
+      ]
+    },
+    "string-escape": {
+      "patterns": [
+        {
+          "match": "\\\\[abfnrtv\\\\\"'\\n]",
+          "name": "constant.character.escape.dlua"
+        },
+        {
+          "match": "\\\\z\\s*",
+          "name": "constant.character.escape.dlua"
+        },
+        {
+          "match": "\\\\x[0-9A-Fa-f]{2}",
+          "name": "constant.character.escape.byte.dlua"
+        },
+        {
+          "match": "\\\\\\d{1,3}",
+          "name": "constant.character.escape.byte.dlua"
+        },
+        {
+          "match": "\\\\u\\{[0-9A-Fa-f]+\\}",
+          "name": "constant.character.escape.unicode.dlua"
+        }
+      ]
+    },
+    "fstring": {
+      "patterns": [
+        {
+          "begin": "(\\$)(\")",
+          "end": "\"",
+          "name": "string.quoted.double.interpolated.dlua",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.string.interpolated.dlua" },
+            "2": { "name": "punctuation.definition.string.begin.dlua" }
+          },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.dlua" } },
+          "patterns": [ { "include": "#fstring-contents" } ]
+        },
+        {
+          "begin": "(\\$)(')",
+          "end": "'",
+          "name": "string.quoted.single.interpolated.dlua",
+          "beginCaptures": {
+            "1": { "name": "punctuation.definition.string.interpolated.dlua" },
+            "2": { "name": "punctuation.definition.string.begin.dlua" }
+          },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.dlua" } },
+          "patterns": [ { "include": "#fstring-contents" } ]
+        }
+      ]
+    },
+    "fstring-contents": {
+      "patterns": [
+        {
+          "match": "\\\\[{}]",
+          "name": "constant.character.escape.brace.dlua"
+        },
+        { "include": "#string-escape" },
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "name": "meta.interpolation.dlua",
+          "contentName": "meta.embedded.line.dlua",
+          "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.dlua" } },
+          "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.dlua" } },
+          "patterns": [
+            {
+              "match": "(::)(%[-+ #0]*\\d*(?:\\.\\d+)?[diouxXeEfgGqscaA])",
+              "captures": {
+                "1": { "name": "punctuation.separator.format-spec.dlua" },
+                "2": { "name": "constant.other.format-spec.dlua" }
+              }
+            },
+            { "include": "#general" }
+          ]
+        }
+      ]
+    },
+    "string": {
+      "patterns": [
+        {
+          "begin": "\"",
+          "end": "\"",
+          "name": "string.quoted.double.dlua",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.dlua" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.dlua" } },
+          "patterns": [ { "include": "#string-escape" } ]
+        },
+        {
+          "begin": "'",
+          "end": "'",
+          "name": "string.quoted.single.dlua",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.dlua" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.dlua" } },
+          "patterns": [ { "include": "#string-escape" } ]
+        },
+        {
+          "begin": "\\[(=*)\\[",
+          "end": "\\]\\1\\]",
+          "name": "string.quoted.other.multiline.dlua",
+          "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.dlua" } },
+          "endCaptures": { "0": { "name": "punctuation.definition.string.end.dlua" } }
+        }
+      ]
+    },
+    "number": {
+      "patterns": [
+        {
+          "match": "\\b0[xX][0-9A-Fa-f]*\\.?[0-9A-Fa-f]*(?:[pP][-+]?\\d+)?\\b",
+          "name": "constant.numeric.hex.dlua"
+        },
+        {
+          "match": "\\b\\d+\\.?\\d*(?:[eE][-+]?\\d+)?\\b|(?<![\\w.])\\.\\d+(?:[eE][-+]?\\d+)?\\b",
+          "name": "constant.numeric.dlua"
+        }
+      ]
+    },
+    "label": {
+      "match": "(::)\\s*([A-Za-z_]\\w*)\\s*(::)",
+      "name": "meta.label.dlua",
+      "captures": {
+        "1": { "name": "punctuation.definition.label.begin.dlua" },
+        "2": { "name": "entity.name.label.dlua" },
+        "3": { "name": "punctuation.definition.label.end.dlua" }
+      }
+    },
+    "secure-function": {
+      "match": "(~)(?=\\s*function\\b)",
+      "name": "storage.modifier.secure.dlua"
+    },
+    "function-definition": {
+      "patterns": [
+        {
+          "match": "\\b(function)\\s+([A-Za-z_]\\w*(?:\\.[A-Za-z_]\\w*)*)([.:])([A-Za-z_]\\w*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "storage.type.function.dlua" },
+            "2": { "name": "entity.name.namespace.dlua" },
+            "3": { "name": "punctuation.accessor.dlua" },
+            "4": { "name": "entity.name.function.dlua" }
+          }
+        },
+        {
+          "match": "\\b(function)\\s+([A-Za-z_]\\w*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "storage.type.function.dlua" },
+            "2": { "name": "entity.name.function.dlua" }
+          }
+        },
+        {
+          "match": "\\b([A-Za-z_]\\w*)\\s*(=)\\s*(function)\\b",
+          "captures": {
+            "1": { "name": "entity.name.function.dlua" },
+            "2": { "name": "keyword.operator.assignment.dlua" },
+            "3": { "name": "storage.type.function.dlua" }
+          }
+        }
+      ]
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "match": "\\b(break|do|else|elseif|end|for|goto|if|in|repeat|return|then|until|while)\\b",
+          "name": "keyword.control.dlua"
+        },
+        {
+          "match": "\\b(switch|case|default|defer|with)\\b",
+          "name": "keyword.control.diluvium.dlua"
+        },
+        {
+          "match": "\\b(function)\\b",
+          "name": "storage.type.function.dlua"
+        },
+        {
+          "match": "\\b(local|global)\\b",
+          "name": "storage.modifier.dlua"
+        },
+        {
+          "match": "\\b(and|or|not)\\b",
+          "name": "keyword.operator.logical.dlua"
+        },
+        {
+          "match": "\\bself\\b",
+          "name": "variable.language.self.dlua"
+        }
+      ]
+    },
+    "constant": {
+      "match": "\\b(nil|true|false)\\b",
+      "name": "constant.language.dlua"
+    },
+    "support-library": {
+      "match": "\\b(queue|json|msgpack|endpoint|bytes|time|string|table|math|io|os|coroutine|utf8|debug|package)(?=[.:])",
+      "name": "support.class.library.dlua"
+    },
+    "support-function": {
+      "match": "\\b(assert|collectgarbage|dofile|error|getmetatable|ipairs|load|loadstring|next|pairs|pcall|print|rawequal|rawget|rawlen|rawset|require|select|setmetatable|tonumber|tostring|type|unpack|xpcall)(?=\\s*[({\"'])",
+      "name": "support.function.dlua"
+    },
+    "operator": {
+      "patterns": [
+        {
+          "match": "\\?\\?=|\\?\\?",
+          "name": "keyword.operator.null-coalescing.dlua"
+        },
+        {
+          "match": "\\?\\.|\\?(?=\\[)",
+          "name": "keyword.operator.safe-navigation.dlua"
+        },
+        {
+          "match": "\\.\\.=|(\\+|-|\\*|//|/|%|\\^|<<|>>|&|\\|)=",
+          "name": "keyword.operator.assignment.compound.dlua"
+        },
+        {
+          "match": "==|~=|<=|>=|<|>",
+          "name": "keyword.operator.comparison.dlua"
+        },
+        {
+          "match": "=",
+          "name": "keyword.operator.assignment.dlua"
+        },
+        {
+          "match": "\\.\\.\\.",
+          "name": "constant.language.varargs.dlua"
+        },
+        {
+          "match": "\\.\\.",
+          "name": "keyword.operator.concat.dlua"
+        },
+        {
+          "match": "<<|>>|[&|~]",
+          "name": "keyword.operator.bitwise.dlua"
+        },
+        {
+          "match": "[-+*/%^#]|//",
+          "name": "keyword.operator.arithmetic.dlua"
+        }
+      ]
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_]\\w*)(?=\\s*[({])",
+      "name": "entity.name.function.call.dlua"
+    },
+    "identifier": {
+      "match": "\\b[A-Za-z_]\\w*\\b",
+      "name": "variable.other.dlua"
+    }
+  }
+}
