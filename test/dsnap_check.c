@@ -1457,7 +1457,9 @@ static void a_library_table_is_named_not_copied (lua_State *L) {
   /* The one that matters most for size and for correctness: a program holding a
      reference to 'string' or to '_G' must not have the library copied into its
      snapshot. */
-  if (!build(L, "return {s = string, g = _G, m = math}")) return;
+  if (!build(L, "return {s = string, g = _G, m = math, h = host,"
+                " hf = host.call}"))
+    return;
   copy = roundtrip_named(L, __func__);
   if (copy == 0) return;
   at(L, copy, "s");
@@ -1469,6 +1471,24 @@ static void a_library_table_is_named_not_copied (lua_State *L) {
   lua_pushglobaltable(L);
   ok(lua_topointer(L, -2) == lua_topointer(L, -1),
      "and '_G' is '_G', not a clone of the global environment");
+  lua_pop(L, 2);
+  /* 'host' is the build7 addition to DS_MODULES -- the Lua-implemented module
+     table is named like any C one. Without that entry this is the line that
+     fails. Its *fields* are Lua closures, which the permanents walk does not
+     name; a held one rides by content instead of being refused, so it is a
+     working function on the other side, just not the same object. */
+  at(L, copy, "h");
+  lua_getglobal(L, "host");
+  ok(lua_topointer(L, -2) == lua_topointer(L, -1),
+     "and 'host', a Lua-implemented module, is named not copied");
+  lua_pop(L, 2);
+  at(L, copy, "hf");
+  lua_getglobal(L, "host");
+  lua_getfield(L, -1, "call");
+  ok(lua_isfunction(L, -3) &&
+     lua_topointer(L, -3) != lua_topointer(L, -1),
+     "a held 'host.call' crosses by content: a working copy, not the "
+     "original and not a refusal");
   lua_settop(L, base);
 }
 

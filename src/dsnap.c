@@ -151,7 +151,7 @@ static const char DS_PERM_FP = 0;       /* the cached fingerprint hex */
 */
 static const char *const DS_MODULES[] = {
   "coroutine", "debug", "io", "math", "os", "string", "table", "utf8",
-  "msgpack", "queue", "endpoint", "bytes", "json", "time", NULL
+  "msgpack", "queue", "endpoint", "bytes", "json", "time", "host", NULL
 };
 
 

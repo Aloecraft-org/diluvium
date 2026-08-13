@@ -21,8 +21,8 @@ The **generic host** (`host/`, `make build_host`) is the reference
 implementation of this protocol: one binary that drives a deployment from a
 supervisor program plus a typed `*.host.lua` configuration, so a deployment is
 data, not C. `host/dhost.c` is the core (construction, the drive loop, the
-roster, the hostcall pump); the listener, SQLite and crypto connectors live
-beside it. Read it as the worked example of the duties below.
+roster, the hostcall pump); the listener, SQLite, crypto, fs and exec
+connectors live beside it. Read it as the worked example of the duties below.
 
 ## The duties
 
@@ -84,8 +84,9 @@ The queue names are conventions this protocol fixes, so guests are portable
 between hosts: a guest that makes hostcalls declares **`host/calls`**
 (exported, `on_full = "reject"`) and waits on **`host/replies`**. These names,
 and the token discipline, are what the build7 `host` guest library encapsulates
-(`doc/BUILD7.md` §1) — they remain the protocol, but a program should reach them
-through `host.sql.exec(...)` and never declare these queues by hand. A guest
+(`doc/BUILD7.md` §1) — they remain the protocol, but a program should reach
+them through the `host` library (`host.sql.open("db").exec(...)`) and never
+declare these queues by hand. A guest
 that declares no `host/calls` makes no hostcalls and costs the pump nothing;
 one that declares no reply queue has asked questions with nowhere to hear
 answers, which becomes its own diagnostic. A hibernated instance's pending
@@ -140,12 +141,12 @@ catches typos ahead of time) and annotated examples in
 **This form is a way-station.** `doc/Capabilities.md` is the direction: the
 separate config artifact gives way to one configuration shape an instance takes
 at every depth — the host being the root's parent — with grants expressed as
-capability / permission / scope and attenuation the only rule. Two nearer changes
-land first, in build7 (`doc/BUILD7.md`): connector config grants a **scope** (a
-directory the program opens its files within) rather than naming an exact file,
-and a **`host` guest library** becomes the surface a program actually uses, so
-the raw queue idiom below is the *mechanism*, not what anyone should hand-write.
-What follows describes the config as it ships in build5/build6.
+capability / permission / scope and attenuation the only rule. Two nearer
+changes landed in build7 (`doc/BUILD7.md`): connector config grants a **scope**
+(the sql connector takes a directory and the program names its database within
+it, `host.sql.open`) rather than naming an exact file, and the **`host` guest
+library** is the surface a program actually uses, so the raw queue idiom below
+is the *mechanism*, not what anyone should hand-write.
 
 Lua's syntax without Lua's power, and the power is removed by construction
 rather than convention: the host evaluates the file in an **empty
@@ -157,10 +158,12 @@ own `.lua` files and are never inlined into it.
 
 The listener's message shapes, which are the other convention guests are
 written against: a completed request arrives on the configured queue
-(default `http_in`) as `{conn, method, path, body}`, and a response leaves
-on the reply queue (default `http_out`) as `{conn, status, body,
-content_type?}` — `conn` echoed verbatim, the hostcall token discipline
-applied to traffic. The port is topology and comes from this file, never
+(default `http_in`) as `{conn, method, path, body}` — plus a `headers` map
+when the deployment allowlists request headers (build7; lowercase names,
+always present once configured, so the shape is config's decision) — and a
+response leaves on the reply queue (default `http_out`) as `{conn, status,
+body, content_type?}` — `conn` echoed verbatim, the hostcall token
+discipline applied to traffic. The port is topology and comes from this file, never
 from a guest: a guest cannot read a socket, and a listener that hibernated
 with its program would be host state pretending otherwise.
 

@@ -147,7 +147,7 @@ static void hibernation_is_on_by_default (void) {
   dvs_swarm *sw = swarm_with(4);
   dvs_id root = 0;
   static const char *caps[] = { "queue:work" };
-  static const char *src = "local q = queue.declare('work', {cap = 4}) "
+  static const char *src = "local q = queue.declare('work', {capacity = 4}) "
                            "queue.wait({q})";
   if (sw == NULL) { ok(0, "a swarm"); return; }
   if (dvs_root(sw, src, strlen(src), caps, 1, 0, 0, &root) != DVS_OK) {
@@ -187,7 +187,7 @@ static void snapshots_carry_the_host_identity (void) {
   dvs_swarm *sw = swarm_with_hibernation(4);
   dvs_id root = 0;
   static const char *caps[] = { "queue:work" };
-  static const char *src = "local q = queue.declare('work', {cap = 4}) "
+  static const char *src = "local q = queue.declare('work', {capacity = 4}) "
                            "queue.wait({q})";
   if (sw == NULL) { ok(0, "a swarm"); return; }
   ok(dvs_set_host_identity(sw, "dvs-check/host-a") == DVS_OK,
@@ -275,7 +275,7 @@ static int spin (dvs_swarm *sw, int n) {
 */
 static void the_cursor_agrees_with_the_encoder (void) {
   static const char *src =
-    "local out = queue.declare('probe', {cap = 8})\n"
+    "local out = queue.declare('probe', {capacity = 8})\n"
     "queue.push(out, {op = 'spawn', n = 42, neg = -7, big = 70000,\n"
     "  f = 2.5, yes = true, no = false, s = 'hello',\n"
     "  caps = {'a', 'queue:work/*'}, nested = {x = {y = 1}}})\n";
@@ -367,10 +367,10 @@ static void the_cursor_agrees_with_the_encoder (void) {
 ** concrete: the restart policy is these eight lines of Lua, not a C flag.
 */
 static const char SUPERVISOR[] =
-  "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-  "local ev  = queue.declare('system/events', {cap = 16})\n"
-  "local log = queue.declare('log', {cap = 16})\n"
-  "local CHILD = \"local q = queue.declare('work', {cap = 4})\\n\"\n"
+  "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+  "local ev  = queue.declare('system/events', {capacity = 16})\n"
+  "local log = queue.declare('log', {capacity = 16})\n"
+  "local CHILD = \"local q = queue.declare('work', {capacity = 4})\\n\"\n"
   "           .. \"local id, v = queue.wait({q})\\n\"\n"
   "local starts = 0\n"
   "local function start()\n"
@@ -484,17 +484,17 @@ static void a_child_cannot_be_granted_more_than_its_parent (void) {
   ** nothing behind.
   */
   static const char OVERREACH[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8})\n"
     /* The child parks rather than returning, so that "no child was created" is a
        real check: a child that exits on its first step is reaped before anyone
        looks, and the assertion would hold whether the grant was refused or not. */
-    "local KID = \"local q = queue.declare('hold', {cap = 2}) \"\n"
+    "local KID = \"local q = queue.declare('hold', {capacity = 2}) \"\n"
     "         .. \"queue.wait({q})\"\n"
     "queue.push(sys, {op = 'spawn', code = KID,\n"
     "                 caps = {'queue:work/x', 'queue:secret'}})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
     "local id, e = queue.wait({ev})\n"
     "queue.push(log, tostring(e.event) .. '/' .. tostring(e.detail))\n"
     /* Park rather than return, so the log survives to be read: an instance that
@@ -551,9 +551,9 @@ static void a_program_without_the_capability_is_not_drained (void) {
   ** queue" means.
   */
   static const char SNEAK[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
     "queue.push(sys, {op = 'spawn', code = 'return 1', caps = {}})\n"
     "queue.push(log, 'asked:' .. queue.len(sys))\n"
     "queue.wait({hold})\n";
@@ -592,14 +592,14 @@ static void killing_a_parent_kills_the_subtree (void) {
   ** and not just about children.
   */
   static const char CHAIN[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local q   = queue.declare('hold', {cap = 2})\n"
-    "local KID = \"local sys = queue.declare('system/lifecycle', {cap = 8})\\n\"\n"
-    "         .. \"local ev = queue.declare('system/events', {cap = 8})\\n\"\n"
-    "         .. \"local q = queue.declare('hold', {cap = 2})\\n\"\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local q   = queue.declare('hold', {capacity = 2})\n"
+    "local KID = \"local sys = queue.declare('system/lifecycle', {capacity = 8})\\n\"\n"
+    "         .. \"local ev = queue.declare('system/events', {capacity = 8})\\n\"\n"
+    "         .. \"local q = queue.declare('hold', {capacity = 2})\\n\"\n"
     "         .. \"queue.push(sys, {op = 'spawn', code = \\\"local q = \"\n"
-    "         .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\\\",\"\n"
+    "         .. \"queue.declare('hold', {capacity = 2}) queue.wait({q})\\\",\"\n"
     "         .. \" caps = {'lifecycle'}})\\n\"\n"
     "         .. \"queue.wait({q})\\n\"\n"
     "queue.push(sys, {op = 'spawn', code = KID, caps = {'lifecycle'}})\n"
@@ -643,12 +643,12 @@ static void a_child_cannot_kill_its_supervisor (void) {
   ** that spawned it, which would make the capability set decorative.
   */
   static const char REBEL[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local q   = queue.declare('hold', {cap = 2})\n"
-    "local KID = \"local sys = queue.declare('system/lifecycle', {cap = 8})\\n\"\n"
-    "         .. \"local ev = queue.declare('system/events', {cap = 8})\\n\"\n"
-    "         .. \"local q = queue.declare('hold', {cap = 2})\\n\"\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local q   = queue.declare('hold', {capacity = 2})\n"
+    "local KID = \"local sys = queue.declare('system/lifecycle', {capacity = 8})\\n\"\n"
+    "         .. \"local ev = queue.declare('system/events', {capacity = 8})\\n\"\n"
+    "         .. \"local q = queue.declare('hold', {capacity = 2})\\n\"\n"
     "         .. \"queue.push(sys, {op = 'kill', id = 1})\\n\"\n"
     "         .. \"queue.wait({q})\\n\"\n"
     "queue.push(sys, {op = 'spawn', code = KID, caps = {'lifecycle'}})\n"
@@ -678,12 +678,12 @@ static void the_spawn_rate_is_limited (void) {
   ** policy.
   */
   static const char BOMB[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 64})\n"
-    "local ev  = queue.declare('system/events', {cap = 64})\n"
-    "local q   = queue.declare('hold', {cap = 2})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 64})\n"
+    "local ev  = queue.declare('system/events', {capacity = 64})\n"
+    "local q   = queue.declare('hold', {capacity = 2})\n"
     "for i = 1, 10 do\n"
     "  queue.push(sys, {op = 'spawn', code = \"local q = \"\n"
-    "    .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\", caps = {}})\n"
+    "    .. \"queue.declare('hold', {capacity = 2}) queue.wait({q})\", caps = {}})\n"
     "end\n"
     "queue.wait({q})\n";
   dvs_swarm *sw = swarm_with(3);          /* three spawns per step */
@@ -721,7 +721,7 @@ static void the_table_is_bounded_and_handles_are_not_reused (void) {
   dvs_swarm *sw;
   dvs_id a = 0, b = 0;
   static const char *caps[] = { "lifecycle" };
-  static const char *src = "local q = queue.declare('hold', {cap = 2}) "
+  static const char *src = "local q = queue.declare('hold', {capacity = 2}) "
                            "return queue.wait({q})";
   memset(&h, 0, sizeof(h));
   h.drive = host_drive;
@@ -757,9 +757,9 @@ static void a_swarm_needs_a_drive_function (void) {
 ** instance the messages are delivered into is a different one, restored from bytes.
 */
 static const char SLEEPER[] =
-  "local sys = queue.declare('system/lifecycle', {cap = 4})\n"
-  "local inbox = queue.declare('work', {cap = 8})\n"
-  "local log = queue.declare('log', {cap = 16})\n"
+  "local sys = queue.declare('system/lifecycle', {capacity = 4})\n"
+  "local inbox = queue.declare('work', {capacity = 8})\n"
+  "local log = queue.declare('log', {capacity = 16})\n"
   "local seen = {}\n"
   /* Asking to be woken is the program's own decision (8.4), so it says so in the
      request rather than having a parent guess at spawn time. */
@@ -857,11 +857,11 @@ static void a_cached_instance_without_wake_on_message_is_gone (void) {
   dvs_id root = 0, kid = 0;
   static const char *caps[] = { "lifecycle", "queue:work" };
   static const char PARENT[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
-    "local KID = \"local sys = queue.declare('system/lifecycle', {cap = 4})\\n\"\n"
-    "         .. \"local w = queue.declare('work', {cap = 4})\\n\"\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
+    "local KID = \"local sys = queue.declare('system/lifecycle', {capacity = 4})\\n\"\n"
+    "         .. \"local w = queue.declare('work', {capacity = 4})\\n\"\n"
     "         .. \"queue.push(sys, {op = 'hibernate'})\\n\"\n"
     "         .. \"queue.wait({w})\\n\"\n"
     /* No 'wake_on_message', which is the default and the point of this test. */
@@ -931,7 +931,7 @@ static void pushing_to_a_dead_instance_is_gone (void) {
   dvs_swarm *sw = swarm_with(4);
   dvs_id root = 0;
   static const char *caps[] = { "queue:work" };
-  static const char *src = "local w = queue.declare('work', {cap = 4}) "
+  static const char *src = "local w = queue.declare('work', {capacity = 4}) "
                            "queue.wait({w})";
   if (sw == NULL) { ok(0, "a swarm"); return; }
   if (dvs_root(sw, src, strlen(src), caps, 1, 0, 0, &root) != DVS_OK) {
@@ -970,7 +970,7 @@ static void a_host_can_read_an_instance_s_budget_and_capabilities (void) {
      count hook to have fired before the park, so the carry assertion at the
      bottom is measuring a real number rather than agreeing with zero. */
   static const char *src = "local n = 0 for i = 1, 5000 do n = n + 1 end "
-                           "local q = queue.declare('hold', {cap = 2}) "
+                           "local q = queue.declare('hold', {capacity = 2}) "
                            "queue.wait({q})";
   uint64_t insns = 0, mem = 0;
   const char *got[8];
@@ -1066,10 +1066,10 @@ static void a_host_can_read_an_instance_s_budget_and_capabilities (void) {
 */
 static void a_faulting_child_reports_a_readable_reason (void) {
   static const char SUP[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
     /* The child errors immediately, with a message far longer than the event
        buffer, so the truncation paths are the ones under test. */
     "local KID = \"error(string.rep('x', 4000))\"\n"
@@ -1161,11 +1161,11 @@ static void a_faulting_child_reports_a_readable_reason (void) {
 ** reach this symptom by the hibernate route even unfixed.
 */
 static const char STICKY_SUP[] =
-  "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-  "local ev  = queue.declare('system/events', {cap = 16})\n"
-  "local log = queue.declare('log', {cap = 16})\n"
+  "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+  "local ev  = queue.declare('system/events', {capacity = 16})\n"
+  "local log = queue.declare('log', {capacity = 16})\n"
   /* Declaring a queue and returning: no error, no park, no budget. */
-  "local KID = \"local q = queue.declare('done', {cap = 2})\"\n"
+  "local KID = \"local q = queue.declare('done', {capacity = 2})\"\n"
   "queue.push(sys, {op = 'spawn', code = KID, caps = {}})\n"
   "if ASK_HIBERNATE then\n"
   /* The first spawn is id 2, as everywhere else in this file. Reading the id
@@ -1256,14 +1256,14 @@ static void a_denied_hibernate_does_not_make_a_clean_exit_a_fault (void) {
 static void flags_attenuate_through_a_spawn (void) {
   /* The child reports what it can reach; the supervisor forwards it. */
   static const char SUP[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 16})\n"
-    "local log = queue.declare('log', {cap = 16})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 16})\n"
+    "local log = queue.declare('log', {capacity = 16})\n"
     /* The child parks after reporting. A child that returned would be reaped
        in the same step that spawned it, and its queues would go with it. */
     "local KID = \"local o = queue.declare('out', {exported = true}) \"\n"
     "         .. \"queue.push(o, os == nil and 'sealed' or 'open') \"\n"
-    "         .. \"local w = queue.declare('w', {cap = 2}) queue.wait({w})\"\n"
+    "         .. \"local w = queue.declare('w', {capacity = 2}) queue.wait({w})\"\n"
     "queue.push(sys, {op = 'spawn', code = KID, caps = {}, sealed = SEAL_KID})\n"
     "while true do queue.wait({ev}) end\n";
   static const char *caps[] = { "lifecycle", "queue:log" };
@@ -1338,7 +1338,7 @@ static void a_wildcard_cannot_widen_a_grant (void) {
   static const char *just_star[] = { "*" };
   static const char *double_star[] = { "**" };
   static const char *scoped_caps[] = { "queue:work/*" };
-  static const char *src = "local q = queue.declare('hold', {cap = 2}) "
+  static const char *src = "local q = queue.declare('hold', {capacity = 2}) "
                            "return queue.wait({q})";
   memset(&h, 0, sizeof(h));
   h.drive = host_drive;
@@ -1386,11 +1386,11 @@ static void a_wildcard_cannot_widen_a_grant (void) {
 */
 static void a_wire_id_that_does_not_fit_is_refused (void) {
   static const char SUP[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
-    "local KID = \"local q = queue.declare('hold', {cap = 2}) queue.wait({q})\"\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
+    "local KID = \"local q = queue.declare('hold', {capacity = 2}) queue.wait({q})\"\n"
     "queue.push(sys, {op = 'spawn', code = KID, caps = {}})\n"
     "local _, e = queue.wait({ev})\n"
     "queue.push(log, 'spawned:' .. tostring(e.id))\n"
@@ -1449,14 +1449,14 @@ static void a_wire_id_that_does_not_fit_is_refused (void) {
 */
 static void a_spawn_is_not_truncated_at_a_zero_byte (void) {
   static const char SUP[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
     /* The zero byte sits inside a string literal, so a truncated chunk is a syntax
        error and a whole one runs. The child reports which happened. */
     "local KID = \"local marker = 'a\\0b'\\n\"\n"
-    "         .. \"local q = queue.declare('hold', {cap = 2})\\n\"\n"
+    "         .. \"local q = queue.declare('hold', {capacity = 2})\\n\"\n"
     "         .. \"queue.wait({q})\\n\"\n"
     "queue.push(sys, {op = 'spawn', code = KID, caps = {}})\n"
     "local _, e = queue.wait({ev})\n"
@@ -1519,17 +1519,17 @@ static void a_chain_is_killed_from_the_top (void) {
   /* Three generations by delegation, plus an unrelated root that must survive --
      the sweep marks by parentage, so a bug that marked too much would take it. */
   static const char CHAIN[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local q   = queue.declare('hold', {cap = 2})\n"
-    "local KID = \"local sys = queue.declare('system/lifecycle', {cap = 8})\\n\"\n"
-    "         .. \"local q = queue.declare('hold', {cap = 2})\\n\"\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local q   = queue.declare('hold', {capacity = 2})\n"
+    "local KID = \"local sys = queue.declare('system/lifecycle', {capacity = 8})\\n\"\n"
+    "         .. \"local q = queue.declare('hold', {capacity = 2})\\n\"\n"
     "         .. \"queue.push(sys, {op = 'spawn', code = \\\"local q = \"\n"
-    "         .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\\\",\"\n"
+    "         .. \"queue.declare('hold', {capacity = 2}) queue.wait({q})\\\",\"\n"
     "         .. \" caps = {'lifecycle'}})\\n\"\n"
     "         .. \"queue.wait({q})\\n\"\n"
     "queue.push(sys, {op = 'spawn', code = KID, caps = {'lifecycle'}})\n"
     "queue.wait({q})\n";
-  static const char *lone = "local q = queue.declare('hold', {cap = 2}) "
+  static const char *lone = "local q = queue.declare('hold', {capacity = 2}) "
                             "return queue.wait({q})";
   dvs_id bystander = 0;
   if (sw == NULL) { ok(0, "a swarm"); return; }
@@ -1562,10 +1562,10 @@ static void a_chain_is_killed_from_the_top (void) {
 */
 static void a_documented_budget_reaches_the_child (void) {
   static const char SUP[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
     /*
     ** A child that parks, so its budget can be read back from outside while it is
     ** still alive.
@@ -1579,7 +1579,7 @@ static void a_documented_budget_reaches_the_child (void) {
     ** budget and so nothing can spin.
     */
     "queue.push(sys, {op = 'spawn', code = \"local q = \"\n"
-    "  .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\", caps = {},\n"
+    "  .. \"queue.declare('hold', {capacity = 2}) queue.wait({q})\", caps = {},\n"
     "  budget = {instructions = 200000, memory_kb = 4096}})\n"
     "local _, e = queue.wait({ev})\n"
     "queue.push(log, 'spawned:' .. tostring(e.id))\n"
@@ -1646,11 +1646,11 @@ static void a_documented_budget_reaches_the_child (void) {
 */
 static void the_flat_budget_form_is_still_accepted (void) {
   static const char SUP[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
     "queue.push(sys, {op = 'spawn', code = \"local q = \"\n"
-    "  .. \"queue.declare('hold', {cap = 2}) queue.wait({q})\", caps = {},\n"
+    "  .. \"queue.declare('hold', {capacity = 2}) queue.wait({q})\", caps = {},\n"
     "  instructions = 123456, memory_kb = 77})\n"
     "queue.wait({hold})\n";
   dvs_swarm *sw = swarm_with(4);
@@ -1700,10 +1700,10 @@ static void a_host_can_budget_every_child_from_create (void) {
   dvs_id root = 0;
   static const char *caps[] = { "lifecycle", "queue:log" };
   static const char SUP[] =
-    "local sys = queue.declare('system/lifecycle', {cap = 8})\n"
-    "local ev  = queue.declare('system/events', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8})\n"
-    "local hold = queue.declare('hold', {cap = 2})\n"
+    "local sys = queue.declare('system/lifecycle', {capacity = 8})\n"
+    "local ev  = queue.declare('system/events', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8})\n"
+    "local hold = queue.declare('hold', {capacity = 2})\n"
     /* No budget in the request at all: the host supplies it. */
     "queue.push(sys, {op = 'spawn', code = 'while true do end', caps = {}})\n"
     "local _, e = queue.wait({ev})\n"

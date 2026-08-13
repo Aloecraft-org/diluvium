@@ -6,6 +6,7 @@
 ** this one stays the part every deployment runs.
 */
 
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -272,7 +273,10 @@ static void cfg_defaults (dh_config *c) {
   c->spawns_per_step = 4;
   c->hibernation = 1;
   c->nlisteners = 0;
-  c->sql.max_rows = 1024;
+  c->sql.max_result_rows = 1024;
+  c->fs.max_bytes = 1024 * 1024;
+  c->exec.max_timeout_ms = 10000;
+  c->exec.max_output_bytes = 1024 * 1024;
 }
 
 /* Parse one listener block at 'idx' into 'l' (defaults already applied). The
@@ -307,6 +311,52 @@ static int cfg_listener (lua_State *L, int idx, dh_listener_cfg *l,
   if (cfg_num(L, idx, "max_conns", &n, 1, 4096, where, err, errcap) != 0)
     return -1;
   l->max_conns = (int)n;
+  /* The request-header allowlist: an array of LOWERCASE names, empty by
+     default -- forwarding nothing is the safe default, and requiring the
+     canonical spelling here beats normalizing it quietly. */
+  lua_getfield(L, idx, "headers");
+  if (!lua_isnil(L, -1)) {
+    size_t i;
+    if (!lua_istable(L, -1)) {
+      lua_pop(L, 1);
+      return cfg_fail(err, errcap, "%s.headers must be an array of header "
+                                   "names%s", where, "");
+    }
+    for (i = 0; ; i++) {
+      const char *s;
+      size_t slen, j;
+      lua_rawgeti(L, -1, (lua_Integer)i + 1);
+      if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        break;
+      }
+      if (i >= DH_MAX_HDRS) {
+        lua_pop(L, 2);
+        return cfg_fail(err, errcap, "%s.headers lists more than 8 names%s",
+                        where, "");
+      }
+      s = lua_tolstring(L, -1, &slen);
+      if (s == NULL || slen == 0 || slen >= DH_HDR_NAME_MAX) {
+        lua_pop(L, 2);
+        return cfg_fail(err, errcap, "%s.headers entries must be short "
+                                     "header names%s", where, "");
+      }
+      for (j = 0; j < slen; j++) {
+        if (s[j] >= 'A' && s[j] <= 'Z') {
+          lua_pop(L, 2);
+          return cfg_fail(err, errcap, "%s.headers names are lowercase "
+                                       "('%s' is not): the guest sees them "
+                                       "lowercased, so the config spells "
+                                       "them that way", where, s);
+        }
+      }
+      memcpy(l->headers[l->nheaders], s, slen);
+      l->headers[l->nheaders][slen] = '\0';
+      l->nheaders++;
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);
   return 0;
 }
 
@@ -318,14 +368,23 @@ int dh_config_load (const char *path, dh_config *out, char *err,
   };
   static const char *const budget_keys[] = { "instructions", "memory_kb", NULL };
   static const char *const conn_keys[] = { "time", "listen", "sql", "crypto",
-                                           NULL };
+                                           "fs", "exec", NULL };
+  static const char *const fs_keys[] = { "scope", "access", "max_bytes",
+                                         NULL };
+  static const char *const exec_keys[] = { "max_timeout_ms",
+                                           "max_output_bytes", NULL };
   static const char *const crypto_keys[] = { "key", "key_env", "key_file",
                                              "default_ttl", NULL };
   static const char *const listen_keys[] = {
     "port", "bind", "queue", "reply_queue", "max_body", "deadline_ms",
-    "max_conns", NULL
+    "max_conns", "headers", NULL
   };
-  static const char *const sql_keys[] = { "path", "mode", "max_rows", NULL };
+  /* 'path', 'mode' and 'max_rows' are build6's spellings, kept in the known
+     list so a migrating deployment gets a sentence about what replaced them
+     rather than a generic unknown-key refusal. */
+  static const char *const sql_keys[] = { "scope", "access", "create",
+                                          "max_result_rows", "path", "mode",
+                                          "max_rows", NULL };
   lua_State *L;
   int rc = -1;
   int64_t n;
@@ -528,31 +587,85 @@ int dh_config_load (const char *path, dh_config *out, char *err,
         lua_pop(L, 2);
         goto done;
       }
-      if (cfg_str(L, -1, "path", out->sql.path, sizeof(out->sql.path), 1,
+      /* The build6 keys, refused with directions rather than left to the
+         generic unknown-key sentence: the shape changed, not just a name. */
+      lua_getfield(L, -1, "path");
+      if (!lua_isnil(L, -1)) {
+        lua_pop(L, 3);
+        cfg_fail(err, errcap, "config.connectors.sql.path was replaced in "
+                              "build7: grant a directory with 'scope' and "
+                              "let the program name its database "
+                              "(host.sql.open)%s%s", "", "");
+        goto done;
+      }
+      lua_pop(L, 1);
+      lua_getfield(L, -1, "mode");
+      if (!lua_isnil(L, -1)) {
+        lua_pop(L, 3);
+        cfg_fail(err, errcap, "config.connectors.sql.mode was split in "
+                              "build7: 'access' (\"read\"/\"readwrite\") is "
+                              "the grant, 'create' the open-mode detail%s%s",
+                 "", "");
+        goto done;
+      }
+      lua_pop(L, 1);
+      lua_getfield(L, -1, "max_rows");
+      if (!lua_isnil(L, -1)) {
+        lua_pop(L, 3);
+        cfg_fail(err, errcap, "config.connectors.sql.max_rows was renamed in "
+                              "build7 to what it always was: "
+                              "'max_result_rows', a per-query cap%s%s",
+                 "", "");
+        goto done;
+      }
+      lua_pop(L, 1);
+      if (cfg_str(L, -1, "scope", out->sql.scope, sizeof(out->sql.scope), 1,
                   "config.connectors.sql", err, errcap) != 0) {
         lua_pop(L, 2);
         goto done;
       }
       out->sql.enabled = 1;
-      lua_getfield(L, -1, "mode");
+      lua_getfield(L, -1, "access");
       if (!lua_isnil(L, -1)) {
         const char *s = lua_tostring(L, -1);
         if (s == NULL || (strcmp(s, "read") != 0 &&
                           strcmp(s, "readwrite") != 0)) {
           lua_pop(L, 3);
-          cfg_fail(err, errcap, "config.connectors.sql.mode must be "
+          cfg_fail(err, errcap, "config.connectors.sql.access must be "
                                 "\"read\" or \"readwrite\"%s%s", "", "");
           goto done;
         }
         out->sql.readwrite = (strcmp(s, "readwrite") == 0);
       }
       lua_pop(L, 1);
-      n = out->sql.max_rows;
-      if (cfg_num(L, -1, "max_rows", &n, 1, 1000000,
+      /* Safe default: creation follows the write grant. Saying create=true
+         under a read grant is a contradiction (a read-only open cannot
+         create), so it is refused rather than half-honored. */
+      out->sql.create = out->sql.readwrite;
+      lua_getfield(L, -1, "create");
+      if (!lua_isnil(L, -1)) {
+        if (!lua_isboolean(L, -1)) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.sql.create must be a "
+                                "boolean%s%s", "", "");
+          goto done;
+        }
+        out->sql.create = lua_toboolean(L, -1);
+        if (out->sql.create && !out->sql.readwrite) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.sql.create needs access "
+                                "\"readwrite\": a read-only open cannot "
+                                "create a database%s%s", "", "");
+          goto done;
+        }
+      }
+      lua_pop(L, 1);
+      n = out->sql.max_result_rows;
+      if (cfg_num(L, -1, "max_result_rows", &n, 1, 1000000,
                   "config.connectors.sql", err, errcap) != 0) {
         lua_pop(L, 2); goto done;
       }
-      out->sql.max_rows = (long)n;
+      out->sql.max_result_rows = (long)n;
     }
     lua_pop(L, 1);
     lua_getfield(L, -1, "crypto");
@@ -607,6 +720,78 @@ int dh_config_load (const char *path, dh_config *out, char *err,
         lua_pop(L, 2); goto done;
       }
       out->crypto.default_ttl = (long)n;
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "fs");
+    if (!lua_isnil(L, -1)) {
+      if (!lua_istable(L, -1) ||
+          cfg_known_keys(L, -1, fs_keys, "config.connectors.fs", err,
+                         errcap) != 0) {
+        if (!lua_istable(L, -1))
+          cfg_fail(err, errcap, "config.connectors.fs must be a table%s%s",
+                   "", "");
+        lua_pop(L, 2);
+        goto done;
+      }
+      if (cfg_str(L, -1, "scope", out->fs.scope, sizeof(out->fs.scope), 1,
+                  "config.connectors.fs", err, errcap) != 0) {
+        lua_pop(L, 2);
+        goto done;
+      }
+      out->fs.enabled = 1;
+      lua_getfield(L, -1, "access");
+      if (!lua_isnil(L, -1)) {
+        const char *s = lua_tostring(L, -1);
+        if (s == NULL || (strcmp(s, "read") != 0 &&
+                          strcmp(s, "readwrite") != 0)) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.fs.access must be "
+                                "\"read\" or \"readwrite\"%s%s", "", "");
+          goto done;
+        }
+        out->fs.readwrite = (strcmp(s, "readwrite") == 0);
+      }
+      lua_pop(L, 1);
+      n = out->fs.max_bytes;
+      if (cfg_num(L, -1, "max_bytes", &n, 1, 1000000000,
+                  "config.connectors.fs", err, errcap) != 0) {
+        lua_pop(L, 2); goto done;
+      }
+      out->fs.max_bytes = (long)n;
+    }
+    lua_pop(L, 1);
+    lua_getfield(L, -1, "exec");
+    if (!lua_isnil(L, -1)) {
+      /* 'exec = true' wires it with every bound at its default; a table
+         tightens them. Granting exec is leaving the sandbox either way
+         (doc/Capabilities.md), so the spelling is kept deliberate. */
+      if (lua_isboolean(L, -1)) {
+        out->exec.enabled = lua_toboolean(L, -1);
+      }
+      else if (!lua_istable(L, -1) ||
+               cfg_known_keys(L, -1, exec_keys, "config.connectors.exec", err,
+                              errcap) != 0) {
+        if (!lua_istable(L, -1))
+          cfg_fail(err, errcap, "config.connectors.exec must be a table or "
+                                "true%s%s", "", "");
+        lua_pop(L, 2);
+        goto done;
+      }
+      else {
+        out->exec.enabled = 1;
+        n = out->exec.max_timeout_ms;
+        if (cfg_num(L, -1, "max_timeout_ms", &n, 1, 600000,
+                    "config.connectors.exec", err, errcap) != 0) {
+          lua_pop(L, 2); goto done;
+        }
+        out->exec.max_timeout_ms = (long)n;
+        n = out->exec.max_output_bytes;
+        if (cfg_num(L, -1, "max_output_bytes", &n, 1, 1000000000,
+                    "config.connectors.exec", err, errcap) != 0) {
+          lua_pop(L, 2); goto done;
+        }
+        out->exec.max_output_bytes = (long)n;
+      }
     }
     lua_pop(L, 1);
   }
@@ -955,6 +1140,12 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
   h->cfg = *cfg;
   h->now_ms = dh_now_ms();
 
+  /* A peer closing a socket mid-write, or an exec child closing its stdin,
+     must be an EPIPE the caller sees -- not a SIGPIPE that kills the whole
+     host. Process-wide, set here once rather than inside whichever
+     connector happened to notice first. */
+  signal(SIGPIPE, SIG_IGN);
+
   memset(&vt, 0, sizeof(vt));
   vt.create = host_create;
   vt.destroy = host_destroy;
@@ -978,6 +1169,14 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
     return -1;
   }
   if (cfg->crypto.enabled && dh_crypto_open(h, err, errcap) != 0) {
+    dh_host_close(h);
+    return -1;
+  }
+  if (cfg->fs.enabled && dh_fs_open(h, err, errcap) != 0) {
+    dh_host_close(h);
+    return -1;
+  }
+  if (cfg->exec.enabled && dh_exec_open(h, err, errcap) != 0) {
     dh_host_close(h);
     return -1;
   }
@@ -1010,6 +1209,8 @@ void dh_host_close (dh_host *h) {
   dh_http_close(h);
   dh_sql_close(h);
   dh_crypto_close(h);
+  dh_fs_close(h);
+  dh_exec_close(h);
   if (h->sw != NULL) {
     dvs_free(h->sw);                   /* releases slots via host_destroy */
     h->sw = NULL;

@@ -211,7 +211,7 @@ own.
 edge that speaks JSON rather than a queue.
 
 ```lua
-json.encode({ ok = true, ids = {1, 2, 3} })   --> {"ok":true,"ids":[1,2,3]}
+json.encode({ ok = true, ids = {1, 2, 3} })   --> {"ids":[1,2,3],"ok":true}
 json.decode('{"n": 42, "xs": [1, null, 3]}')  --> { n = 42, xs = { 1, nil, 3 } }
 ```
 
@@ -246,6 +246,65 @@ Seconds, not milliseconds — the unit `os.time` and a JWT's `exp` already speak
 `host:time` answers in milliseconds, so divide by 1000 at the boundary. `time.of`
 and `time.parse` refuse an impossible date (Feb 29 in a common year, a month past
 12) rather than rolling it over.
+
+### Reaching the host: `host`
+
+Everything above is pure. The things only a host can do — the clock, a
+database, a signature under a key the guest must not hold — are **hostcalls**
+(`doc/Hostcall.md`): a request pushed to a queue, answered by whichever
+connector the deployment wired, gated by the capability grant. The `host`
+library is how a program makes one. It owns the queue pair, the tokens and the
+correlation, so a call is just a call:
+
+```lua
+local db  = host.sql.open("kv.sqlite")   -- a name inside the granted scope
+db.exec("INSERT INTO kv VALUES (?, ?)", "demo", json.encode(record))
+local rows = db.query("SELECT v FROM kv WHERE k = ?", "demo").rows
+local tok  = host.crypto.jwt_sign({ sub = "u1" }, 60)
+local ms   = host.time()
+```
+
+The deployment's config grants the sql connector a **scope** — a directory —
+and the program names the database it wants inside it, which is where an
+application detail belongs. `host.sql.open` is client-side sugar (the name
+rides in each call as `args.db`); a name with a separator in it, or one that
+resolves outside the scope, is denied, never clamped. Its calls are
+dot-calls — `db.exec(...)`, not `db:exec(...)` — and the colon mistake is
+caught with a message saying so.
+
+A non-`ok` reply **raises**, with the connector's own sentence in the message —
+`host.sql.exec: denied: this program does not hold 'host:sql/exec'; ...` — which
+is the readable default: most programs cannot do anything with a refusal except
+stop and say why. A program that *expects* one keeps it expressible without
+`pcall`: every `sql` call has a `try_` form returning `value, status, detail`
+instead, and `host.try(name, args)` is the same escape for any call. Two shapes
+to know: `host.crypto.jwt_verify` never raises on a bad token, because
+`{valid = false, reason = "signature"}` is an *answer*, and `host.crypto.random`
+comes back as hex, two characters per byte. `host.call(name, args)` reaches any
+connector by name — the typed wrappers are exactly it, spelled out — so a
+deployment that wires a connector this runtime predates is not out of reach.
+
+Files and subprocesses follow the same grammar. `host.fs.read(path)` /
+`host.fs.write(path, data, {append=true}?)` work files inside a directory the
+deployment granted, exactly as `sql` works databases inside its scope — a
+path that says or resolves to outside it is denied, and both directions
+refuse past the deployment's byte cap. `host.exec.run(argv, opts?)` runs a
+subprocess: `argv` is a vector (a shell only if the program names one),
+`{status, stdout, stderr}` is the answer — a nonzero exit included; the
+raise is for the deadline or the output cap, either of which kills the
+child. Granting `exec` is leaving the sandbox (`doc/Capabilities.md` §5);
+the bounds are the deployment's, and they are the point.
+
+What answers is the deployment's business twice over: the connector must be
+wired in the `*.host.lua` (§7) *and* the program must hold the grant
+(`host:sql/*`, `host:time`, ...), or the reply is `denied` — never an exception
+at declare time, never a dropped request. The queues underneath
+(`host/calls`/`host/replies`) remain the substrate and the protocol is still
+`doc/Hostcall.md`; a program that wants them raw can have them — the library
+looks a pre-declared pair up before declaring its own, and allocates its
+tokens from `2^30` up so a program's own small integers never collide
+(sequential mixing only: one reply queue cannot serve two concurrent
+consumers).
 
 ---
 
@@ -385,7 +444,7 @@ That is the whole trick: a sender cannot tell an endpoint from a local queue, an
 not need to. Where the bytes actually go is the host's business.
 
 ```lua
-endpoint.status(handle)       -- "live" | "closed"; errors on a non-endpoint handle
+endpoint.status(handle)       -- "live" | "gone"; errors on a non-endpoint handle
 endpoint.is_endpoint(handle)  -- true/false. Takes a QUEUE HANDLE, not a reference
 ```
 
@@ -468,12 +527,6 @@ no way to widen, which is §9.3's rule applied to flags.
 What an instance gives you unconditionally is **isolation between instances**: separate
 `lua_State`s, separate heaps, a budget on each, and a kill that takes the subtree. That
 is what makes one-instance-per-client worth doing, and it holds regardless of the flags.
-
-`DV_FLAG_UNSAFE_DEBUG` hands back the whole `debug` library, for when the program is
-your own and you are debugging it. A snapshot does not cross either flag: the permanents
-fingerprint covers the module tables, so a sealed instance and an open one disagree and
-`dv_restore` refuses — a program captured holding `io.open` cannot wake somewhere there
-is none.
 
 **From a binding.** All three seal by default too, and all three expose the same escape
 hatches — a host that cannot set them has no way to run legacy code at all:
@@ -657,8 +710,8 @@ is no error to catch and work around.
 
 The **generic host** (`host/`, `make build_host`) runs a swarm from a supervisor
 program plus a typed `*.host.lua` configuration — the drive loop, the roster, the
-hostcall pump, and connectors for the clock, SQLite, crypto and an HTTP listener, all in
-one binary, so a deployment is data rather than C. `doc/Host.md` is its contract and
+hostcall pump, and connectors for the clock, SQLite, crypto, files, subprocesses
+and an HTTP listener, all in one binary, so a deployment is data rather than C. `doc/Host.md` is its contract and
 `host/dhost.c` the code. That is where a real deployment starts; write a host in C
 (above) only to embed the swarm in a larger program of your own.
 

@@ -169,7 +169,8 @@ takes hours of study to write "create a table, write a value, read it back," and
 that voids the accessibility claim the project rests on.
 
 - **A `host` guest library** owns the queue plumbing so a program writes
-  `host.sql.exec(...)` and never sees a queue or a token. It is the first thing
+  `host.sql.open("kv.sqlite").exec(...)` and never sees a queue or a token. It
+  is the first thing
   build7 builds (Part 1), and every example and capability test is written
   against it, so the code we ship *models* the good pattern instead of teaching
   the raw one.

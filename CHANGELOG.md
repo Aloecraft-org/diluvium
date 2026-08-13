@@ -10,6 +10,99 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build7] - 2026-08-13
+
+`v5.5.1_build7` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**The `host` guest library: a hostcall is a call.** Reaching a
+connector used to take a hand-rolled queue pair, a token, and a
+request map -- ceremony every program repeated and none designed. The
+new `host` global owns all of it: `host.sql.open(name)` returning a
+database handle whose `exec`/`query` are plain calls,
+`host.crypto.hash/hmac/random/jwt_sign/jwt_verify`, `host.time()`,
+and `host.call(name, args)` for any connector by name. A non-`ok`
+reply raises with the connector's own sentence in the message; the
+`try_` forms (`db.try_exec`, `host.try`) hand the status back
+instead, so an expected denial stays expressible. The queues remain
+the substrate and `doc/Hostcall.md` remains the protocol -- the
+library multiplexes one lazily-declared pair, correlates replies by
+token in any order, and is implemented as a Lua chunk so a future
+`await` keyword changes its internals and no program. LuaCATS
+definitions for every guest global (`queue`, `msgpack`, `endpoint`,
+`bytes`, `json`, `time`, `host`) ship as `types/guest.lua`, so an
+editor stops flagging them unknown.
+
+**The sql config grants a scope, not an application detail.** A
+deployment used to name an exact database file (`path =
+"example.db"`), resolved against whatever directory the host happened
+to start in -- the config carrying the program's business, ambiguously.
+Now `connectors.sql` grants a **scope** (a directory, resolved once,
+canonically) and the program names its database inside it: `args.db`
+on the wire, `host.sql.open("name")` in a program. A name with a
+separator, a `.`/`..`, or one resolving (through a symlink) outside
+the scope is DENIED, never clamped; multiple databases fall out for
+free, opened on first use, nothing preallocated. The liars are
+renamed and split: `max_rows` is `max_result_rows` (it always was a
+per-query cap), and `mode`'s two jobs are `access`
+("read"/"readwrite" -- the grant, which wires or unwires `sql/exec`)
+and `create` (the open-mode detail, defaulting to the write grant).
+The old keys are refused with directions, not as anonymous typos.
+
+**Three connector gaps filled, host-side.** The `fs` connector
+(`host:fs/read`, `host:fs/write`; `host.fs.read/write` in a program)
+works files inside a granted scope under the same discipline as sql
+-- a path may descend into existing structure, but `..`, absolute
+paths, and anything resolving (through a symlink) outside the scope
+are denied, both directions refuse past `max_bytes`, and nothing
+creates directories on the way. The `exec` connector
+(`host:exec/run`; `host.exec.run(argv, opts?)`) is the honest escape
+hatch, bounded because the instruction budget cannot reach a
+subprocess: argv is a vector so there is no shell unless the program
+names one, a wall-clock deadline (config ceiling, per-call at most
+that) kills a runaway child, each output stream refuses past its byte
+cap, and a nonzero exit is an answer, not an error -- granting exec
+is leaving the sandbox, and the docs say so. And the listener now
+forwards an **allowlisted subset of request headers**: config names
+lowercase header names (empty by default), matching values arrive as
+a `headers` map on each request message (present whenever an
+allowlist is configured, so the shape is the config's decision),
+repeats join per RFC 7230, and a value past the host's bound answers
+431 rather than truncating.
+
+### Upgrading
+
+**Snapshots taken by 5.5.1_build6 and earlier are refused by this
+build.** The `host` module table joins the permanents set, which
+moves the permanents fingerprint the snapshot header carries -- the
+same mechanism, and the same clean format-mismatch refusal, as
+build6's own library additions. Nothing half-loads, and there is no
+converter. `DILUVIUM_SNAP_FORMAT` and `DS_THREAD_VERSION` are
+unchanged from build6; only the permanents list grew.
+
+**Bytecode is unaffected.** `LUAC_FORMAT` stays 0x46; chunks compiled
+by build6 load without recompiling.
+
+**The `host` global is new.** A program that used `host` as a global
+name of its own now shadows the library; programs that kept to locals
+are unaffected. Like every guest library it is present in the CLI
+too, where a call fails loudly rather than answering -- nothing
+drains the queues there.
+
+**`queue.declare`'s size option is `capacity`.** It always was; the
+documented raw-hostcall idiom passed `cap`, which was silently
+ignored, so those queues ran at the default 64. Programs following the
+old example still work -- the option never did anything -- but the
+examples now say `capacity`, and so should the code.
+
+**The sql connector's config changed shape.** `path` gave way to
+`scope` (a directory; the program names its database within it),
+`mode` split into `access` and `create`, and `max_rows` is
+`max_result_rows`. A build6 config is refused with a sentence naming
+each replacement, and hostcalls now carry `args.db` -- raw-idiom
+programs add it; programs on the `host` library say
+`host.sql.open("name")` once and are done.
+
+
 ## [5.5.1_build6] - 2026-08-12
 
 `v5.5.1_build6` &middot; Lua 5.5.1 &middot; bytecode format `0x46`

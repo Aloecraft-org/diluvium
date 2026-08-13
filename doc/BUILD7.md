@@ -1,7 +1,11 @@
 # 5.5.1_build7: stop cementing bad patterns
 
-**Status:** plan, written 2026-08-13. Supersedes the earlier "capability
-grab-bag" framing (which is folded into Part 3 below).
+**Status:** built, 2026-08-13. Written as the plan the same day; Parts 1-4
+landed in 5.5.1_build7 (the `host` guest library refined to
+`host.sql.open(name)` + handle calls during the Part 4 rewrites, exactly as
+§1 said the caps should drive it), and §5 remains the honest list of what
+was *not* built. Supersedes the earlier "capability grab-bag" framing
+(which is folded into Part 3 below).
 
 The capability-testing pass did its job: it made the guest-facing surface's
 problems impossible to ignore. The tests pass — Diluvium does ~95% of what

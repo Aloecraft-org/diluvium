@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -175,11 +176,26 @@ static void a_config_is_typed_data_and_typos_are_refused (void) {
   ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0,
      "hibernation must be \"on\" or \"off\"");
 
-  p = fixture("nosqlpath.host.lua",
-    "return { supervisor = 's.lua', connectors = { sql = { mode = 'read' } } }\n");
+  p = fixture("noscope.host.lua",
+    "return { supervisor = 's.lua', connectors = { sql = { access = 'read' } } }\n");
   ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
-     strstr(err, "path") != NULL,
-     "a sql block without a database path is refused");
+     strstr(err, "scope") != NULL,
+     "a sql block without a granted scope is refused");
+
+  /* The build6 keys teach their replacements rather than reading as typos. */
+  p = fixture("oldsql.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  sql = { path = 'example.db' } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "scope") != NULL && strstr(err, "build7") != NULL,
+     "the old sql.path is refused with directions to 'scope'");
+
+  p = fixture("badcreate.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  sql = { scope = '.', access = 'read', create = true } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "readwrite") != NULL,
+     "create under a read grant is a contradiction, refused");
 
   /* One listen block, the back-compatible shape, is one listener. */
   p = fixture("one_listen.host.lua",
@@ -236,10 +252,10 @@ static void a_guest_calls_time_and_reads_the_reply (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_time.lua",
-    "local calls = queue.declare('host/calls', {cap = 4, exported = true})\n"
-    "local replies = queue.declare('host/replies', {cap = 4})\n"
-    "local log = queue.declare('log', {cap = 4, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local calls = queue.declare('host/calls', {capacity = 4, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 4})\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "queue.push(calls, {tok = 7, call = 'time'})\n"
     "local _, m, why = queue.wait({replies}, 5000)\n"
     "if why == 'ok' and m.tok == 7 and m.status == 'ok'\n"
@@ -281,10 +297,10 @@ static void the_grant_gates_and_the_refusals_name_themselves (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_gate.lua",
-    "local calls = queue.declare('host/calls', {cap = 8, exported = true})\n"
-    "local replies = queue.declare('host/replies', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local calls = queue.declare('host/calls', {capacity = 8, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "local verdict = {}\n"
     "-- a call outside the grant\n"
     "queue.push(calls, {tok = 1, call = 'time'})\n"
@@ -338,9 +354,9 @@ static void a_guest_wait_timeout_is_fired_by_the_host_clock (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_timeout.lua",
-    "local q = queue.declare('never', {cap = 1})\n"
-    "local log = queue.declare('log', {cap = 4, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local q = queue.declare('never', {capacity = 1})\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "local id, m, why = queue.wait({q}, 60)\n"
     "queue.push(log, why)\n"
     "queue.wait({park})\n");
@@ -378,10 +394,10 @@ static void sql_query_and_exec_split_along_the_grant (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_sql.lua",
-    "local calls = queue.declare('host/calls', {cap = 8, exported = true})\n"
-    "local replies = queue.declare('host/replies', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local calls = queue.declare('host/calls', {capacity = 8, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "local function ask(req)\n"
     "  queue.push(calls, req)\n"
     "  local _, m = queue.wait({replies}, 5000)\n"
@@ -389,36 +405,44 @@ static void sql_query_and_exec_split_along_the_grant (void) {
     "end\n"
     "local v = {}\n"
     "local m = ask({tok = 1, call = 'sql/exec',\n"
-    "  args = {sql = 'CREATE TABLE t (a INTEGER, b TEXT)'}})\n"
+    "  args = {db = 'check.db', sql = 'CREATE TABLE t (a INTEGER, b TEXT)'}})\n"
     "v[1] = (m.status == 'ok')\n"
     "m = ask({tok = 2, call = 'sql/exec',\n"
-    "  args = {sql = 'INSERT INTO t VALUES (?, ?)', params = {42, 'x'}}})\n"
+    "  args = {db = 'check.db', sql = 'INSERT INTO t VALUES (?, ?)',\n"
+    "          params = {42, 'x'}}})\n"
     "v[2] = (m.status == 'ok' and m.value.changes == 1)\n"
     "m = ask({tok = 3, call = 'sql/query',\n"
-    "  args = {sql = 'SELECT a, b FROM t'}})\n"
+    "  args = {db = 'check.db', sql = 'SELECT a, b FROM t'}})\n"
     "v[3] = (m.status == 'ok' and m.value.cols[1] == 'a'\n"
     "  and m.value.rows[1][1] == 42 and m.value.rows[1][2] == 'x')\n"
     "-- a write wearing query's grant\n"
-    "m = ask({tok = 4, call = 'sql/query', args = {sql = 'DELETE FROM t'}})\n"
+    "m = ask({tok = 4, call = 'sql/query',\n"
+    "  args = {db = 'check.db', sql = 'DELETE FROM t'}})\n"
     "v[4] = (m.status == 'denied'\n"
     "  and string.find(m.detail, 'sql/exec', 1, true) ~= nil)\n"
     "-- two statements wearing one authorization\n"
     "m = ask({tok = 5, call = 'sql/query',\n"
-    "  args = {sql = 'SELECT 1; SELECT 2'}})\n"
+    "  args = {db = 'check.db', sql = 'SELECT 1; SELECT 2'}})\n"
     "v[5] = (m.status == 'error'\n"
     "  and string.find(m.detail, 'one statement', 1, true) ~= nil)\n"
-    "local all = v[1] and v[2] and v[3] and v[4] and v[5]\n"
+    "-- a call that names no database is told whose job naming is\n"
+    "m = ask({tok = 6, call = 'sql/query', args = {sql = 'SELECT 1'}})\n"
+    "v[6] = (m.status == 'error'\n"
+    "  and string.find(m.detail, 'name their database', 1, true) ~= nil)\n"
+    "local all = v[1] and v[2] and v[3] and v[4] and v[5] and v[6]\n"
     "if all then queue.push(log, 'good')\n"
     "else queue.push(log, 'bad: ' .. tostring(v[1]) .. tostring(v[2])\n"
-    "  .. tostring(v[3]) .. tostring(v[4]) .. tostring(v[5])) end\n"
+    "  .. tostring(v[3]) .. tostring(v[4]) .. tostring(v[5])\n"
+    "  .. tostring(v[6])) end\n"
     "queue.wait({park})\n");
   {
     char cfgsrc[768];
     snprintf(cfgsrc, sizeof(cfgsrc),
              "return { supervisor = '%s/sup_sql.lua',\n"
              "  caps = { 'host:sql/*' },\n"
-             "  connectors = { sql = { path = '%s/check.db',\n"
-             "    mode = 'readwrite', max_rows = 8 } } }\n", tmpdir, tmpdir);
+             "  connectors = { sql = { scope = '%s',\n"
+             "    access = 'readwrite', max_result_rows = 8 } } }\n",
+             tmpdir, tmpdir);
     fixture("sql.host.lua", cfgsrc);
   }
   {
@@ -433,7 +457,94 @@ static void sql_query_and_exec_split_along_the_grant (void) {
   }
   ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
      "create, insert with params, select back, a write refused under "
-     "query's grant, and a second statement refused whole");
+     "query's grant, a second statement refused whole, and a nameless "
+     "call told to name its database");
+  if (log[0] != '\0' && strcmp(log, "good") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** The same ground as the raw tests above, walked through the 'host' guest
+** library -- which is the point: this guest is what an ordinary program
+** looks like after build7. No queue pair, no tokens, no op-strings; a non-ok
+** status raises with the connector's sentence, and try_* hands a denial back
+** as a value where the program expects one. If this program stops reading
+** like an ordinary program, the library's API is wrong, not the test.
+*/
+static void the_host_library_speaks_hostcall (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[512];
+  fixture("sup_hostlib.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local okrun, why = pcall(function()\n"
+    "  assert(host.time() > 0, 'the clock answers in ms')\n"
+    "  local db = host.sql.open('hostlib.db')\n"
+    "  db.exec('CREATE TABLE t (a INTEGER, b TEXT)')\n"
+    "  local r = db.exec('INSERT INTO t VALUES (?, ?)', 42, 'x')\n"
+    "  assert(r.changes == 1, 'insert reports its changes')\n"
+    "  local q = db.query('SELECT a, b FROM t')\n"
+    "  assert(q.cols[1] == 'a' and q.rows[1][1] == 42\n"
+    "    and q.rows[1][2] == 'x', 'select round-trips')\n"
+    "  -- a write wearing query's grant: try_query returns the denial\n"
+    "  local v, st, detail = db.try_query('DELETE FROM t')\n"
+    "  assert(v == nil and st == 'denied'\n"
+    "    and string.find(detail, 'sql/exec', 1, true), 'try hands back denials')\n"
+    "  -- a second database in the same scope is its own file\n"
+    "  local other = host.sql.open('other.db')\n"
+    "  local v2, st2 = other.try_query('SELECT a FROM t')\n"
+    "  assert(v2 == nil and st2 == 'error', 'databases in a scope isolate')\n"
+    "  -- a name that is a path is an escape, denied not clamped\n"
+    "  local v3, st3, d3 = host.sql.open('../escape.db').try_query('SELECT 1')\n"
+    "  assert(v3 == nil and st3 == 'denied'\n"
+    "    and string.find(d3, 'scope', 1, true), 'an escaping name is denied')\n"
+    "  -- a dangling symlink planted in the scope must not become a\n"
+    "  -- creatable name whose creation lands at the link's target\n"
+    "  local v4, st4 = host.sql.open('dangling.db').try_exec('CREATE TABLE d (a)')\n"
+    "  assert(v4 == nil and st4 == 'denied',\n"
+    "    'a dangling symlink is denied, not created through')\n"
+    "  -- outside the grant entirely: the default raises, naming the call\n"
+    "  local okc, e = pcall(host.crypto.hash, 'x')\n"
+    "  assert(okc == false\n"
+    "    and string.find(e, 'host.crypto.hash: denied:', 1, true),\n"
+    "    'a raise names the call and carries the refusal')\n"
+    "end)\n"
+    "if okrun then queue.push(log, 'good')\n"
+    "else queue.push(log, 'bad: ' .. tostring(why)) end\n"
+    "queue.wait({park})\n");
+  {
+    char cfgsrc[768];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_hostlib.lua',\n"
+             "  caps = { 'host:sql/*', 'host:time' },\n"
+             "  connectors = { time = true, sql = { scope = '%s',\n"
+             "    access = 'readwrite', max_result_rows = 8 } } }\n",
+             tmpdir, tmpdir);
+    fixture("hostlib.host.lua", cfgsrc);
+  }
+  {
+    /* The dangling symlink the guest's last sql check trips over: its
+       target is outside the scope and does not exist, so a stat-based
+       exists check would have called it creatable. */
+    char lp[512];
+    snprintf(lp, sizeof(lp), "%s/dangling.db", tmpdir);
+    (void)symlink("/nonexistent-target/held.db", lp);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/hostlib.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the hostlib deployment opens");
+      return;
+    }
+  }
+  ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
+     "an ordinary program: host.time, host.sql round-trip, a denial handed "
+     "back by try_query, a raise that names host.crypto.hash");
   if (log[0] != '\0' && strcmp(log, "good") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
@@ -467,31 +578,39 @@ static void sql_confinement_holds (void) {
   }
   (void)sf;
   {
-    char src[1400];
+    char src[2200];
     snprintf(src, sizeof(src),
-      "local calls = queue.declare('host/calls', {cap=8, exported=true})\n"
-      "local replies = queue.declare('host/replies', {cap=8})\n"
-      "local log = queue.declare('log', {cap=8, exported=true})\n"
-      "local park = queue.declare('park', {cap=1})\n"
+      "local calls = queue.declare('host/calls', {capacity=8, exported=true})\n"
+      "local replies = queue.declare('host/replies', {capacity=8})\n"
+      "local log = queue.declare('log', {capacity=8, exported=true})\n"
+      "local park = queue.declare('park', {capacity=1})\n"
       "local function ask(req)\n"
       "  queue.push(calls, req); local _, m = queue.wait({replies}, 5000)\n"
       "  return m end\n"
       "local v = {}\n"
-      "v[1] = (ask({tok=1, call='sql/query',\n"
-      "  args={sql=\"ATTACH DATABASE '%s/secret.db' AS x\"}}).status ~= 'ok')\n"
+      "v[1] = (ask({tok=1, call='sql/query', args={db='main.db',\n"
+      "  sql=\"ATTACH DATABASE '%s/secret.db' AS x\"}}).status ~= 'ok')\n"
       "v[2] = (ask({tok=2, call='sql/query',\n"
-      "  args={sql='BEGIN'}}).status ~= 'ok')\n"
+      "  args={db='main.db', sql='BEGIN'}}).status ~= 'ok')\n"
       "v[3] = (ask({tok=3, call='sql/query',\n"
-      "  args={sql='PRAGMA foreign_keys=OFF'}}).status ~= 'ok')\n"
+      "  args={db='main.db', sql='PRAGMA foreign_keys=OFF'}}).status ~= 'ok')\n"
       "-- a select that under-supplies its parameters\n"
-      "v[4] = (ask({tok=4, call='sql/query',\n"
-      "  args={sql='SELECT a FROM t WHERE a = ?'}}).status ~= 'ok')\n"
+      "v[4] = (ask({tok=4, call='sql/query', args={db='main.db',\n"
+      "  sql='SELECT a FROM t WHERE a = ?'}}).status ~= 'ok')\n"
+      "-- the secret db exists IN scope, but a read grant does not create\n"
+      "-- and does open: reading a sibling file is legitimate under the\n"
+      "-- scope model, so confinement rests on scope choice -- prove the\n"
+      "-- ESCAPING name is what fails\n"
+      "v[5] = (ask({tok=5, call='sql/query', args={db='sub/secret.db',\n"
+      "  sql='SELECT v FROM s'}}).status == 'denied')\n"
       "-- and a plain read still works, so the gate is not just off\n"
-      "v[5] = (ask({tok=5, call='sql/query',\n"
-      "  args={sql='SELECT count(*) FROM t'}}).status == 'ok')\n"
-      "if v[1] and v[2] and v[3] and v[4] and v[5] then queue.push(log,'good')\n"
+      "v[6] = (ask({tok=6, call='sql/query',\n"
+      "  args={db='main.db', sql='SELECT count(*) FROM t'}}).status == 'ok')\n"
+      "if v[1] and v[2] and v[3] and v[4] and v[5] and v[6]\n"
+      "then queue.push(log,'good')\n"
       "else queue.push(log, 'bad: '..tostring(v[1])..tostring(v[2])\n"
-      "  ..tostring(v[3])..tostring(v[4])..tostring(v[5])) end\n"
+      "  ..tostring(v[3])..tostring(v[4])..tostring(v[5])\n"
+      "  ..tostring(v[6])) end\n"
       "queue.wait({park})\n", tmpdir);
     fixture("sup_conf.lua", src);
   }
@@ -500,8 +619,8 @@ static void sql_confinement_holds (void) {
     snprintf(cfgsrc, sizeof(cfgsrc),
              "return { supervisor = '%s/sup_conf.lua',\n"
              "  caps = { 'host:sql/query' },\n"
-             "  connectors = { sql = { path = '%s/main.db',\n"
-             "    mode = 'read' } } }\n", tmpdir, tmpdir);
+             "  connectors = { sql = { scope = '%s',\n"
+             "    access = 'read' } } }\n", tmpdir, tmpdir);
     fixture("conf.host.lua", cfgsrc);
   }
   {
@@ -515,13 +634,171 @@ static void sql_confinement_holds (void) {
     }
   }
   ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
-     "ATTACH, BEGIN, PRAGMA and an under-supplied param are each refused, "
-     "and a plain read still works");
+     "ATTACH, BEGIN, PRAGMA, an under-supplied param and an escaping name "
+     "are each refused, and a plain read still works");
   if (log[0] != '\0' && strcmp(log, "good") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
 }
 
+
+
+/* ------------------------------------------------------------- fs, exec */
+
+/*
+** The fs connector under the same scope discipline as sql: reads and writes
+** land inside the granted directory and nowhere else. A secret is planted
+** outside the scope and a symlink to it inside, so a successful escape
+** would be provable exfiltration; the byte cap and the no-structure rule
+** each refuse with their own sentence. All through the host library, which
+** is how a program will actually write it.
+*/
+static void fs_reads_and_writes_inside_its_scope (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[512];
+  char scopedir[256], outside[512], linkpath[512];
+  snprintf(scopedir, sizeof(scopedir), "%s/fs_scope", tmpdir);
+  mkdir(scopedir, 0700);
+  snprintf(outside, sizeof(outside), "%s/fs_secret.txt", tmpdir);
+  {
+    FILE *f = fopen(outside, "w");
+    if (f != NULL) { fputs("TOP-SECRET", f); fclose(f); }
+  }
+  snprintf(linkpath, sizeof(linkpath), "%s/leak.txt", scopedir);
+  (void)symlink(outside, linkpath);
+  {
+    /* A FIFO in the scope, reached through a symlink: opening it would
+       block the single-threaded host forever, so it must be refused by
+       target type before any open. */
+    char fifopath[512], fifolink[512];
+    snprintf(fifopath, sizeof(fifopath), "%s/pipe.fifo", scopedir);
+    (void)mkfifo(fifopath, 0600);
+    snprintf(fifolink, sizeof(fifolink), "%s/fifolink.txt", scopedir);
+    (void)symlink(fifopath, fifolink);
+  }
+  fixture("sup_fs.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local okrun, why = pcall(function()\n"
+    "  local w = host.fs.write('note.txt', 'hello, ')\n"
+    "  assert(w.bytes == 7, 'a write reports its bytes')\n"
+    "  host.fs.write('note.txt', 'scope', { append = true })\n"
+    "  assert(host.fs.read('note.txt') == 'hello, scope', 'append appends')\n"
+    "  local v, st = host.fs.try_read('../fs_secret.txt')\n"
+    "  assert(v == nil and st == 'denied', 'dot-dot is denied')\n"
+    "  v, st = host.fs.try_read('leak.txt')\n"
+    "  assert(v == nil and st == 'denied',\n"
+    "    'a symlink out of the scope is denied')\n"
+    "  v, st, d = host.fs.try_read('fifolink.txt')\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'regular', 1, true),\n"
+    "    'a symlink to a non-regular file is refused, not opened')\n"
+    "  local d\n"
+    "  v, st, d = host.fs.try_write('big.txt', string.rep('x', 65))\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'byte cap', 1, true), 'the write cap refuses')\n"
+    "  v, st = host.fs.try_read('absent.txt')\n"
+    "  assert(v == nil and st == 'error', 'a missing file is an error')\n"
+    "  v, st, d = host.fs.try_write('nodir/x.txt', 'y')\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'creates', 1, true),\n"
+    "    'structure is not created on the way')\n"
+    "end)\n"
+    "if okrun then queue.push(log, 'good')\n"
+    "else queue.push(log, 'bad: ' .. tostring(why)) end\n"
+    "queue.wait({park})\n");
+  {
+    char cfgsrc[768];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_fs.lua',\n"
+             "  caps = { 'host:fs/*' },\n"
+             "  connectors = { fs = { scope = '%s/fs_scope',\n"
+             "    access = 'readwrite', max_bytes = 64 } } }\n",
+             tmpdir, tmpdir);
+    fixture("fs.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/fs.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the fs deployment opens");
+      return;
+    }
+  }
+  ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
+     "fs: write, append, read back; dot-dot and a symlink escape denied; "
+     "the byte cap and missing structure refuse");
+  if (log[0] != '\0' && strcmp(log, "good") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** exec, the honest escape hatch, bounded: argv is a vector (a shell only by
+** name), a nonzero exit is an answer, the deadline kills, the output cap
+** refuses, and a per-call timeout cannot pass the host's ceiling.
+*/
+static void exec_is_bounded_and_shell_free (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[512];
+  fixture("sup_exec.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local okrun, why = pcall(function()\n"
+    "  local r = host.exec.run({ 'echo', 'hi' })\n"
+    "  assert(r.status == 0 and r.stdout == 'hi\\n', 'echo echoes')\n"
+    "  r = host.exec.run({ 'sh', '-c', 'echo out; echo err 1>&2; exit 3' })\n"
+    "  assert(r.status == 3, 'a nonzero exit is an answer, not a raise')\n"
+    "  assert(r.stdout == 'out\\n' and r.stderr == 'err\\n',\n"
+    "    'the streams arrive separately')\n"
+    "  r = host.exec.run({ 'cat' }, { stdin = 'fed' })\n"
+    "  assert(r.stdout == 'fed', 'stdin reaches the child')\n"
+    "  local v, st, d = host.exec.try_run({ 'sleep', '5' },\n"
+    "                                     { timeout_ms = 200 })\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'deadline', 1, true), 'the deadline kills')\n"
+    "  v, st, d = host.exec.try_run({ 'true' }, { timeout_ms = 99999 })\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'ceiling', 1, true),\n"
+    "    'a call cannot ask past the ceiling')\n"
+    "  v, st, d = host.exec.try_run({ 'sh', '-c',\n"
+    "    'head -c 8192 /dev/zero' })\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'byte cap', 1, true), 'the output cap refuses')\n"
+    "end)\n"
+    "if okrun then queue.push(log, 'good')\n"
+    "else queue.push(log, 'bad: ' .. tostring(why)) end\n"
+    "queue.wait({park})\n");
+  {
+    char cfgsrc[512];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_exec.lua',\n"
+             "  caps = { 'host:exec/run' },\n"
+             "  connectors = { exec = { max_timeout_ms = 2000,\n"
+             "    max_output_bytes = 4096 } } }\n", tmpdir);
+    fixture("exec.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/exec.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the exec deployment opens");
+      return;
+    }
+  }
+  ok(run_until_log(&h, log, sizeof(log), 600) && strcmp(log, "good") == 0,
+     "exec: argv runs without a shell, exit and streams answer, the "
+     "deadline kills, the ceiling and output cap refuse");
+  if (log[0] != '\0' && strcmp(log, "good") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
 
 /* --------------------------------------------------------------- crypto */
 
@@ -562,10 +839,10 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
   {
     char src[3600];
     snprintf(src, sizeof(src),
-      "local calls = queue.declare('host/calls', {cap=16, exported=true})\n"
-      "local replies = queue.declare('host/replies', {cap=16})\n"
-      "local log = queue.declare('log', {cap=16, exported=true})\n"
-      "local park = queue.declare('park', {cap=1})\n"
+      "local calls = queue.declare('host/calls', {capacity=16, exported=true})\n"
+      "local replies = queue.declare('host/replies', {capacity=16})\n"
+      "local log = queue.declare('log', {capacity=16, exported=true})\n"
+      "local park = queue.declare('park', {capacity=1})\n"
       "local function ask(r) queue.push(calls, r)\n"
       "  local _, m = queue.wait({replies}, 5000); return m end\n"
       "local v = {}\n"
@@ -666,8 +943,8 @@ static void a_request_becomes_a_message_and_a_message_an_answer (void) {
   size_t got = 0;
   int i, sent = 0;
   fixture("sup_http.lua",
-    "local inq = queue.declare('http_in', {cap = 8})\n"
-    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
     "while true do\n"
     "  local _, m, why = queue.wait({inq})\n"
     "  if why == 'ok' then\n"
@@ -778,8 +1055,8 @@ static void the_listener_refuses_injection_and_smuggling (void) {
   dh_host h;
   char err[512], resp[2048];
   fixture("sup_evil.lua",
-    "local inq = queue.declare('http_in', {cap = 8})\n"
-    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
     "while true do\n"
     "  local _, m, why = queue.wait({inq})\n"
     "  if why == 'ok' then\n"
@@ -837,6 +1114,75 @@ static void the_listener_refuses_injection_and_smuggling (void) {
 ** reach the connection its 'conn' token names and no other -- a token that
 ** is unique across listeners, not merely within one.
 */
+/*
+** Part 3.3: an allowlisted subset of request headers reaches the guest,
+** lowercased; repeats join per RFC 7230; everything else stays host-side.
+** With an allowlist configured the 'headers' map is always present, so the
+** message's shape is the config's decision, not the traffic's.
+*/
+static void the_listener_forwards_allowlisted_headers (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512];
+  fixture("sup_hdrs.lua",
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
+    "while true do\n"
+    "  local _, m, why = queue.wait({inq})\n"
+    "  if why == 'ok' then\n"
+    "    queue.push(outq, {conn = m.conn, status = 200,\n"
+    "      body = tostring(m.headers.authorization) .. '|' ..\n"
+    "             tostring(m.headers['x-thing']) .. '|' ..\n"
+    "             tostring(m.headers.cookie),\n"
+    "      content_type = 'text/plain'})\n"
+    "  end\n"
+    "end\n");
+  {
+    char cfgsrc[512];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_hdrs.lua',\n"
+             "  connectors = { listen = { port = 18478, deadline_ms = 3000,\n"
+             "    headers = { 'authorization', 'x-thing' } } } }\n", tmpdir);
+    fixture("hdrs.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/hdrs.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the headers deployment opens (is port 18478 free?)");
+      return;
+    }
+  }
+  {
+    static const char req[] =
+      "GET /h HTTP/1.1\r\nHost: check\r\n"
+      "Authorization: Bearer tok123\r\n"
+      "X-Thing: a\r\nX-THING: b\r\n"
+      "Cookie: secret=1\r\n\r\n";
+    char resp[2048];
+    size_t got = http_exchange(&h, 18478, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "Bearer tok123|a, b|nil") != NULL,
+       "allowlisted headers arrive lowercased, repeats joined, and an "
+       "unlisted one does not");
+    if (got > 0 && strstr(resp, "Bearer tok123|a, b|nil") == NULL)
+      printf("      (response was: %.160s)\n", resp);
+  }
+  {
+    /* Without any Authorization sent, the map is present and empty -- the
+       guest indexing it must not blow up on a shape that changed. */
+    static const char req[] = "GET /h HTTP/1.1\r\nHost: check\r\n\r\n";
+    char resp[2048];
+    size_t got = http_exchange(&h, 18478, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "nil|nil|nil") != NULL,
+       "with none sent the headers map is present and empty, same shape");
+  }
+  dh_host_close(&h);
+}
+
 static void two_ports_pre_bound_route_by_token (void) {
   dh_config cfg;
   dh_host h;
@@ -847,8 +1193,8 @@ static void two_ports_pre_bound_route_by_token (void) {
   size_t ga = 0, gb = 0;
   int sa = 0, sb = 0;
   fixture("sup_two.lua",
-    "local inq = queue.declare('http_in', {cap = 8})\n"
-    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
     "while true do\n"
     "  local _, m, why = queue.wait({inq})\n"
     "  if why == 'ok' then\n"
@@ -934,11 +1280,15 @@ int main (void) {
   the_grant_gates_and_the_refusals_name_themselves();
   a_guest_wait_timeout_is_fired_by_the_host_clock();
   sql_query_and_exec_split_along_the_grant();
+  the_host_library_speaks_hostcall();
   sql_confinement_holds();
+  fs_reads_and_writes_inside_its_scope();
+  exec_is_bounded_and_shell_free();
   crypto_signs_and_verifies_standard_jwts();
   a_request_becomes_a_message_and_a_message_an_answer();
   the_listener_refuses_injection_and_smuggling();
   two_ports_pre_bound_route_by_token();
+  the_listener_forwards_allowlisted_headers();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }

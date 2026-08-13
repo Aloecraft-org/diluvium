@@ -7,7 +7,7 @@
 ** signature, not the key; a compromised instance cannot exfiltrate a secret
 ** it was never handed, and the key is in neither its heap nor its snapshot.
 **
-**   crypto/random   {bytes=N}                 -> N CSPRNG bytes (a bin)
+**   crypto/random   {bytes=N}                 -> N CSPRNG bytes, as hex
 **   crypto/hash     {data=str}                -> lowercase hex of SHA-256
 **   crypto/hmac     {data=str}                -> hex of HMAC-SHA256(key, data)
 **   crypto/jwt_sign {claims=map, ttl=seconds} -> a JWT-HS256 string

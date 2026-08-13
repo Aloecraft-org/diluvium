@@ -68,6 +68,10 @@ typedef struct dh_conn {
   size_t wrote;
 } dh_conn;
 
+/* Each forwarded header value's bound (after joining repeats): generous for
+   a bearer token, refusing (431) rather than truncating past it. */
+#define HTTP_HDR_VALUE_MAX 4096
+
 /* One bound port. */
 typedef struct dh_listener_rt {
   int listen_fd;
@@ -77,6 +81,8 @@ typedef struct dh_listener_rt {
   long deadline_ms;
   char queue[DH_NAME_MAX];
   char reply_queue[DH_NAME_MAX];
+  char hdr_allow[DH_MAX_HDRS][DH_HDR_NAME_MAX];  /* lowercased allowlist */
+  size_t nhdr_allow;
 } dh_listener_rt;
 
 typedef struct dh_http {
@@ -154,17 +160,49 @@ static int set_nonblock (int fd) {
   return (fl < 0) ? -1 : fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
+/* One allowlisted header's combined value: every occurrence of 'name' in
+   the request, joined ", " (RFC 7230's list rule), bounded. Returns the
+   length, 0 when absent, -1 past the bound. */
+static int hdr_value_of (const struct phr_header *hdrs, size_t nhdrs,
+                         const char *name, char *out, size_t outcap) {
+  size_t namelen = strlen(name);
+  size_t len = 0;
+  size_t i;
+  for (i = 0; i < nhdrs; i++) {
+    if (hdrs[i].name_len != namelen ||
+        strncasecmp(hdrs[i].name, name, namelen) != 0)
+      continue;
+    if (len > 0) {
+      if (len + 2 > outcap) return -1;
+      out[len++] = ','; out[len++] = ' ';
+    }
+    if (len + hdrs[i].value_len > outcap)
+      return -1;
+    memcpy(out + len, hdrs[i].value, hdrs[i].value_len);
+    len += hdrs[i].value_len;
+  }
+  return (int)len;
+}
+
 /* A complete request parsed out of c->in, turned into one message and pushed
    to this listener's queue. Refusals are answered on the socket: a full
-   queue is 503 -- backpressure made visible -- and an oversized body is 413
-   before the bytes are read. */
+   queue is 503 -- backpressure made visible -- an oversized body is 413
+   before the bytes are read, and an allowlisted header past its value bound
+   is 431 rather than a truncated lie. When the deployment allowlists any
+   headers, the message always carries a 'headers' map (possibly empty), so
+   the shape a guest pattern-matches is decided by config, not by traffic. */
 static void deliver (dh_host *h, dh_listener_rt *lr, dh_conn *c,
                      const char *method, size_t method_len,
                      const char *path, size_t path_len,
-                     const char *body, size_t body_len) {
+                     const char *body, size_t body_len,
+                     const struct phr_header *hdrs, size_t nhdrs) {
   dv_instance *root = dvs_instance(h->sw, h->root);
   dv_queue_id q;
   dh_buf msg;
+  char hval[DH_MAX_HDRS][HTTP_HDR_VALUE_MAX];
+  int hlen[DH_MAX_HDRS];
+  unsigned present = 0;
+  size_t i;
   if (root == NULL) {
     respond_text(c, 503, "Service Unavailable",
                  "the root instance is not resident\n");
@@ -176,12 +214,34 @@ static void deliver (dh_host *h, dh_listener_rt *lr, dh_conn *c,
                  "the program declares no request queue\n");
     return;
   }
+  for (i = 0; i < lr->nhdr_allow; i++) {
+    hlen[i] = hdr_value_of(hdrs, nhdrs, lr->hdr_allow[i],
+                           hval[i], sizeof(hval[i]));
+    if (hlen[i] < 0) {
+      respond_text(c, 431, "Request Header Fields Too Large",
+                   "an allowlisted header is past this host's value "
+                   "bound\n");
+      return;
+    }
+    if (hlen[i] > 0)
+      present++;
+  }
   dh_buf_init(&msg);
-  dh_map(&msg, 4);
+  dh_map(&msg, (lr->nhdr_allow > 0) ? 5 : 4);
   dh_str(&msg, "conn"); dh_uint(&msg, c->token);
   dh_str(&msg, "method"); dh_lstr(&msg, method, method_len);
   dh_str(&msg, "path"); dh_lstr(&msg, path, path_len);
   dh_str(&msg, "body"); dh_lstr(&msg, body, body_len);
+  if (lr->nhdr_allow > 0) {
+    dh_str(&msg, "headers");
+    dh_map(&msg, present);
+    for (i = 0; i < lr->nhdr_allow; i++) {
+      if (hlen[i] > 0) {
+        dh_str(&msg, lr->hdr_allow[i]);
+        dh_lstr(&msg, hval[i], (size_t)hlen[i]);
+      }
+    }
+  }
   if (dv_queue_push(root, q, msg.p, msg.len) != DV_OK) {
     respond_text(c, 503, "Service Unavailable",
                  "the request queue is full; try again\n");
@@ -264,7 +324,7 @@ static void try_parse (dh_host *h, dh_listener_rt *lr, dh_conn *c) {
     if (c->in.len < (size_t)hlen + (size_t)clen)
       return;                          /* body still arriving */
     deliver(h, lr, c, method, method_len, path, path_len,
-            (const char *)c->in.p + hlen, (size_t)clen);
+            (const char *)c->in.p + hlen, (size_t)clen, headers, nheaders);
   }
 }
 
@@ -560,6 +620,8 @@ static int open_one (dh_listener_rt *lr, const dh_listener_cfg *cfg,
   lr->deadline_ms = cfg->conn_deadline_ms;
   memcpy(lr->queue, cfg->queue, sizeof(lr->queue));
   memcpy(lr->reply_queue, cfg->reply_queue, sizeof(lr->reply_queue));
+  memcpy(lr->hdr_allow, cfg->headers, sizeof(lr->hdr_allow));
+  lr->nhdr_allow = cfg->nheaders;
   lr->conns = (dh_conn *)calloc((size_t)lr->max_conns, sizeof(dh_conn));
   if (lr->conns == NULL) {
     snprintf(err, errcap, "no memory for the connection table");
