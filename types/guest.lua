@@ -1,0 +1,310 @@
+---@meta
+---The guest-facing globals, as LuaCATS annotations.
+---
+---A sealed Diluvium instance opens these libraries beyond the stock ones:
+---`queue`, `msgpack`, `endpoint`, `bytes`, `json`, `time` and `host`. This
+---file never runs: it exists so lua-language-server stops flagging them as
+---unknown globals and can complete and type-check guest programs. Point the
+---editor at it (`workspace.library`) from any project that writes guest
+---code. The *host configuration* schema is the separate `host/types/host.lua`
+----- one file, one context, and this file's context is the GUEST.
+---
+---Doc of record: doc/Guide.md (queues, messages, endpoints, the libraries),
+---doc/Hostcall.md (the protocol `host` wraps), and each library's header.
+
+-- ---------------------------------------------------------------- queue --
+
+---Buffers between programs, and between a program and its host. Handles are
+---plain integers, never reused; a destroyed handle raises on use.
+---@class diluvium.queuelib
+queue = {}
+
+---@class diluvium.QueueOpts
+---@field capacity integer?  # messages held before on_full applies (default 64)
+---@field on_full ("reject"|"drop_oldest"|"drop_newest"|"block")?  # default "reject"
+---@field direction ("both"|"guest_write"|"guest_read")?  # default "both"
+---@field exported boolean?  # true to let the host read and write it (default false)
+
+---Declare a queue by name. Raises if the name is already declared.
+---@param name string
+---@param opts diluvium.QueueOpts?
+---@return integer handle
+function queue.declare(name, opts) end
+
+---@param name string
+---@return integer? handle  # nil when no queue has this name
+function queue.lookup(name) end
+
+---@param handle integer
+function queue.destroy(handle) end
+
+---Push a message. `false, "full"` and friends are normal outcomes, not
+---errors; only a bad handle or an unencodable value raises.
+---@param handle integer
+---@param value any  # msgpack-encodable
+---@return boolean ok
+---@return "ok"|"dropped_oldest"|"full"|"disabled"|"gone" status
+function queue.push(handle, value) end
+
+---Take one message without waiting.
+---@param handle integer
+---@return any? value
+---@return "ok"|"empty" status
+function queue.pop(handle) end
+
+---Wait on up to 32 queues. Timeout in milliseconds; -1 (the default) waits
+---forever, 0 polls. Returns the ready queue's handle and the message taken
+---from it, or `nil, nil, "timeout"`. Parks the program unless a message is
+---already there, so it needs a host that resumes.
+---@param handles integer[]
+---@param timeout_ms integer?
+---@return integer? handle
+---@return any? value
+---@return "ok"|"timeout"|"closed" status
+function queue.wait(handles, timeout_ms) end
+
+---@param handle integer
+function queue.enable(handle) end
+
+---@param handle integer
+function queue.disable(handle) end
+
+---@param handle integer
+---@return integer
+function queue.len(handle) end
+
+---@param handle integer
+---@return integer
+function queue.capacity(handle) end
+
+---@param handle integer
+---@return "enabled"|"disabled"
+function queue.state(handle) end
+
+---@param handle integer
+---@return {name: string, capacity: integer, on_full: string, exported: boolean, direction: string, len: integer, endpoint: boolean}
+function queue.info(handle) end
+
+-- -------------------------------------------------------------- msgpack --
+
+---The wire format the queues speak, exposed for a program that needs bytes.
+---@class diluvium.msgpacklib
+msgpack = {}
+
+---@param value any
+---@return string bytes
+function msgpack.encode(value) end
+
+---@param bytes string
+---@return any value
+function msgpack.decode(bytes) end
+
+---Force a table to encode as an array (a bare table is an array only when
+---its keys are exactly 1..n).
+---@param t table
+---@return table wrapper
+function msgpack.as_array(t) end
+
+---Force a table to encode as a map.
+---@param t table
+---@return table wrapper
+function msgpack.as_map(t) end
+
+---An application ext value (codes 0x10..0x7F).
+---@param code integer
+---@param data string
+---@return table wrapper
+function msgpack.ext(code, data) end
+
+-- ------------------------------------------------------------- endpoint --
+
+---Names for queues outside this instance, minted by the host.
+---@class diluvium.endpointlib
+endpoint = {}
+
+---Bind a host-authorised reference to a local handle.
+---@param ref any     # the reference the host handed over
+---@param name string # the local queue name to bind it as
+---@return integer handle
+function endpoint.bind(ref, name) end
+
+---@param handle integer
+---@return "live"|"gone"
+function endpoint.status(handle) end
+
+---@param handle integer
+---@return boolean
+function endpoint.is_endpoint(handle) end
+
+-- ---------------------------------------------------------------- bytes --
+
+---Flat transcoding: base64, base64url, hex, URL escaping. Pure.
+---@class diluvium.byteslib
+bytes = {}
+
+---@param s string
+---@return string hex
+function bytes.tohex(s) end
+
+---@param hex string
+---@return string s
+function bytes.fromhex(hex) end
+
+---@param s string
+---@return string b64
+function bytes.tobase64(s) end
+
+---@param b64 string
+---@return string s
+function bytes.frombase64(b64) end
+
+---@param s string
+---@return string b64url
+function bytes.tobase64url(s) end
+
+---@param b64url string
+---@return string s
+function bytes.frombase64url(b64url) end
+
+---@param s string
+---@return string escaped
+function bytes.urlencode(s) end
+
+---@param escaped string
+---@return string s
+function bytes.urldecode(escaped) end
+
+-- ----------------------------------------------------------------- json --
+
+---A Lua value to JSON text and back. Pure, strict, bounded.
+---@class diluvium.jsonlib
+json = {}
+
+---@param value any
+---@return string text
+function json.encode(value) end
+
+---@param text string
+---@return any value
+function json.decode(text) end
+
+-- ----------------------------------------------------------------- time --
+
+---Calendar arithmetic on Unix epoch seconds, all UTC. Pure -- reading the
+---current time is `host.time()`, which answers in milliseconds.
+---@class diluvium.timelib
+time = {}
+
+---@param sec integer
+---@return string iso  # "YYYY-MM-DDThh:mm:ssZ"
+function time.iso(sec) end
+
+---@param iso string
+---@return integer sec
+function time.parse(iso) end
+
+---@param sec integer
+---@return {year: integer, month: integer, day: integer, hour: integer, min: integer, sec: integer, wday: integer, yday: integer}
+function time.fields(sec) end
+
+---@param fields {year: integer, month: integer?, day: integer?, hour: integer?, min: integer?, sec: integer?}
+---@return integer sec
+function time.of(fields) end
+
+-- ----------------------------------------------------------------- host --
+
+---Hostcalls without the hand-rolled queue pair (doc/Hostcall.md). Every
+---call is one connector round-trip; a non-`ok` status raises with the
+---connector's own sentence in the message, and the `try` forms return it
+---instead for a program that expects a denial. Which calls actually answer
+---is the deployment's business: the connector must be wired and the grant
+---(`host:sql/*`, `host:time`, ...) held, or the reply is `denied`.
+---@class diluvium.hostlib
+---@field sql diluvium.hostsql
+---@field crypto diluvium.hostcrypto
+host = {}
+
+---Wall-clock milliseconds from the `time` connector. (Calendar arithmetic
+---on the result is the pure `time` library's job.)
+---@return integer ms
+function host.time() end
+
+---Any connector call by name: `host.call("sql/exec", {sql = ...})`. The
+---typed wrappers below are this, spelled out; this form exists for a
+---connector the deployment wires that this runtime predates.
+---@param name string  # "prefix/op", or a bare name like "time"
+---@param args any?
+---@return any value
+function host.call(name, args) end
+
+---`host.call` without the raise: returns the reply's status instead.
+---@param name string
+---@param args any?
+---@return any? value
+---@return string status  # "ok", "denied", "error", "malformed", ...
+---@return string? detail # the connector's sentence, on non-ok
+function host.try(name, args) end
+
+---@class diluvium.hostsql
+local hostsql = {}
+
+---One writing statement (`host:sql/exec`; wired only when the deployment
+---grants write access). Parameters bind `?` markers in order; SQL NULL is
+---spelled NULL in the statement, not nil in the list.
+---@param sql string
+---@param ... boolean|number|string
+---@return {changes: integer, rowid: integer}
+function hostsql.exec(sql, ...) end
+
+---One reading statement (`host:sql/query`). Refuses writes.
+---@param sql string
+---@param ... boolean|number|string
+---@return {cols: string[], rows: any[][]}
+function hostsql.query(sql, ...) end
+
+---`exec` without the raise.
+---@param sql string
+---@param ... boolean|number|string
+---@return {changes: integer, rowid: integer}? value
+---@return string status
+---@return string? detail
+function hostsql.try_exec(sql, ...) end
+
+---`query` without the raise.
+---@param sql string
+---@param ... boolean|number|string
+---@return {cols: string[], rows: any[][]}? value
+---@return string status
+---@return string? detail
+function hostsql.try_query(sql, ...) end
+
+---@class diluvium.hostcrypto
+local hostcrypto = {}
+
+---SHA-256, as lowercase hex.
+---@param data string
+---@return string hex
+function hostcrypto.hash(data) end
+
+---HMAC-SHA256 under the host's derived key, as lowercase hex.
+---@param data string
+---@return string hex
+function hostcrypto.hmac(data) end
+
+---Host-quality randomness, as hex (two characters per byte).
+---@param nbytes integer?  # default is the host's (32)
+---@return string hex
+function hostcrypto.random(nbytes) end
+
+---An HS256 JWT. The host owns `iat` and `exp`: a guest-supplied expiry is
+---dropped and `ttl` (seconds, capped by the deployment) sets the real one.
+---@param claims table
+---@param ttl integer?  # default is the deployment's default_ttl
+---@return string token
+function hostcrypto.jwt_sign(claims, ttl) end
+
+---Verify an HS256 JWT. An invalid token is an *answer*, not an error:
+---`{valid = false, reason = ...}` arrives with status `ok` and no raise.
+---@param token string
+---@return {valid: boolean, claims: table?, reason: string?}
+function hostcrypto.jwt_verify(token) end

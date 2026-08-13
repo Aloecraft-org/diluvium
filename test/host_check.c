@@ -236,10 +236,10 @@ static void a_guest_calls_time_and_reads_the_reply (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_time.lua",
-    "local calls = queue.declare('host/calls', {cap = 4, exported = true})\n"
-    "local replies = queue.declare('host/replies', {cap = 4})\n"
-    "local log = queue.declare('log', {cap = 4, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local calls = queue.declare('host/calls', {capacity = 4, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 4})\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "queue.push(calls, {tok = 7, call = 'time'})\n"
     "local _, m, why = queue.wait({replies}, 5000)\n"
     "if why == 'ok' and m.tok == 7 and m.status == 'ok'\n"
@@ -281,10 +281,10 @@ static void the_grant_gates_and_the_refusals_name_themselves (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_gate.lua",
-    "local calls = queue.declare('host/calls', {cap = 8, exported = true})\n"
-    "local replies = queue.declare('host/replies', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local calls = queue.declare('host/calls', {capacity = 8, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "local verdict = {}\n"
     "-- a call outside the grant\n"
     "queue.push(calls, {tok = 1, call = 'time'})\n"
@@ -338,9 +338,9 @@ static void a_guest_wait_timeout_is_fired_by_the_host_clock (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_timeout.lua",
-    "local q = queue.declare('never', {cap = 1})\n"
-    "local log = queue.declare('log', {cap = 4, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local q = queue.declare('never', {capacity = 1})\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "local id, m, why = queue.wait({q}, 60)\n"
     "queue.push(log, why)\n"
     "queue.wait({park})\n");
@@ -378,10 +378,10 @@ static void sql_query_and_exec_split_along_the_grant (void) {
   dh_host h;
   char err[512], log[256];
   fixture("sup_sql.lua",
-    "local calls = queue.declare('host/calls', {cap = 8, exported = true})\n"
-    "local replies = queue.declare('host/replies', {cap = 8})\n"
-    "local log = queue.declare('log', {cap = 8, exported = true})\n"
-    "local park = queue.declare('park', {cap = 1})\n"
+    "local calls = queue.declare('host/calls', {capacity = 8, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
     "local function ask(req)\n"
     "  queue.push(calls, req)\n"
     "  local _, m = queue.wait({replies}, 5000)\n"
@@ -434,6 +434,69 @@ static void sql_query_and_exec_split_along_the_grant (void) {
   ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
      "create, insert with params, select back, a write refused under "
      "query's grant, and a second statement refused whole");
+  if (log[0] != '\0' && strcmp(log, "good") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** The same ground as the raw tests above, walked through the 'host' guest
+** library -- which is the point: this guest is what an ordinary program
+** looks like after build7. No queue pair, no tokens, no op-strings; a non-ok
+** status raises with the connector's sentence, and try_* hands a denial back
+** as a value where the program expects one. If this program stops reading
+** like an ordinary program, the library's API is wrong, not the test.
+*/
+static void the_host_library_speaks_hostcall (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[512];
+  fixture("sup_hostlib.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local okrun, why = pcall(function()\n"
+    "  assert(host.time() > 0, 'the clock answers in ms')\n"
+    "  host.sql.exec('CREATE TABLE t (a INTEGER, b TEXT)')\n"
+    "  local r = host.sql.exec('INSERT INTO t VALUES (?, ?)', 42, 'x')\n"
+    "  assert(r.changes == 1, 'insert reports its changes')\n"
+    "  local q = host.sql.query('SELECT a, b FROM t')\n"
+    "  assert(q.cols[1] == 'a' and q.rows[1][1] == 42\n"
+    "    and q.rows[1][2] == 'x', 'select round-trips')\n"
+    "  -- a write wearing query's grant: try_query returns the denial\n"
+    "  local v, st, detail = host.sql.try_query('DELETE FROM t')\n"
+    "  assert(v == nil and st == 'denied'\n"
+    "    and string.find(detail, 'sql/exec', 1, true), 'try hands back denials')\n"
+    "  -- outside the grant entirely: the default raises, naming the call\n"
+    "  local okc, e = pcall(host.crypto.hash, 'x')\n"
+    "  assert(okc == false\n"
+    "    and string.find(e, 'host.crypto.hash: denied:', 1, true),\n"
+    "    'a raise names the call and carries the refusal')\n"
+    "end)\n"
+    "if okrun then queue.push(log, 'good')\n"
+    "else queue.push(log, 'bad: ' .. tostring(why)) end\n"
+    "queue.wait({park})\n");
+  {
+    char cfgsrc[768];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_hostlib.lua',\n"
+             "  caps = { 'host:sql/*', 'host:time' },\n"
+             "  connectors = { time = true, sql = { path = '%s/hostlib.db',\n"
+             "    mode = 'readwrite', max_rows = 8 } } }\n", tmpdir, tmpdir);
+    fixture("hostlib.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/hostlib.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the hostlib deployment opens");
+      return;
+    }
+  }
+  ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
+     "an ordinary program: host.time, host.sql round-trip, a denial handed "
+     "back by try_query, a raise that names host.crypto.hash");
   if (log[0] != '\0' && strcmp(log, "good") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
@@ -666,8 +729,8 @@ static void a_request_becomes_a_message_and_a_message_an_answer (void) {
   size_t got = 0;
   int i, sent = 0;
   fixture("sup_http.lua",
-    "local inq = queue.declare('http_in', {cap = 8})\n"
-    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
     "while true do\n"
     "  local _, m, why = queue.wait({inq})\n"
     "  if why == 'ok' then\n"
@@ -778,8 +841,8 @@ static void the_listener_refuses_injection_and_smuggling (void) {
   dh_host h;
   char err[512], resp[2048];
   fixture("sup_evil.lua",
-    "local inq = queue.declare('http_in', {cap = 8})\n"
-    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
     "while true do\n"
     "  local _, m, why = queue.wait({inq})\n"
     "  if why == 'ok' then\n"
@@ -847,8 +910,8 @@ static void two_ports_pre_bound_route_by_token (void) {
   size_t ga = 0, gb = 0;
   int sa = 0, sb = 0;
   fixture("sup_two.lua",
-    "local inq = queue.declare('http_in', {cap = 8})\n"
-    "local outq = queue.declare('http_out', {cap = 8, exported = true})\n"
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
     "while true do\n"
     "  local _, m, why = queue.wait({inq})\n"
     "  if why == 'ok' then\n"
@@ -934,6 +997,7 @@ int main (void) {
   the_grant_gates_and_the_refusals_name_themselves();
   a_guest_wait_timeout_is_fired_by_the_host_clock();
   sql_query_and_exec_split_along_the_grant();
+  the_host_library_speaks_hostcall();
   sql_confinement_holds();
   crypto_signs_and_verifies_standard_jwts();
   a_request_becomes_a_message_and_a_message_an_answer();

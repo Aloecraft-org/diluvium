@@ -136,6 +136,7 @@
 #include "dbytes.c"
 #include "djson.c"
 #include "dtime.c"
+#include "dhostlib.c"
 #include "dshim.c"
 #include "dsnap.c"
 #include "dlibs.c"

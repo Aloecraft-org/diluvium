@@ -99,6 +99,7 @@ test_analysis|run||
 test_bytes|run||
 test_json|run||
 test_time|run||
+test_host|run||
 test_compound|run||
 test_defer|run||
 test_determinism|run||

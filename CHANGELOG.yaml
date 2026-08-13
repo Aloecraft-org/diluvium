@@ -56,6 +56,57 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "5.5.1_build7"
+    tag: v5.5.1_build7
+    date: null
+    status: unreleased
+    stable: false
+    mirror: false
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **In development.**
+
+      **The `host` guest library: a hostcall is a call.** Reaching a
+      connector used to take a hand-rolled queue pair, a token, and a
+      request map -- ceremony every program repeated and none designed. The
+      new `host` global owns all of it: `host.sql.exec(sql, ...)`,
+      `host.sql.query(sql, ...)`, `host.crypto.hash/hmac/random/jwt_sign/
+      jwt_verify`, `host.time()`, and `host.call(name, args)` for any
+      connector by name. A non-`ok` reply raises with the connector's own
+      sentence in the message; the `try_` forms (`host.sql.try_exec`,
+      `host.try`) hand the status back instead, so an expected denial stays
+      expressible. The queues remain the substrate and `doc/Hostcall.md`
+      remains the protocol -- the library multiplexes one lazily-declared
+      pair, correlates replies by token in any order, and is implemented as
+      a Lua chunk so a future `await` keyword changes its internals and no
+      program. LuaCATS definitions for every guest global (`queue`,
+      `msgpack`, `endpoint`, `bytes`, `json`, `time`, `host`) ship as
+      `types/guest.lua`, so an editor stops flagging them unknown.
+
+    upgrading: |
+      **Snapshots taken by 5.5.1_build6 and earlier are refused by this
+      build.** The `host` module table joins the permanents set, which
+      moves the permanents fingerprint the snapshot header carries -- the
+      same mechanism, and the same clean format-mismatch refusal, as
+      build6's own library additions. Nothing half-loads, and there is no
+      converter. `DILUVIUM_SNAP_FORMAT` and `DS_THREAD_VERSION` are
+      unchanged from build6; only the permanents list grew.
+
+      **Bytecode is unaffected.** `LUAC_FORMAT` stays 0x46; chunks compiled
+      by build6 load without recompiling.
+
+      **The `host` global is new.** A program that used `host` as a global
+      name of its own now shadows the library; guests that kept to locals
+      are unaffected, and the library is only present inside an instance,
+      as `queue` and `msgpack` are.
+
+      **`queue.declare`'s size option is `capacity`.** It always was; the
+      documented raw-hostcall idiom passed `cap`, which was silently
+      ignored, so those queues ran at the default 64. Programs following the
+      old example still work -- the option never did anything -- but the
+      examples now say `capacity`, and so should the code.
+
   - version: "5.5.1_build6"
     tag: v5.5.1_build6
     date: 2026-08-12

@@ -247,6 +247,42 @@ Seconds, not milliseconds — the unit `os.time` and a JWT's `exp` already speak
 and `time.parse` refuse an impossible date (Feb 29 in a common year, a month past
 12) rather than rolling it over.
 
+### Reaching the host: `host`
+
+Everything above is pure. The things only a host can do — the clock, a
+database, a signature under a key the guest must not hold — are **hostcalls**
+(`doc/Hostcall.md`): a request pushed to a queue, answered by whichever
+connector the deployment wired, gated by the capability grant. The `host`
+library is how a program makes one. It owns the queue pair, the tokens and the
+correlation, so a call is just a call:
+
+```lua
+host.sql.exec("INSERT INTO kv VALUES (?, ?)", "demo", json.encode(record))
+local rows = host.sql.query("SELECT v FROM kv WHERE k = ?", "demo").rows
+local tok  = host.crypto.jwt_sign({ sub = "u1" }, 60)
+local ms   = host.time()
+```
+
+A non-`ok` reply **raises**, with the connector's own sentence in the message —
+`host.sql.exec: denied: this program does not hold 'host:sql/exec'; ...` — which
+is the readable default: most programs cannot do anything with a refusal except
+stop and say why. A program that *expects* one keeps it expressible without
+`pcall`: every `sql` call has a `try_` form returning `value, status, detail`
+instead, and `host.try(name, args)` is the same escape for any call. Two shapes
+to know: `host.crypto.jwt_verify` never raises on a bad token, because
+`{valid = false, reason = "signature"}` is an *answer*, and `host.crypto.random`
+comes back as hex, two characters per byte. `host.call(name, args)` reaches any
+connector by name — the typed wrappers are exactly it, spelled out — so a
+deployment that wires a connector this runtime predates is not out of reach.
+
+What answers is the deployment's business twice over: the connector must be
+wired in the `*.host.lua` (§7) *and* the program must hold the grant
+(`host:sql/*`, `host:time`, ...), or the reply is `denied` — never an exception
+at declare time, never a dropped request. The queues underneath
+(`host/calls`/`host/replies`) remain the substrate and the protocol is still
+`doc/Hostcall.md`; a program that wants them raw can have them — the library
+looks a pre-declared pair up before declaring its own.
+
 ---
 
 ## 3. Queues
