@@ -167,6 +167,14 @@ same discussions want) — and if it is the second, the dispatch has to happen b
 
 ## 1a. Connectors in the JS host — SQLite, worked
 
+**Build7 note:** this section mirrors the sql connector *as build6 shipped
+it* — one configured `path`, `mode`, `max_rows`. Build7 changed that shape
+(`doc/BUILD7.md` §2): config grants a `scope` directory, calls carry
+`args.db`, and the keys are `access`/`create`/`max_result_rows`. A JS lab
+host tracking the current contract adds the `db`-name resolution under a
+scope; the mechanics below (prepare, authorize, bind, row cap) carry over
+unchanged.
+
 **Read, not run: the wasm module this needs is built in the wasi-sdk
 container, so none of the code below has executed here. The C connector it
 mirrors (`host/dhost_sql.c`) has, under `make host_check`, and the

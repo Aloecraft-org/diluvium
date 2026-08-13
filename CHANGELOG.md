@@ -10,11 +10,9 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
-## [5.5.1_build7] - unreleased (prerelease)
+## [5.5.1_build7] - 2026-08-13
 
 `v5.5.1_build7` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
-
-**In development.**
 
 **The `host` guest library: a hostcall is a call.** Reaching a
 connector used to take a hand-rolled queue pair, a token, and a
@@ -85,9 +83,10 @@ unchanged from build6; only the permanents list grew.
 by build6 load without recompiling.
 
 **The `host` global is new.** A program that used `host` as a global
-name of its own now shadows the library; guests that kept to locals
-are unaffected, and the library is only present inside an instance,
-as `queue` and `msgpack` are.
+name of its own now shadows the library; programs that kept to locals
+are unaffected. Like every guest library it is present in the CLI
+too, where a call fails loudly rather than answering -- nothing
+drains the queues there.
 
 **`queue.declare`'s size option is `capacity`.** It always was; the
 documented raw-hostcall idiom passed `cap`, which was silently

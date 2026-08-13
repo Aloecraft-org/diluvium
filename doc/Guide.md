@@ -211,7 +211,7 @@ own.
 edge that speaks JSON rather than a queue.
 
 ```lua
-json.encode({ ok = true, ids = {1, 2, 3} })   --> {"ok":true,"ids":[1,2,3]}
+json.encode({ ok = true, ids = {1, 2, 3} })   --> {"ids":[1,2,3],"ok":true}
 json.decode('{"n": 42, "xs": [1, null, 3]}')  --> { n = 42, xs = { 1, nil, 3 } }
 ```
 
@@ -444,7 +444,7 @@ That is the whole trick: a sender cannot tell an endpoint from a local queue, an
 not need to. Where the bytes actually go is the host's business.
 
 ```lua
-endpoint.status(handle)       -- "live" | "closed"; errors on a non-endpoint handle
+endpoint.status(handle)       -- "live" | "gone"; errors on a non-endpoint handle
 endpoint.is_endpoint(handle)  -- true/false. Takes a QUEUE HANDLE, not a reference
 ```
 
@@ -527,12 +527,6 @@ no way to widen, which is §9.3's rule applied to flags.
 What an instance gives you unconditionally is **isolation between instances**: separate
 `lua_State`s, separate heaps, a budget on each, and a kill that takes the subtree. That
 is what makes one-instance-per-client worth doing, and it holds regardless of the flags.
-
-`DV_FLAG_UNSAFE_DEBUG` hands back the whole `debug` library, for when the program is
-your own and you are debugging it. A snapshot does not cross either flag: the permanents
-fingerprint covers the module tables, so a sealed instance and an open one disagree and
-`dv_restore` refuses — a program captured holding `io.open` cannot wake somewhere there
-is none.
 
 **From a binding.** All three seal by default too, and all three expose the same escape
 hatches — a host that cannot set them has no way to run legacy code at all:
@@ -716,8 +710,8 @@ is no error to catch and work around.
 
 The **generic host** (`host/`, `make build_host`) runs a swarm from a supervisor
 program plus a typed `*.host.lua` configuration — the drive loop, the roster, the
-hostcall pump, and connectors for the clock, SQLite, crypto and an HTTP listener, all in
-one binary, so a deployment is data rather than C. `doc/Host.md` is its contract and
+hostcall pump, and connectors for the clock, SQLite, crypto, files, subprocesses
+and an HTTP listener, all in one binary, so a deployment is data rather than C. `doc/Host.md` is its contract and
 `host/dhost.c` the code. That is where a real deployment starts; write a host in C
 (above) only to embed the swarm in a larger program of your own.
 

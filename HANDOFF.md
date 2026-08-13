@@ -1,9 +1,14 @@
 # Build 7 handoff
 
-**Status: done.** Parts 1-4 of `doc/BUILD7.md` landed in 5.5.1_build7 and
-the capability suite (cap2-cap6) passes rewritten to the `host.*` surface;
-§5 of the plan holds what was deliberately not built. This file remains as
-the record of the operational facts the build was made with.
+**Status: done.** Parts 1-4 of `doc/BUILD7.md` landed in 5.5.1_build7 (on
+`claude/build7-capability-tests-co6io2`, not the assessment branch the
+table below names) and the capability suite (cap2-cap6) passes rewritten
+to the `host.*` surface; §5 of the plan holds what was deliberately not
+built. Everything below this line describes the tree as the build STARTED
+-- the raw idiom, the `path`/`mode`/`max_rows` config, "no headers today"
+-- and is kept as the record of the operational facts the build was made
+from. The current truths live in `doc/Guide.md`, `doc/Host.md`,
+`host/types/host.lua` and the changelog.
 
 You are picking up an in-flight effort. This file is your starting point; the
 full spec is **`doc/BUILD7.md`**. Read that first, then this for the operational

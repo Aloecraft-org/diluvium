@@ -21,8 +21,8 @@ The **generic host** (`host/`, `make build_host`) is the reference
 implementation of this protocol: one binary that drives a deployment from a
 supervisor program plus a typed `*.host.lua` configuration, so a deployment is
 data, not C. `host/dhost.c` is the core (construction, the drive loop, the
-roster, the hostcall pump); the listener, SQLite and crypto connectors live
-beside it. Read it as the worked example of the duties below.
+roster, the hostcall pump); the listener, SQLite, crypto, fs and exec
+connectors live beside it. Read it as the worked example of the duties below.
 
 ## The duties
 
@@ -158,10 +158,12 @@ own `.lua` files and are never inlined into it.
 
 The listener's message shapes, which are the other convention guests are
 written against: a completed request arrives on the configured queue
-(default `http_in`) as `{conn, method, path, body}`, and a response leaves
-on the reply queue (default `http_out`) as `{conn, status, body,
-content_type?}` — `conn` echoed verbatim, the hostcall token discipline
-applied to traffic. The port is topology and comes from this file, never
+(default `http_in`) as `{conn, method, path, body}` — plus a `headers` map
+when the deployment allowlists request headers (build7; lowercase names,
+always present once configured, so the shape is config's decision) — and a
+response leaves on the reply queue (default `http_out`) as `{conn, status,
+body, content_type?}` — `conn` echoed verbatim, the hostcall token
+discipline applied to traffic. The port is topology and comes from this file, never
 from a guest: a guest cannot read a socket, and a listener that hibernated
 with its program would be host state pretending otherwise.
 

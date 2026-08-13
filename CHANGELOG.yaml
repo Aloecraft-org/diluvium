@@ -58,15 +58,14 @@ repo: Aloecraft-org/diluvium
 releases:
   - version: "5.5.1_build7"
     tag: v5.5.1_build7
-    date: null
-    status: unreleased
-    stable: false
-    mirror: false
+    date: 2026-08-13
+    status: released
+    stable: true
+    mirror: true
+    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
-      **In development.**
-
       **The `host` guest library: a hostcall is a call.** Reaching a
       connector used to take a hand-rolled queue pair, a token, and a
       request map -- ceremony every program repeated and none designed. The
@@ -135,9 +134,10 @@ releases:
       by build6 load without recompiling.
 
       **The `host` global is new.** A program that used `host` as a global
-      name of its own now shadows the library; guests that kept to locals
-      are unaffected, and the library is only present inside an instance,
-      as `queue` and `msgpack` are.
+      name of its own now shadows the library; programs that kept to locals
+      are unaffected. Like every guest library it is present in the CLI
+      too, where a call fails loudly rather than answering -- nothing
+      drains the queues there.
 
       **`queue.declare`'s size option is `capacity`.** It always was; the
       documented raw-hostcall idiom passed `cap`, which was silently
@@ -159,7 +159,6 @@ releases:
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |

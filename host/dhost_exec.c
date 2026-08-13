@@ -24,8 +24,10 @@
 **     other cap in this host.
 **
 ** A nonzero exit is NOT an error: {status = 1} is the child's answer, and
-** the program reads it the way a shell script reads $?. ERROR is reserved
-** for the call itself failing (deadline, cap, no such program).
+** the program reads it the way a shell script reads $? -- a program that
+** does not exist included, which is {status = 127}, the shell's own
+** convention. ERROR is reserved for the call itself failing (the deadline,
+** an output cap, a malformed request).
 **
 ** One more honesty note, in the config's face rather than buried: the host
 ** answers hostcalls synchronously, so a running child stalls every guest
