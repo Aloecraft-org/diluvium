@@ -272,7 +272,7 @@ static void cfg_defaults (dh_config *c) {
   c->spawns_per_step = 4;
   c->hibernation = 1;
   c->nlisteners = 0;
-  c->sql.max_rows = 1024;
+  c->sql.max_result_rows = 1024;
 }
 
 /* Parse one listener block at 'idx' into 'l' (defaults already applied). The
@@ -325,7 +325,12 @@ int dh_config_load (const char *path, dh_config *out, char *err,
     "port", "bind", "queue", "reply_queue", "max_body", "deadline_ms",
     "max_conns", NULL
   };
-  static const char *const sql_keys[] = { "path", "mode", "max_rows", NULL };
+  /* 'path', 'mode' and 'max_rows' are build6's spellings, kept in the known
+     list so a migrating deployment gets a sentence about what replaced them
+     rather than a generic unknown-key refusal. */
+  static const char *const sql_keys[] = { "scope", "access", "create",
+                                          "max_result_rows", "path", "mode",
+                                          "max_rows", NULL };
   lua_State *L;
   int rc = -1;
   int64_t n;
@@ -528,31 +533,85 @@ int dh_config_load (const char *path, dh_config *out, char *err,
         lua_pop(L, 2);
         goto done;
       }
-      if (cfg_str(L, -1, "path", out->sql.path, sizeof(out->sql.path), 1,
+      /* The build6 keys, refused with directions rather than left to the
+         generic unknown-key sentence: the shape changed, not just a name. */
+      lua_getfield(L, -1, "path");
+      if (!lua_isnil(L, -1)) {
+        lua_pop(L, 3);
+        cfg_fail(err, errcap, "config.connectors.sql.path was replaced in "
+                              "build7: grant a directory with 'scope' and "
+                              "let the program name its database "
+                              "(host.sql.open)%s%s", "", "");
+        goto done;
+      }
+      lua_pop(L, 1);
+      lua_getfield(L, -1, "mode");
+      if (!lua_isnil(L, -1)) {
+        lua_pop(L, 3);
+        cfg_fail(err, errcap, "config.connectors.sql.mode was split in "
+                              "build7: 'access' (\"read\"/\"readwrite\") is "
+                              "the grant, 'create' the open-mode detail%s%s",
+                 "", "");
+        goto done;
+      }
+      lua_pop(L, 1);
+      lua_getfield(L, -1, "max_rows");
+      if (!lua_isnil(L, -1)) {
+        lua_pop(L, 3);
+        cfg_fail(err, errcap, "config.connectors.sql.max_rows was renamed in "
+                              "build7 to what it always was: "
+                              "'max_result_rows', a per-query cap%s%s",
+                 "", "");
+        goto done;
+      }
+      lua_pop(L, 1);
+      if (cfg_str(L, -1, "scope", out->sql.scope, sizeof(out->sql.scope), 1,
                   "config.connectors.sql", err, errcap) != 0) {
         lua_pop(L, 2);
         goto done;
       }
       out->sql.enabled = 1;
-      lua_getfield(L, -1, "mode");
+      lua_getfield(L, -1, "access");
       if (!lua_isnil(L, -1)) {
         const char *s = lua_tostring(L, -1);
         if (s == NULL || (strcmp(s, "read") != 0 &&
                           strcmp(s, "readwrite") != 0)) {
           lua_pop(L, 3);
-          cfg_fail(err, errcap, "config.connectors.sql.mode must be "
+          cfg_fail(err, errcap, "config.connectors.sql.access must be "
                                 "\"read\" or \"readwrite\"%s%s", "", "");
           goto done;
         }
         out->sql.readwrite = (strcmp(s, "readwrite") == 0);
       }
       lua_pop(L, 1);
-      n = out->sql.max_rows;
-      if (cfg_num(L, -1, "max_rows", &n, 1, 1000000,
+      /* Safe default: creation follows the write grant. Saying create=true
+         under a read grant is a contradiction (a read-only open cannot
+         create), so it is refused rather than half-honored. */
+      out->sql.create = out->sql.readwrite;
+      lua_getfield(L, -1, "create");
+      if (!lua_isnil(L, -1)) {
+        if (!lua_isboolean(L, -1)) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.sql.create must be a "
+                                "boolean%s%s", "", "");
+          goto done;
+        }
+        out->sql.create = lua_toboolean(L, -1);
+        if (out->sql.create && !out->sql.readwrite) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.sql.create needs access "
+                                "\"readwrite\": a read-only open cannot "
+                                "create a database%s%s", "", "");
+          goto done;
+        }
+      }
+      lua_pop(L, 1);
+      n = out->sql.max_result_rows;
+      if (cfg_num(L, -1, "max_result_rows", &n, 1, 1000000,
                   "config.connectors.sql", err, errcap) != 0) {
         lua_pop(L, 2); goto done;
       }
-      out->sql.max_rows = (long)n;
+      out->sql.max_result_rows = (long)n;
     }
     lua_pop(L, 1);
     lua_getfield(L, -1, "crypto");

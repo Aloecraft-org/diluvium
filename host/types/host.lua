@@ -63,12 +63,24 @@
 ---                                   # logic (default 10000)
 ---@field max_conns integer?          # table bound (default 64)
 
+---The sql connector grants a *scope*: a directory the deployment's programs
+---open databases within (`host.sql.open("name")` guest-side; `args.db` on
+---the wire). Which database is the program's business, so it is not named
+---here; a name that resolves outside the scope is denied. Every option but
+---`scope` is omittable with a safe default, and nothing is preallocated --
+---a database opens when a program first names it.
 ---@class diluvium.HostSql
----@field path string                 # the database file; required
----@field mode ("read"|"readwrite")?  # default "read"; "read" opens the file
----                                   # read-only and leaves sql/exec unwired
----@field max_rows integer?           # results past this REFUSE, never
----                                   # truncate (default 1024)
+---@field scope string                # the granted directory; required, must
+---                                   # exist
+---@field access ("read"|"readwrite")?  # the grant (default "read"); "read"
+---                                   # opens files read-only and leaves
+---                                   # sql/exec unwired
+---@field create boolean?             # may a named database be created?
+---                                   # needs access "readwrite", and
+---                                   # defaults to it
+---@field max_result_rows integer?    # per-QUERY result cap; past it the
+---                                   # result REFUSES, never truncates
+---                                   # (default 1024)
 
 ---The crypto connector answers host:crypto/random, /hash, /hmac, /jwt_sign
 ---and /jwt_verify. The signing key never leaves the host: exactly one of

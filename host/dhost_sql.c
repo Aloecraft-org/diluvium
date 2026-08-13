@@ -2,15 +2,29 @@
 ** dhost_sql.c
 ** The sql connector: the 'host:sql' capability family over the system SQLite.
 **
-** Two calls, split so the capability grammar can split with them:
+** The config grants a *scope* -- a directory -- and the program names the
+** database it wants within it, so which database is an application detail
+** living in the application. Two calls, split so the capability grammar can
+** split with them:
 **
-**   sql/query  {sql = "...", params = {...}}  -> {cols = {...}, rows = {{...}}}
-**   sql/exec   {sql = "...", params = {...}}  -> {changes = n, rowid = n}
+**   sql/query  {db = "name", sql = "...", params = {...}}
+**              -> {cols = {...}, rows = {{...}}}
+**   sql/exec   {db = "name", sql = "...", params = {...}}
+**              -> {changes = n, rowid = n}
+**
+** 'db' is a filename inside the granted scope, never a path: a separator, a
+** '.' or '..', or an embedded NUL is refused, and a name that resolves
+** (through a symlink) to somewhere outside the scope is DENIED, not
+** clamped. Handles open on first use and stay cached -- multiple databases
+** fall out for free, up to a small bound -- and nothing is preallocated: a
+** deployment that grants a scope pays for the databases its programs
+** actually name. Whether a missing name may be *created* is the config's
+** 'create' (an open-mode detail, defaulting to the write grant).
 **
 ** 'query' refuses a statement that writes -- 'sqlite3_stmt_readonly' answers
 ** after prepare, so the classification is SQLite's own rather than a regex --
-** and 'exec' exists only when the config says mode = "readwrite". So a grant
-** of 'host:sql/query' against a read-only deployment is exactly what it
+** and 'exec' exists only when the config grants access = "readwrite". So a
+** grant of 'host:sql/query' against a read deployment is exactly what it
 ** says, and the wildcard family grant on a readwrite one is the bigger
 ** thing it says.
 **
@@ -25,19 +39,39 @@
 ** database is outside the replay boundary.
 */
 
+#include <limits.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #include <sqlite3.h>
 
 #include "dmsgpack.h"
 #include "dhost.h"
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+/* Databases a deployment may have open at once. A bound, not a budget: the
+   cache never evicts, because closing a handle out from under the autocommit
+   discipline would be invisible state a guest cannot reason about. */
+#define DH_SQL_MAX_DBS 8
+
+typedef struct dh_sql_db {
+  char name[DH_NAME_MAX];
+  sqlite3 *db;
+} dh_sql_db;
 
 typedef struct dh_sql {
-  sqlite3 *db;
-  long max_rows;
+  char scope[PATH_MAX];                 /* realpath'd granted directory */
+  size_t scopelen;
+  long max_result_rows;
   int readwrite;
+  int create;
+  dh_sql_db dbs[DH_SQL_MAX_DBS];
+  int ndbs;
 } dh_sql;
 
 
@@ -46,9 +80,9 @@ typedef struct dh_sql {
 ** 'sqlite3_stmt_readonly' answers "does this modify the database", and a
 ** review found that is the wrong question for a sandbox: ATTACH, DETACH,
 ** BEGIN, COMMIT and SAVEPOINT all answer readonly=1, so the write-gate below
-** let them through -- and ATTACH escapes the one configured file (an
+** let them through -- and ATTACH escapes the scope's files (an
 ** arbitrary-file read, or write on a readwrite deployment), while BEGIN
-** leaves a transaction open across calls on the single shared handle, its
+** leaves a transaction open across calls on a shared handle, its
 ** locks and its state visible to every other guest. The write-gate answers
 ** "does it change data"; this answers "does it touch connection state or
 ** reach outside the file", which is the question confinement actually turns
@@ -88,6 +122,149 @@ static int arg_str (const unsigned char *args, size_t argslen,
   *p = t.p;
   *len = t.len;
   return 1;
+}
+
+/* Harden one just-opened handle. The discipline is per-connection state, so
+   every cached handle carries all of it. */
+static void harden (sqlite3 *db, dh_sql *s) {
+  sqlite3_busy_timeout(db, 2000);
+  /* SQL-level load_extension is off by default, but say so out loud: this
+     turns off both the SQL function and the C entry point, so the dlopen
+     path a stock libsqlite3.a links in is unreachable as well as
+     unauthorized. (The link-time 'dlopen in a static binary' warning is
+     about that path existing, not being taken; a static musl build does not
+     even warn, and to remove the symbol entirely one compiles SQLite with
+     -DSQLITE_OMIT_LOAD_EXTENSION.) */
+  sqlite3_db_config(db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, NULL);
+  sqlite3_set_authorizer(db, sql_authorizer, s);
+  /* Belt to the authorizer's braces: no ATTACH means no reaching another
+     file even if a future SQLite classified one differently. */
+  sqlite3_limit(db, SQLITE_LIMIT_ATTACHED, 0);
+}
+
+/*
+** args.db -> an open handle, or NULL with 'detail' filled and *status set.
+** The name is a filename within the scope: flat by construction (no
+** separators, no '.'/'..'), which kills traversal before resolution ever
+** runs; the realpath check afterwards is for the file itself being a
+** symlink out of the scope -- escape is DENIED, not clamped.
+*/
+static sqlite3 *db_for (dh_sql *s, const unsigned char *args, size_t argslen,
+                        char *detail, size_t detailcap,
+                        dh_call_status *status) {
+  const char *name = NULL;
+  size_t namelen = 0;
+  char path[PATH_MAX];
+  char resolved[PATH_MAX];
+  struct stat sb;
+  int exists;
+  int flags;
+  sqlite3 *db = NULL;
+  int i;
+
+  if (!arg_str(args, argslen, "db", &name, &namelen) || namelen == 0) {
+    snprintf(detail, detailcap, "a scoped sql deployment answers calls that "
+                                "name their database: args.db = \"name\" "
+                                "(host.sql.open picks it)");
+    *status = DH_CALL_ERROR;
+    return NULL;
+  }
+  if (namelen >= DH_NAME_MAX) {
+    snprintf(detail, detailcap, "the database name is longer than a name");
+    *status = DH_CALL_ERROR;
+    return NULL;
+  }
+  if (memchr(name, '\0', namelen) != NULL ||
+      memchr(name, '/', namelen) != NULL ||
+      memchr(name, '\\', namelen) != NULL ||
+      (name[0] == '.' && (namelen == 1 ||
+                          (namelen == 2 && name[1] == '.')))) {
+    snprintf(detail, detailcap, "the database name '%.*s' steps outside the "
+                                "granted scope; a name is a filename within "
+                                "it, not a path", (int)namelen, name);
+    *status = DH_CALL_DENIED;
+    return NULL;
+  }
+  for (i = 0; i < s->ndbs; i++) {
+    if (strlen(s->dbs[i].name) == namelen &&
+        memcmp(s->dbs[i].name, name, namelen) == 0)
+      return s->dbs[i].db;
+  }
+  if (s->ndbs >= DH_SQL_MAX_DBS) {
+    snprintf(detail, detailcap, "this deployment already has %d databases "
+                                "open, which is the host's bound", s->ndbs);
+    *status = DH_CALL_ERROR;
+    return NULL;
+  }
+  if (s->scopelen + 1 + namelen + 1 > sizeof(path)) {
+    snprintf(detail, detailcap, "the database name does not fit under the "
+                                "scope");
+    *status = DH_CALL_ERROR;
+    return NULL;
+  }
+  memcpy(path, s->scope, s->scopelen);
+  path[s->scopelen] = '/';
+  memcpy(path + s->scopelen + 1, name, namelen);
+  path[s->scopelen + 1 + namelen] = '\0';
+  exists = (stat(path, &sb) == 0);
+  if (exists) {
+    /* The file is there: resolve it and require the scope as a prefix, so a
+       symlink placed inside the scope cannot read a file outside it. */
+    if (realpath(path, resolved) == NULL ||
+        strncmp(resolved, s->scope, s->scopelen) != 0 ||
+        resolved[s->scopelen] != '/') {
+      snprintf(detail, detailcap, "the database name '%.*s' resolves outside "
+                                  "the granted scope", (int)namelen, name);
+      *status = DH_CALL_DENIED;
+      return NULL;
+    }
+  }
+  else if (!s->create) {
+    snprintf(detail, detailcap, "no database named '%.*s' in this "
+                                "deployment's scope, and creating one is not "
+                                "granted (config.connectors.sql.create)",
+             (int)namelen, name);
+    *status = DH_CALL_ERROR;
+    return NULL;
+  }
+  flags = s->readwrite ? (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
+                       : SQLITE_OPEN_READONLY;
+  if (sqlite3_open_v2(path, &db, flags, NULL) != SQLITE_OK) {
+    snprintf(detail, detailcap, "could not open '%.*s': %s",
+             (int)namelen, name,
+             (db != NULL) ? sqlite3_errmsg(db) : "no memory");
+    if (db != NULL) sqlite3_close(db);
+    *status = DH_CALL_ERROR;
+    return NULL;
+  }
+  harden(db, s);
+  memcpy(s->dbs[s->ndbs].name, name, namelen);
+  s->dbs[s->ndbs].name[namelen] = '\0';
+  s->dbs[s->ndbs].db = db;
+  s->ndbs++;
+  return db;
+}
+
+static void emit_row_value (dh_buf *value, sqlite3_stmt *st, int col) {
+  switch (sqlite3_column_type(st, col)) {
+    case SQLITE_INTEGER:
+      dh_int(value, (int64_t)sqlite3_column_int64(st, col));
+      break;
+    case SQLITE_FLOAT:
+      dh_double(value, sqlite3_column_double(st, col));
+      break;
+    case SQLITE_NULL:
+      dh_nil(value);
+      break;
+    default: {
+      /* TEXT and BLOB both: a Lua string is bytes, and the guest codec
+         reads str and bin alike, so str is the honest common carrier. */
+      const void *p = sqlite3_column_blob(st, col);
+      int n = sqlite3_column_bytes(st, col);
+      dh_lstr(value, (p != NULL) ? (const char *)p : "", (size_t)n);
+      break;
+    }
+  }
 }
 
 /* Bind the 'params' array. Returns 0 or fills 'detail'. The count must match
@@ -156,33 +333,12 @@ static int bind_params (sqlite3_stmt *st, const unsigned char *args,
   return 0;
 }
 
-static void emit_row_value (dh_buf *value, sqlite3_stmt *st, int col) {
-  switch (sqlite3_column_type(st, col)) {
-    case SQLITE_INTEGER:
-      dh_int(value, (int64_t)sqlite3_column_int64(st, col));
-      break;
-    case SQLITE_FLOAT:
-      dh_double(value, sqlite3_column_double(st, col));
-      break;
-    case SQLITE_NULL:
-      dh_nil(value);
-      break;
-    default: {
-      /* TEXT and BLOB both: a Lua string is bytes, and the guest codec
-         reads str and bin alike, so str is the honest common carrier. */
-      const void *p = sqlite3_column_blob(st, col);
-      int n = sqlite3_column_bytes(st, col);
-      dh_lstr(value, (p != NULL) ? (const char *)p : "", (size_t)n);
-      break;
-    }
-  }
-}
-
 static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
                                 const unsigned char *args, size_t argslen,
                                 dh_buf *value, char *detail,
                                 size_t detailcap) {
   dh_sql *s = (dh_sql *)ud;
+  sqlite3 *db;
   const char *sql = NULL;
   size_t sqllen = 0;
   char *zsql;
@@ -190,6 +346,7 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
   sqlite3_stmt *st = NULL;
   int is_exec;
   int rc;
+  dh_call_status dbstatus = DH_CALL_ERROR;
   (void)id;
 
   if (strcmp(call, "sql/query") == 0)
@@ -202,11 +359,14 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
     return DH_CALL_DENIED;
   }
   if (is_exec && !s->readwrite) {
-    snprintf(detail, detailcap, "this deployment's database is read-only "
-                                "(config mode \"read\"), so 'sql/exec' is "
-                                "not wired");
+    snprintf(detail, detailcap, "this deployment grants read access "
+                                "(config.connectors.sql.access \"read\"), so "
+                                "'sql/exec' is not wired");
     return DH_CALL_DENIED;
   }
+  db = db_for(s, args, argslen, detail, detailcap, &dbstatus);
+  if (db == NULL)
+    return dbstatus;
   if (!arg_str(args, argslen, "sql", &sql, &sqllen)) {
     snprintf(detail, detailcap, "args.sql must be the statement, as a string");
     return DH_CALL_ERROR;
@@ -232,10 +392,10 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
   }
   memcpy(zsql, sql, sqllen);
   zsql[sqllen] = '\0';
-  rc = sqlite3_prepare_v2(s->db, zsql, (int)sqllen + 1, &st, &tail);
+  rc = sqlite3_prepare_v2(db, zsql, (int)sqllen + 1, &st, &tail);
   if (rc != SQLITE_OK || st == NULL) {
     snprintf(detail, detailcap, "the statement would not prepare: %s",
-             sqlite3_errmsg(s->db));
+             sqlite3_errmsg(db));
     sqlite3_free(zsql);
     if (st != NULL) sqlite3_finalize(st);
     return DH_CALL_ERROR;
@@ -270,16 +430,16 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
     rc = sqlite3_step(st);
     if (rc != SQLITE_DONE && rc != SQLITE_ROW) {
       snprintf(detail, detailcap, "the statement failed: %s",
-               sqlite3_errmsg(s->db));
+               sqlite3_errmsg(db));
       sqlite3_finalize(st);
       return DH_CALL_ERROR;
     }
     sqlite3_finalize(st);
     dh_map(value, 2);
     dh_str(value, "changes");
-    dh_int(value, (int64_t)sqlite3_changes(s->db));
+    dh_int(value, (int64_t)sqlite3_changes(db));
     dh_str(value, "rowid");
-    dh_int(value, (int64_t)sqlite3_last_insert_rowid(s->db));
+    dh_int(value, (int64_t)sqlite3_last_insert_rowid(db));
     return DH_CALL_OK;
   }
 
@@ -298,16 +458,16 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
         break;
       if (rc != SQLITE_ROW) {
         snprintf(detail, detailcap, "the query failed mid-walk: %s",
-                 sqlite3_errmsg(s->db));
+                 sqlite3_errmsg(db));
         dh_buf_free(&rows);
         sqlite3_finalize(st);
         return DH_CALL_ERROR;
       }
-      if (++nrows > s->max_rows) {
+      if (++nrows > s->max_result_rows) {
         snprintf(detail, detailcap, "the result passed this deployment's "
                                     "row cap (%ld); refused rather than "
                                     "truncated -- page with LIMIT/OFFSET",
-                 s->max_rows);
+                 s->max_result_rows);
         dh_buf_free(&rows);
         sqlite3_finalize(st);
         return DH_CALL_ERROR;
@@ -332,41 +492,32 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
 }
 
 int dh_sql_open (dh_host *h, char *err, size_t errcap) {
-  dh_sql *s = (dh_sql *)sqlite3_malloc((int)sizeof(dh_sql));
-  int flags;
+  dh_sql *s;
+  struct stat sb;
+  char resolved[PATH_MAX];
+  /* The scope must exist and be a directory, resolved once here: a granted
+     place is a real place, and every later name check compares against this
+     canonical form. Nothing else is opened or created -- a scope grant
+     preallocates nothing. */
+  if (realpath(h->cfg.sql.scope, resolved) == NULL ||
+      stat(resolved, &sb) != 0 || !S_ISDIR(sb.st_mode)) {
+    snprintf(err, errcap, "config.connectors.sql.scope '%s' does not resolve "
+                          "to a directory", h->cfg.sql.scope);
+    return -1;
+  }
+  s = (dh_sql *)sqlite3_malloc((int)sizeof(dh_sql));
   if (s == NULL) {
     snprintf(err, errcap, "no memory for the sql connector");
     return -1;
   }
   memset(s, 0, sizeof(*s));
-  s->max_rows = h->cfg.sql.max_rows;
+  strncpy(s->scope, resolved, sizeof(s->scope) - 1);
+  s->scopelen = strlen(s->scope);
+  s->max_result_rows = h->cfg.sql.max_result_rows;
   s->readwrite = h->cfg.sql.readwrite;
-  flags = s->readwrite ? (SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE)
-                       : SQLITE_OPEN_READONLY;
-  if (sqlite3_open_v2(h->cfg.sql.path, &s->db, flags, NULL) != SQLITE_OK) {
-    snprintf(err, errcap, "could not open the database '%s': %s",
-             h->cfg.sql.path,
-             (s->db != NULL) ? sqlite3_errmsg(s->db) : "no memory");
-    if (s->db != NULL) sqlite3_close(s->db);
-    sqlite3_free(s);
-    return -1;
-  }
-  sqlite3_busy_timeout(s->db, 2000);
-  /* SQL-level load_extension is off by default, but say so out loud: this
-     turns off both the SQL function and the C entry point, so the dlopen
-     path a stock libsqlite3.a links in is unreachable as well as
-     unauthorized. (The link-time 'dlopen in a static binary' warning is
-     about that path existing, not being taken; a static musl build does not
-     even warn, and to remove the symbol entirely one compiles SQLite with
-     -DSQLITE_OMIT_LOAD_EXTENSION.) */
-  sqlite3_db_config(s->db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, 0, NULL);
-  sqlite3_set_authorizer(s->db, sql_authorizer, s);
-  /* Belt to the authorizer's braces: no ATTACH means no reaching another
-     file even if a future SQLite classified one differently. */
-  sqlite3_limit(s->db, SQLITE_LIMIT_ATTACHED, 0);
+  s->create = h->cfg.sql.create;
   if (dh_register(h, "sql", conn_sql, s) != 0) {
     snprintf(err, errcap, "could not register the sql connector");
-    sqlite3_close(s->db);
     sqlite3_free(s);
     return -1;
   }
@@ -376,9 +527,11 @@ int dh_sql_open (dh_host *h, char *err, size_t errcap) {
 
 void dh_sql_close (dh_host *h) {
   dh_sql *s = (dh_sql *)h->sqlctx;
+  int i;
   if (s == NULL)
     return;
-  sqlite3_close(s->db);
+  for (i = 0; i < s->ndbs; i++)
+    sqlite3_close(s->dbs[i].db);
   sqlite3_free(s);
   h->sqlctx = NULL;
 }

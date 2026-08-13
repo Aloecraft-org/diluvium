@@ -29,7 +29,6 @@ static const luaL_Reg diluvium_libs[] = {
   {"bytes", luaopen_dbytes},
   {"json", luaopen_djson},
   {"time", luaopen_dtime},
-  /* last: its chunk closes over the globals the rows above set */
   {"host", luaopen_dhostlib},
   {NULL, NULL}
 };

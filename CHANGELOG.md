@@ -19,19 +19,36 @@ Lua's rather than Diluvium's.
 **The `host` guest library: a hostcall is a call.** Reaching a
 connector used to take a hand-rolled queue pair, a token, and a
 request map -- ceremony every program repeated and none designed. The
-new `host` global owns all of it: `host.sql.exec(sql, ...)`,
-`host.sql.query(sql, ...)`, `host.crypto.hash/hmac/random/jwt_sign/
-jwt_verify`, `host.time()`, and `host.call(name, args)` for any
-connector by name. A non-`ok` reply raises with the connector's own
-sentence in the message; the `try_` forms (`host.sql.try_exec`,
-`host.try`) hand the status back instead, so an expected denial stays
-expressible. The queues remain the substrate and `doc/Hostcall.md`
-remains the protocol -- the library multiplexes one lazily-declared
-pair, correlates replies by token in any order, and is implemented as
-a Lua chunk so a future `await` keyword changes its internals and no
-program. LuaCATS definitions for every guest global (`queue`,
-`msgpack`, `endpoint`, `bytes`, `json`, `time`, `host`) ship as
-`types/guest.lua`, so an editor stops flagging them unknown.
+new `host` global owns all of it: `host.sql.open(name)` returning a
+database handle whose `exec`/`query` are plain calls,
+`host.crypto.hash/hmac/random/jwt_sign/jwt_verify`, `host.time()`,
+and `host.call(name, args)` for any connector by name. A non-`ok`
+reply raises with the connector's own sentence in the message; the
+`try_` forms (`db.try_exec`, `host.try`) hand the status back
+instead, so an expected denial stays expressible. The queues remain
+the substrate and `doc/Hostcall.md` remains the protocol -- the
+library multiplexes one lazily-declared pair, correlates replies by
+token in any order, and is implemented as a Lua chunk so a future
+`await` keyword changes its internals and no program. LuaCATS
+definitions for every guest global (`queue`, `msgpack`, `endpoint`,
+`bytes`, `json`, `time`, `host`) ship as `types/guest.lua`, so an
+editor stops flagging them unknown.
+
+**The sql config grants a scope, not an application detail.** A
+deployment used to name an exact database file (`path =
+"example.db"`), resolved against whatever directory the host happened
+to start in -- the config carrying the program's business, ambiguously.
+Now `connectors.sql` grants a **scope** (a directory, resolved once,
+canonically) and the program names its database inside it: `args.db`
+on the wire, `host.sql.open("name")` in a program. A name with a
+separator, a `.`/`..`, or one resolving (through a symlink) outside
+the scope is DENIED, never clamped; multiple databases fall out for
+free, opened on first use, nothing preallocated. The liars are
+renamed and split: `max_rows` is `max_result_rows` (it always was a
+per-query cap), and `mode`'s two jobs are `access`
+("read"/"readwrite" -- the grant, which wires or unwires `sql/exec`)
+and `create` (the open-mode detail, defaulting to the write grant).
+The old keys are refused with directions, not as anonymous typos.
 
 ### Upgrading
 
@@ -56,6 +73,14 @@ documented raw-hostcall idiom passed `cap`, which was silently
 ignored, so those queues ran at the default 64. Programs following the
 old example still work -- the option never did anything -- but the
 examples now say `capacity`, and so should the code.
+
+**The sql connector's config changed shape.** `path` gave way to
+`scope` (a directory; the program names its database within it),
+`mode` split into `access` and `create`, and `max_rows` is
+`max_result_rows`. A build6 config is refused with a sentence naming
+each replacement, and hostcalls now carry `args.db` -- raw-idiom
+programs add it; programs on the `host` library say
+`host.sql.open("name")` once and are done.
 
 
 ## [5.5.1_build6] - 2026-08-12

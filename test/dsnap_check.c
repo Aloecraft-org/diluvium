@@ -1483,8 +1483,12 @@ static void a_library_table_is_named_not_copied (lua_State *L) {
      "and 'host', a Lua-implemented module, is named not copied");
   lua_pop(L, 2);
   at(L, copy, "hf");
-  ok(lua_isfunction(L, -1),
-     "a held 'host.call' crosses by content, not refusal");
+  lua_getglobal(L, "host");
+  lua_getfield(L, -1, "call");
+  ok(lua_isfunction(L, -3) &&
+     lua_topointer(L, -3) != lua_topointer(L, -1),
+     "a held 'host.call' crosses by content: a working copy, not the "
+     "original and not a refusal");
   lua_settop(L, base);
 }
 

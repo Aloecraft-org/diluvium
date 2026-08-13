@@ -85,9 +85,12 @@ typedef struct dh_listener_cfg {
 
 typedef struct dh_sql_cfg {
   int enabled;
-  char path[DH_PATH_MAX];               /* the database file */
-  int readwrite;                        /* 0: host:sql/read only */
-  long max_rows;                        /* result cap; the fork bomb, in rows */
+  char scope[DH_PATH_MAX];              /* the granted directory; programs
+                                           name their databases within it */
+  int readwrite;                        /* access: 0 leaves sql/exec unwired */
+  int create;                           /* may a named database be created?
+                                           needs readwrite; defaults to it */
+  long max_result_rows;                 /* per-query result cap */
 } dh_sql_cfg;
 
 typedef struct dh_crypto_cfg {

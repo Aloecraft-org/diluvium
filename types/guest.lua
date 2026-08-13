@@ -248,19 +248,31 @@ function host.try(name, args) end
 ---@class diluvium.hostsql
 local hostsql = {}
 
+---Name a database inside the deployment's granted scope and get its handle.
+---The name is a filename, never a path -- a separator or a name resolving
+---outside the scope is denied host-side. Client-side sugar: the handle's
+---calls carry the name as `args.db`. Handle calls are DOT-calls
+---(`db.exec(...)`, not `db:exec(...)`).
+---@param name string
+---@return diluvium.hostdb db
+function hostsql.open(name) end
+
+---@class diluvium.hostdb
+local hostdb = {}
+
 ---One writing statement (`host:sql/exec`; wired only when the deployment
----grants write access). Parameters bind `?` markers in order; SQL NULL is
----spelled NULL in the statement, not nil in the list.
+---grants access "readwrite"). Parameters bind `?` markers in order; SQL
+---NULL is spelled NULL in the statement, not nil in the list.
 ---@param sql string
 ---@param ... boolean|number|string
 ---@return {changes: integer, rowid: integer}
-function hostsql.exec(sql, ...) end
+function hostdb.exec(sql, ...) end
 
 ---One reading statement (`host:sql/query`). Refuses writes.
 ---@param sql string
 ---@param ... boolean|number|string
 ---@return {cols: string[], rows: any[][]}
-function hostsql.query(sql, ...) end
+function hostdb.query(sql, ...) end
 
 ---`exec` without the raise.
 ---@param sql string
@@ -268,7 +280,7 @@ function hostsql.query(sql, ...) end
 ---@return {changes: integer, rowid: integer}? value
 ---@return string status
 ---@return string? detail
-function hostsql.try_exec(sql, ...) end
+function hostdb.try_exec(sql, ...) end
 
 ---`query` without the raise.
 ---@param sql string
@@ -276,7 +288,7 @@ function hostsql.try_exec(sql, ...) end
 ---@return {cols: string[], rows: any[][]}? value
 ---@return string status
 ---@return string? detail
-function hostsql.try_query(sql, ...) end
+function hostdb.try_query(sql, ...) end
 
 ---@class diluvium.hostcrypto
 local hostcrypto = {}

@@ -33,10 +33,11 @@ return {
       deadline_ms = 10000,       -- the host's own timeout, per connection
     },
     sql = {
-      path = "example.db",
-      mode = "read",             -- sql/exec stays unwired; the grant above
+      scope = "data",            -- a directory; the program names its
+                                 -- database inside it (host.sql.open)
+      access = "read",           -- sql/exec stays unwired; the grant above
                                  -- only names sql/query anyway
-      max_rows = 1024,
+      max_result_rows = 1024,
     },
   },
 }

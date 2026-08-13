@@ -257,11 +257,20 @@ library is how a program makes one. It owns the queue pair, the tokens and the
 correlation, so a call is just a call:
 
 ```lua
-host.sql.exec("INSERT INTO kv VALUES (?, ?)", "demo", json.encode(record))
-local rows = host.sql.query("SELECT v FROM kv WHERE k = ?", "demo").rows
+local db  = host.sql.open("kv.sqlite")   -- a name inside the granted scope
+db.exec("INSERT INTO kv VALUES (?, ?)", "demo", json.encode(record))
+local rows = db.query("SELECT v FROM kv WHERE k = ?", "demo").rows
 local tok  = host.crypto.jwt_sign({ sub = "u1" }, 60)
 local ms   = host.time()
 ```
+
+The deployment's config grants the sql connector a **scope** — a directory —
+and the program names the database it wants inside it, which is where an
+application detail belongs. `host.sql.open` is client-side sugar (the name
+rides in each call as `args.db`); a name with a separator in it, or one that
+resolves outside the scope, is denied, never clamped. Its calls are
+dot-calls — `db.exec(...)`, not `db:exec(...)` — and the colon mistake is
+caught with a message saying so.
 
 A non-`ok` reply **raises**, with the connector's own sentence in the message —
 `host.sql.exec: denied: this program does not hold 'host:sql/exec'; ...` — which

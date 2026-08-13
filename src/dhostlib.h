@@ -10,9 +10,11 @@
 ** pair, sizes it, allocates tokens, correlates replies, and turns a non-ok
 ** status into an error with the connector's own sentence in it:
 **
-**   host.sql.exec(sql, ...params)   -> {changes, rowid}     raises on non-ok
-**   host.sql.query(sql, ...params)  -> {cols, rows}         raises on non-ok
-**   host.sql.try_exec / try_query   -> value,'ok' | nil,status,detail
+**   host.sql.open(name)             -> db, the named database within the
+**                                      deployment's granted scope
+**   db.exec(sql, ...params)         -> {changes, rowid}     raises on non-ok
+**   db.query(sql, ...params)        -> {cols, rows}         raises on non-ok
+**   db.try_exec / db.try_query      -> value,'ok' | nil,status,detail
 **   host.crypto.hash / hmac (data)  -> hex string
 **   host.crypto.random(nbytes?)     -> hex string
 **   host.crypto.jwt_sign(claims, ttl?) -> token

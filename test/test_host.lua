@@ -22,8 +22,10 @@ end
 eq(type(host), "table", "host is a table")
 eq(type(host.sql), "table", "host.sql")
 eq(type(host.crypto), "table", "host.crypto")
+eq(type(host.sql.open), "function", "host.sql.open")
+local kv = host.sql.open("kv.sqlite")
 for _, f in ipairs({"exec", "query", "try_exec", "try_query"}) do
-    eq(type(host.sql[f]), "function", "host.sql." .. f)
+    eq(type(kv[f]), "function", "an opened db has " .. f)
 end
 for _, f in ipairs({"hash", "hmac", "random", "jwt_sign", "jwt_verify"}) do
     eq(type(host.crypto[f]), "function", "host.crypto." .. f)
@@ -35,7 +37,13 @@ eq(type(host.try), "function", "host.try")
 -- ---- the played host -------------------------------------------------
 
 local replies = queue.declare("host/replies", { capacity = 16 })
-local function answer(m) assert(queue.push(replies, m)) end
+-- the library allocates tokens from a high base, disjoint from the small
+-- integers a raw ask() uses; the played host answers in that space
+local T = 0x40000000
+local function answer(m)
+    if m.tok then m.tok = T + m.tok end
+    assert(queue.push(replies, m))
+end
 local calls  -- the library declares 'host/calls' on its first call
 local function sent()
     if not calls then calls = assert(queue.lookup("host/calls")) end
@@ -47,12 +55,13 @@ end
 -- ---- a call round-trips, and the request has the documented shape ----
 
 answer({ tok = 1, status = "ok", value = { changes = 1, rowid = 7 } })
-local r = host.sql.exec("INSERT INTO kv VALUES (?, ?)", "demo", 42)
+local r = kv.exec("INSERT INTO kv VALUES (?, ?)", "demo", 42)
 eq(r.changes, 1, "exec returns the connector's value")
 eq(r.rowid, 7, "exec value arrives whole")
 local req = sent()
-eq(req.tok, 1, "tokens start at 1")
+eq(req.tok, T + 1, "tokens count up from the library's base")
 eq(req.call, "sql/exec", "the call is named")
+eq(req.args.db, "kv.sqlite", "the opened name rides in args.db")
 eq(req.args.sql, "INSERT INTO kv VALUES (?, ?)", "sql rides in args.sql")
 eq(req.args.params[1], "demo", "first param")
 eq(req.args.params[2], 42, "second param")
@@ -60,14 +69,14 @@ eq(#req.args.params, 2, "params is exactly the varargs")
 
 answer({ tok = 2, status = "ok",
          value = { cols = { "v" }, rows = { { "x" } } } })
-r = host.sql.query("SELECT v FROM kv WHERE k = ?", "demo")
+r = kv.query("SELECT v FROM kv WHERE k = ?", "demo")
 eq(r.rows[1][1], "x", "query returns {cols, rows}")
 req = sent()
 eq(req.call, "sql/query", "query names sql/query")
 
 -- a call with no parameters sends no params at all
 answer({ tok = 3, status = "ok", value = { changes = 0, rowid = 0 } })
-host.sql.exec("CREATE TABLE t (a)")
+kv.exec("CREATE TABLE t (a)")
 req = sent()
 eq(req.args.params, nil, "no varargs, no params key")
 
@@ -75,7 +84,7 @@ eq(req.args.params, nil, "no varargs, no params key")
 
 answer({ tok = 4, status = "denied",
          detail = "this program does not hold 'host:sql/exec'" })
-local okc, err = pcall(host.sql.exec, "DELETE FROM kv")
+local okc, err = pcall(kv.exec, "DELETE FROM kv")
 eq(okc, false, "a denial raises")
 ok(err:find("host.sql.exec: denied: ", 1, true) ~= nil,
    "the error names the call and the status (got: " .. tostring(err) .. ")")
@@ -96,14 +105,14 @@ eq(req.args, nil, "and with no args")
 -- ---- try_*: the expected-denial path stays expressible ---------------
 
 answer({ tok = 6, status = "denied", detail = "outside the grant" })
-local v, st, detail = host.sql.try_exec("DELETE FROM kv")
+local v, st, detail = kv.try_exec("DELETE FROM kv")
 eq(v, nil, "try_exec: no value on denial")
 eq(st, "denied", "try_exec: the status comes back")
 eq(detail, "outside the grant", "try_exec: the detail comes back")
 sent()
 
 answer({ tok = 7, status = "ok", value = { changes = 1, rowid = 1 } })
-v, st = host.sql.try_exec("INSERT INTO t VALUES (1)")
+v, st = kv.try_exec("INSERT INTO t VALUES (1)")
 eq(v.changes, 1, "try_exec: the value on ok")
 eq(st, "ok", "try_exec: and the ok status")
 sent()
@@ -165,11 +174,37 @@ eq(req.args.n, 1, "host.try passes args through")
 
 -- ---- a nil parameter is refused before it can vanish -----------------
 
-okc, err = pcall(host.sql.exec, "INSERT INTO t VALUES (?, ?)", "a", nil, "c")
+okc, err = pcall(kv.exec, "INSERT INTO t VALUES (?, ?)", "a", nil, "c")
 eq(okc, false, "a nil param raises")
 ok(err:find("parameter 2 is nil", 1, true) ~= nil,
    "and the message names which (got: " .. tostring(err) .. ")")
 eq(queue.len(calls), 0, "refused before anything was sent")
+
+-- ---- a raise blames the program's own line ---------------------------
+-- The public functions reach the internals by proper tail call, so the
+-- error level must account for the elided frame: the position must be the
+-- line that called host.time, not that line's caller.
+
+answer({ tok = 17, status = "denied", detail = "no" })
+local atline = assert(load("host.time()", "=atline"))
+okc, err = pcall(atline)
+eq(okc, false, "the load'ed call raises")
+ok(err:find("atline:1:", 1, true) ~= nil,
+   "and the error is attributed to the calling line (got: " ..
+   tostring(err) .. ")")
+sent()
+
+-- ---- naming the database is the program's job ------------------------
+
+okc, err = pcall(host.sql.open)
+eq(okc, false, "open with no name raises")
+ok(err:find("name the database", 1, true) ~= nil,
+   "and says whose job naming is")
+okc, err = pcall(kv.exec, kv, "SELECT 1")  -- the db:exec(...) colon mistake
+eq(okc, false, "a colon-call is caught client-side")
+ok(err:find("dot%-call") ~= nil,
+   "and diagnosed as one (got: " .. tostring(err) .. ")")
+eq(queue.len(calls), 0, "nothing was sent for either")
 
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then os.exit(1) end

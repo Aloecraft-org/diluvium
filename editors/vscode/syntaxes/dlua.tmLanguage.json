@@ -239,7 +239,7 @@
       "name": "constant.language.dlua"
     },
     "support-library": {
-      "match": "\\b(queue|json|msgpack|endpoint|bytes|time|string|table|math|io|os|coroutine|utf8|debug|package)(?=[.:])",
+      "match": "\\b(queue|json|msgpack|endpoint|bytes|time|host|string|table|math|io|os|coroutine|utf8|debug|package)(?=[.:])",
       "name": "support.class.library.dlua"
     },
     "support-function": {

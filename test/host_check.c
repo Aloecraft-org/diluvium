@@ -175,11 +175,26 @@ static void a_config_is_typed_data_and_typos_are_refused (void) {
   ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0,
      "hibernation must be \"on\" or \"off\"");
 
-  p = fixture("nosqlpath.host.lua",
-    "return { supervisor = 's.lua', connectors = { sql = { mode = 'read' } } }\n");
+  p = fixture("noscope.host.lua",
+    "return { supervisor = 's.lua', connectors = { sql = { access = 'read' } } }\n");
   ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
-     strstr(err, "path") != NULL,
-     "a sql block without a database path is refused");
+     strstr(err, "scope") != NULL,
+     "a sql block without a granted scope is refused");
+
+  /* The build6 keys teach their replacements rather than reading as typos. */
+  p = fixture("oldsql.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  sql = { path = 'example.db' } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "scope") != NULL && strstr(err, "build7") != NULL,
+     "the old sql.path is refused with directions to 'scope'");
+
+  p = fixture("badcreate.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  sql = { scope = '.', access = 'read', create = true } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "readwrite") != NULL,
+     "create under a read grant is a contradiction, refused");
 
   /* One listen block, the back-compatible shape, is one listener. */
   p = fixture("one_listen.host.lua",
@@ -389,36 +404,44 @@ static void sql_query_and_exec_split_along_the_grant (void) {
     "end\n"
     "local v = {}\n"
     "local m = ask({tok = 1, call = 'sql/exec',\n"
-    "  args = {sql = 'CREATE TABLE t (a INTEGER, b TEXT)'}})\n"
+    "  args = {db = 'check.db', sql = 'CREATE TABLE t (a INTEGER, b TEXT)'}})\n"
     "v[1] = (m.status == 'ok')\n"
     "m = ask({tok = 2, call = 'sql/exec',\n"
-    "  args = {sql = 'INSERT INTO t VALUES (?, ?)', params = {42, 'x'}}})\n"
+    "  args = {db = 'check.db', sql = 'INSERT INTO t VALUES (?, ?)',\n"
+    "          params = {42, 'x'}}})\n"
     "v[2] = (m.status == 'ok' and m.value.changes == 1)\n"
     "m = ask({tok = 3, call = 'sql/query',\n"
-    "  args = {sql = 'SELECT a, b FROM t'}})\n"
+    "  args = {db = 'check.db', sql = 'SELECT a, b FROM t'}})\n"
     "v[3] = (m.status == 'ok' and m.value.cols[1] == 'a'\n"
     "  and m.value.rows[1][1] == 42 and m.value.rows[1][2] == 'x')\n"
     "-- a write wearing query's grant\n"
-    "m = ask({tok = 4, call = 'sql/query', args = {sql = 'DELETE FROM t'}})\n"
+    "m = ask({tok = 4, call = 'sql/query',\n"
+    "  args = {db = 'check.db', sql = 'DELETE FROM t'}})\n"
     "v[4] = (m.status == 'denied'\n"
     "  and string.find(m.detail, 'sql/exec', 1, true) ~= nil)\n"
     "-- two statements wearing one authorization\n"
     "m = ask({tok = 5, call = 'sql/query',\n"
-    "  args = {sql = 'SELECT 1; SELECT 2'}})\n"
+    "  args = {db = 'check.db', sql = 'SELECT 1; SELECT 2'}})\n"
     "v[5] = (m.status == 'error'\n"
     "  and string.find(m.detail, 'one statement', 1, true) ~= nil)\n"
-    "local all = v[1] and v[2] and v[3] and v[4] and v[5]\n"
+    "-- a call that names no database is told whose job naming is\n"
+    "m = ask({tok = 6, call = 'sql/query', args = {sql = 'SELECT 1'}})\n"
+    "v[6] = (m.status == 'error'\n"
+    "  and string.find(m.detail, 'name their database', 1, true) ~= nil)\n"
+    "local all = v[1] and v[2] and v[3] and v[4] and v[5] and v[6]\n"
     "if all then queue.push(log, 'good')\n"
     "else queue.push(log, 'bad: ' .. tostring(v[1]) .. tostring(v[2])\n"
-    "  .. tostring(v[3]) .. tostring(v[4]) .. tostring(v[5])) end\n"
+    "  .. tostring(v[3]) .. tostring(v[4]) .. tostring(v[5])\n"
+    "  .. tostring(v[6])) end\n"
     "queue.wait({park})\n");
   {
     char cfgsrc[768];
     snprintf(cfgsrc, sizeof(cfgsrc),
              "return { supervisor = '%s/sup_sql.lua',\n"
              "  caps = { 'host:sql/*' },\n"
-             "  connectors = { sql = { path = '%s/check.db',\n"
-             "    mode = 'readwrite', max_rows = 8 } } }\n", tmpdir, tmpdir);
+             "  connectors = { sql = { scope = '%s',\n"
+             "    access = 'readwrite', max_result_rows = 8 } } }\n",
+             tmpdir, tmpdir);
     fixture("sql.host.lua", cfgsrc);
   }
   {
@@ -433,7 +456,8 @@ static void sql_query_and_exec_split_along_the_grant (void) {
   }
   ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
      "create, insert with params, select back, a write refused under "
-     "query's grant, and a second statement refused whole");
+     "query's grant, a second statement refused whole, and a nameless "
+     "call told to name its database");
   if (log[0] != '\0' && strcmp(log, "good") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
@@ -456,16 +480,25 @@ static void the_host_library_speaks_hostcall (void) {
     "local park = queue.declare('park', {capacity = 1})\n"
     "local okrun, why = pcall(function()\n"
     "  assert(host.time() > 0, 'the clock answers in ms')\n"
-    "  host.sql.exec('CREATE TABLE t (a INTEGER, b TEXT)')\n"
-    "  local r = host.sql.exec('INSERT INTO t VALUES (?, ?)', 42, 'x')\n"
+    "  local db = host.sql.open('hostlib.db')\n"
+    "  db.exec('CREATE TABLE t (a INTEGER, b TEXT)')\n"
+    "  local r = db.exec('INSERT INTO t VALUES (?, ?)', 42, 'x')\n"
     "  assert(r.changes == 1, 'insert reports its changes')\n"
-    "  local q = host.sql.query('SELECT a, b FROM t')\n"
+    "  local q = db.query('SELECT a, b FROM t')\n"
     "  assert(q.cols[1] == 'a' and q.rows[1][1] == 42\n"
     "    and q.rows[1][2] == 'x', 'select round-trips')\n"
     "  -- a write wearing query's grant: try_query returns the denial\n"
-    "  local v, st, detail = host.sql.try_query('DELETE FROM t')\n"
+    "  local v, st, detail = db.try_query('DELETE FROM t')\n"
     "  assert(v == nil and st == 'denied'\n"
     "    and string.find(detail, 'sql/exec', 1, true), 'try hands back denials')\n"
+    "  -- a second database in the same scope is its own file\n"
+    "  local other = host.sql.open('other.db')\n"
+    "  local v2, st2 = other.try_query('SELECT a FROM t')\n"
+    "  assert(v2 == nil and st2 == 'error', 'databases in a scope isolate')\n"
+    "  -- a name that is a path is an escape, denied not clamped\n"
+    "  local v3, st3, d3 = host.sql.open('../escape.db').try_query('SELECT 1')\n"
+    "  assert(v3 == nil and st3 == 'denied'\n"
+    "    and string.find(d3, 'scope', 1, true), 'an escaping name is denied')\n"
     "  -- outside the grant entirely: the default raises, naming the call\n"
     "  local okc, e = pcall(host.crypto.hash, 'x')\n"
     "  assert(okc == false\n"
@@ -480,8 +513,9 @@ static void the_host_library_speaks_hostcall (void) {
     snprintf(cfgsrc, sizeof(cfgsrc),
              "return { supervisor = '%s/sup_hostlib.lua',\n"
              "  caps = { 'host:sql/*', 'host:time' },\n"
-             "  connectors = { time = true, sql = { path = '%s/hostlib.db',\n"
-             "    mode = 'readwrite', max_rows = 8 } } }\n", tmpdir, tmpdir);
+             "  connectors = { time = true, sql = { scope = '%s',\n"
+             "    access = 'readwrite', max_result_rows = 8 } } }\n",
+             tmpdir, tmpdir);
     fixture("hostlib.host.lua", cfgsrc);
   }
   {
@@ -530,31 +564,39 @@ static void sql_confinement_holds (void) {
   }
   (void)sf;
   {
-    char src[1400];
+    char src[2200];
     snprintf(src, sizeof(src),
-      "local calls = queue.declare('host/calls', {cap=8, exported=true})\n"
-      "local replies = queue.declare('host/replies', {cap=8})\n"
-      "local log = queue.declare('log', {cap=8, exported=true})\n"
-      "local park = queue.declare('park', {cap=1})\n"
+      "local calls = queue.declare('host/calls', {capacity=8, exported=true})\n"
+      "local replies = queue.declare('host/replies', {capacity=8})\n"
+      "local log = queue.declare('log', {capacity=8, exported=true})\n"
+      "local park = queue.declare('park', {capacity=1})\n"
       "local function ask(req)\n"
       "  queue.push(calls, req); local _, m = queue.wait({replies}, 5000)\n"
       "  return m end\n"
       "local v = {}\n"
-      "v[1] = (ask({tok=1, call='sql/query',\n"
-      "  args={sql=\"ATTACH DATABASE '%s/secret.db' AS x\"}}).status ~= 'ok')\n"
+      "v[1] = (ask({tok=1, call='sql/query', args={db='main.db',\n"
+      "  sql=\"ATTACH DATABASE '%s/secret.db' AS x\"}}).status ~= 'ok')\n"
       "v[2] = (ask({tok=2, call='sql/query',\n"
-      "  args={sql='BEGIN'}}).status ~= 'ok')\n"
+      "  args={db='main.db', sql='BEGIN'}}).status ~= 'ok')\n"
       "v[3] = (ask({tok=3, call='sql/query',\n"
-      "  args={sql='PRAGMA foreign_keys=OFF'}}).status ~= 'ok')\n"
+      "  args={db='main.db', sql='PRAGMA foreign_keys=OFF'}}).status ~= 'ok')\n"
       "-- a select that under-supplies its parameters\n"
-      "v[4] = (ask({tok=4, call='sql/query',\n"
-      "  args={sql='SELECT a FROM t WHERE a = ?'}}).status ~= 'ok')\n"
+      "v[4] = (ask({tok=4, call='sql/query', args={db='main.db',\n"
+      "  sql='SELECT a FROM t WHERE a = ?'}}).status ~= 'ok')\n"
+      "-- the secret db exists IN scope, but a read grant does not create\n"
+      "-- and does open: reading a sibling file is legitimate under the\n"
+      "-- scope model, so confinement rests on scope choice -- prove the\n"
+      "-- ESCAPING name is what fails\n"
+      "v[5] = (ask({tok=5, call='sql/query', args={db='sub/secret.db',\n"
+      "  sql='SELECT v FROM s'}}).status == 'denied')\n"
       "-- and a plain read still works, so the gate is not just off\n"
-      "v[5] = (ask({tok=5, call='sql/query',\n"
-      "  args={sql='SELECT count(*) FROM t'}}).status == 'ok')\n"
-      "if v[1] and v[2] and v[3] and v[4] and v[5] then queue.push(log,'good')\n"
+      "v[6] = (ask({tok=6, call='sql/query',\n"
+      "  args={db='main.db', sql='SELECT count(*) FROM t'}}).status == 'ok')\n"
+      "if v[1] and v[2] and v[3] and v[4] and v[5] and v[6]\n"
+      "then queue.push(log,'good')\n"
       "else queue.push(log, 'bad: '..tostring(v[1])..tostring(v[2])\n"
-      "  ..tostring(v[3])..tostring(v[4])..tostring(v[5])) end\n"
+      "  ..tostring(v[3])..tostring(v[4])..tostring(v[5])\n"
+      "  ..tostring(v[6])) end\n"
       "queue.wait({park})\n", tmpdir);
     fixture("sup_conf.lua", src);
   }
@@ -563,8 +605,8 @@ static void sql_confinement_holds (void) {
     snprintf(cfgsrc, sizeof(cfgsrc),
              "return { supervisor = '%s/sup_conf.lua',\n"
              "  caps = { 'host:sql/query' },\n"
-             "  connectors = { sql = { path = '%s/main.db',\n"
-             "    mode = 'read' } } }\n", tmpdir, tmpdir);
+             "  connectors = { sql = { scope = '%s',\n"
+             "    access = 'read' } } }\n", tmpdir, tmpdir);
     fixture("conf.host.lua", cfgsrc);
   }
   {
@@ -578,8 +620,8 @@ static void sql_confinement_holds (void) {
     }
   }
   ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
-     "ATTACH, BEGIN, PRAGMA and an under-supplied param are each refused, "
-     "and a plain read still works");
+     "ATTACH, BEGIN, PRAGMA, an under-supplied param and an escaping name "
+     "are each refused, and a plain read still works");
   if (log[0] != '\0' && strcmp(log, "good") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
@@ -625,10 +667,10 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
   {
     char src[3600];
     snprintf(src, sizeof(src),
-      "local calls = queue.declare('host/calls', {cap=16, exported=true})\n"
-      "local replies = queue.declare('host/replies', {cap=16})\n"
-      "local log = queue.declare('log', {cap=16, exported=true})\n"
-      "local park = queue.declare('park', {cap=1})\n"
+      "local calls = queue.declare('host/calls', {capacity=16, exported=true})\n"
+      "local replies = queue.declare('host/replies', {capacity=16})\n"
+      "local log = queue.declare('log', {capacity=16, exported=true})\n"
+      "local park = queue.declare('park', {capacity=1})\n"
       "local function ask(r) queue.push(calls, r)\n"
       "  local _, m = queue.wait({replies}, 5000); return m end\n"
       "local v = {}\n"
