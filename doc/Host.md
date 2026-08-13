@@ -134,6 +134,12 @@ LuaCATS schema in `host/types/host.lua` (so an editor completes keys and
 catches typos ahead of time) and annotated examples in
 `host/example.host.lua`. The JS host takes the same shape as an object.
 
+**This form is a way-station.** `doc/Capabilities.md` is the direction: the
+separate config artifact gives way to one configuration shape an instance takes
+at every depth — the host being the root's parent — with grants expressed as
+capability / permission / scope and attenuation the only rule. What follows
+describes the config as it ships in build5/build6.
+
 Lua's syntax without Lua's power, and the power is removed by construction
 rather than convention: the host evaluates the file in an **empty
 environment**, text mode only — there is nothing to call, so the file can

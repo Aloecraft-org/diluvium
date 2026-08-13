@@ -1,169 +1,146 @@
-# 5.5.1_build7: file I/O through the boundary, and request headers
+# 5.5.1_build7: a capability grab-bag
 
-**Status:** plan, written 2026-08-13. Target: **under an hour, host-side only.**
-**Open on purpose:** the sections below close the two gaps we already know.
-Capability testing comes next and sets the rest; §4 is the slot for what it
-finds. Do not build past §1–§2 until that conversation happens.
+**Status:** plan, written 2026-08-13, revised as a grab-bag.
+**Shape:** host-side capability *mechanics*, snapshot-compatible, triaged after
+capability testing — we build the guts, then decide what actually ships once the
+container testing pass tells us what we need.
 
----
-
-## 0. Why this build, stated plainly
-
-File I/O is the textbook motivation for the hostcall boundary — a sealed guest
-cannot open a file, so it *asks* the host, which mediates by capability, confines
-the request, and logs the answer for replay. We built the connectors *around*
-that shape — `time`, `crypto`, `sql`, `listen` — and never built the file
-connector itself. So today a guest's only persistence is the `sql` connector
-against **one operator-pinned database** (`connectors.sql.path`, chosen in the
-`.host.lua` config, invisible to the guest): a narrow SQL interface, not file
-I/O. That was specified early and slipped because it wasn't written down.
-
-The second gap is smaller and already filed: the listener packs
-`{conn, method, path, body}` with **no headers**, so `Authorization` never
-reaches a guest (`doc/LAB-PLAN.md` upstream ask #2, worked around in the
-discofetch notebook with a `?auth=`/`body.auth` stopgap).
-
-This build closes both.
-
-## 1. The enabling property that makes an hour realistic
-
-**Both changes are host-side (`host/`), not runtime.** Neither adds a guest
-global, a C function reachable from a program, or a permanent — so the
-**permanents fingerprint does not move**, and a build6 snapshot restores on
-build7 unchanged. `DILUVIUM_SNAP_FORMAT`, `DS_THREAD_VERSION` and `LUAC_FORMAT`
-all stay put. No snapshot-format work, no fingerprint churn, no
-version-boundary upgrading notes — the opposite of build6, which moved the
-fingerprint when `bytes`/`json`/`time` joined the permanents set.
-
-Both also follow patterns already in the tree, which is the other half of the
-hour: the file connector is `host/dhost_sql.c` with a different verb, and the
-headers change is a handful of lines in `host/dhost_http.c` where the headers
-are *already parsed*.
+This build implements *capabilities*; it does **not** touch how grants are
+*expressed*. The expression model — capability / permission / scope, one config
+shape at every depth, the end of `.host.lua` — is `doc/Capabilities.md`, a
+separate and larger effort. The guts built here (a jail, an executor, a header
+allowlist) survive that redesign unchanged, which is why building them now on the
+current plumbing is not throwaway.
 
 ---
 
-## 2. In scope
+## 1. The property that makes this cheap
 
-### 2.1 The file connector: `host:fs/*` — the headline
+Everything below is **host-side** (`host/`), not runtime. Nothing adds a guest
+global, a C function a program can reach, or a permanent — so the **permanents
+fingerprint does not move**, and a build6 snapshot restores on build7 unchanged.
+`DILUVIUM_SNAP_FORMAT`, `DS_THREAD_VERSION` and `LUAC_FORMAT` all stay put. No
+snapshot-format work, no upgrading notes — the opposite of build6.
 
-A new `host/dhost_fs.c`, structured exactly like `dhost_sql.c` (config parse →
-`dh_fs_open`/`dh_fs_close` → a `conn_fs` gated by `dvs_holds`). Calls, kept
-minimal on purpose:
+Each item also mirrors a pattern already in the tree, which is the other half of
+the speed: the file connector is `dhost_sql.c` with a different verb, `exec` is a
+naive subprocess wrapped in a timeout, and the header change is a few lines where
+the headers are already parsed.
+
+---
+
+## 2. The grab-bag
+
+Capability testing decides which of these ship and in what shape. They are listed
+because we have already identified them; none is committed until the testing pass
+weighs in.
+
+### 2.1 `fs` — file I/O, the connector we shipped every neighbour of but not
+
+`host/dhost_fs.c`, structured like `dhost_sql.c`. Minimal calls:
 
 ```
-fs/read  {path}                 -> the file's bytes (a string)     host:fs/read
-fs/write {path, data, append?}  -> {bytes = n}                     host:fs/write
+fs/read  {path}                 -> the bytes           host:fs/read
+fs/write {path, data, append?}  -> {bytes = n}         host:fs/write
 ```
 
-`fs/stat`, `fs/list`, `fs/remove`, `mkdir`, directory ops — **deferred to §4.**
-Read and write are the two that unblock everything and cost the least to confine.
+Confinement is the load-bearing part — the SQL authorizer lesson in a new domain:
 
-**Config** (`connectors.fs` in the `.host.lua`, typed in `host/types/host.lua`):
+- Resolve `path` under a configured `root`, **`realpath` the result and require
+  `root` as a prefix** (kills `..` traversal and symlink escape). Escape is
+  `DENIED`, not clamped.
+- Refuse an embedded NUL; cap both directions at `max_bytes` (a hostile read is a
+  memory DoS, a hostile write fills the disk).
+- `fs/write` exists only when `mode = "readwrite"`, so `host:fs/read` is exactly
+  and only read.
 
-```lua
-fs = {
-  root     = "/var/lib/app/files",  -- required: the jail; every path resolves under it
-  mode     = "read",                -- "read" (default) leaves fs/write unwired, like sql
-  max_bytes = 1048576,              -- refuse a read or write past this; the row-cap analogue
-}
+Replay: `fs/read` reply is logged and replayed; `fs/write` is an `sql/exec`-style
+side effect the pump's existing discipline already covers. From a permission
+view this is the *general* capability — the config must not care whether the path
+holds a SQLite file or a text file (`doc/Capabilities.md` §4).
+
+### 2.2 `exec` — the honest escape hatch
+
+`host/dhost_exec.c`. A naive subprocess pass-through is easy; the whole surface
+is *bounding* it, because the instruction budget cannot (a subprocess runs
+outside the VM). So:
+
+```
+exec/run {argv = {...}, stdin?, timeout_ms?, cwd?} -> {status, stdout, stderr}
 ```
 
-**Confinement is the load-bearing part**, and it is `sql`'s authorizer lesson in
-a different domain: the write-gate answers "does it change data," the jail
-answers "does it reach outside the one place it is allowed." Non-negotiable:
+- **Wall-clock timeout** (host-configured max, per-call ≤ it) and an **output
+  cap** — a runaway child is killed at the deadline, not counted against a budget
+  it escapes.
+- No shell by default: `argv` is a vector, not a string, so there is no shell
+  metacharacter surface unless the deployment explicitly wants `sh -c`.
+- Replay: the result arrives as a connector reply, logged and replayed like any
+  other — `exec` does not break replay, only the budget.
+- In the lab (JS host), the executor evaluates JavaScript rather than spawning a
+  shell — same `exec` capability, different executor, "can't tell hosts apart"
+  intact.
+- **Docs must say it plainly:** granting `exec` is leaving the sandbox
+  (`doc/Capabilities.md` §5).
 
-- Resolve the guest's `path` against `root`, then **`realpath` the result and
-  require `root` as a prefix** — this refuses `..` traversal *and* a symlink
-  that points outside. A path that escapes is `DENIED`, not clamped.
-- Refuse an embedded NUL (the `sql` connector's lesson: a NUL ends the string
-  early for one API and not another).
-- Refuse an absolute guest path, or resolve it strictly under `root` — pick one
-  and say which; refusing is simpler.
-- Cap both directions at `max_bytes` (a hostile `fs/read` of a huge file is a
-  memory DoS; a hostile write fills the disk).
-- `fs/write` exists only when `mode = "readwrite"`, so a grant of `host:fs/read`
-  is exactly and only that.
+### 2.3 Request headers — an allowlisted map on the listener
 
-**Replay**, stated in a code comment as `sql` does: an `fs/read` reply is in the
-message log, so a replay replays the bytes — it does not re-read the disk. An
-`fs/write` is a side effect *outside* the replay boundary, exactly like
-`sql/exec`; the pump's existing discipline (never drain a request you cannot
-answer, never re-run a stateful connector on retry) already covers it, so no new
-machinery.
-
-**Lab (JS host):** a mock `fsConnector(root)` over an in-memory or
-IndexedDB-backed map, same jail and same `max_bytes`, per `doc/LAB-PLAN.md`
-§W3 — a guest must not tell the hosts apart. Honest ceiling, same as `sql`: the
-JS mock enforces the *contract*, and its jail is a string check rather than a
-kernel one.
-
-**Test:** a `host_check.c` case in the established shape — a guest reads a
-seeded file, writes and reads back, a `..` escape is denied, a write under a
-`read` mode is denied, an oversized read is refused.
-
-### 2.2 HTTP request headers
-
-The listener already parses every header (`try_parse` walks the `phr_header`
-array for `Content-Length`). Forward an **allowlisted** subset into the message:
+The listener already parses every header; forward an allowlisted subset into the
+message:
 
 ```
 {conn, method, path, body, headers = { authorization = "...", ["content-type"] = "..." }}
 ```
 
-- **Config:** `connectors.listen.headers = {"authorization", "content-type"}` —
-  an allowlist of lower-cased names. Default empty; a guest sees a header only
-  because the deployment named it. Everything else is dropped — arbitrary
-  header pass-through is a smuggling and DoS surface, and the guest's view
-  should be the minimum it asked for.
-- **Bound** the count forwarded and each value's length (a header the LB should
-  have capped is still the LB's job, but the host does not hand a guest an
-  unbounded map).
-- Names lower-cased so a guest matches on one spelling.
-- **Lab:** the JS listener mock carries the same `headers` field.
-- **Test:** the injection/smuggling `host_check` case gains an assertion that a
-  non-allowlisted header does not appear and an allowlisted one does.
+Config `connectors.listen.headers = {"authorization", "content-type"}` — a
+lower-cased allowlist, empty by default; a guest sees a header only because the
+deployment named it. Bound the count and each value's length. Fixes
+`doc/LAB-PLAN.md` upstream ask #2 (the discofetch API's `Authorization`).
+
+### 2.4 Candidates surfaced but not specified
+
+Named so capability testing can pick them up, not built blind:
+
+- **`net`** — outbound HTTP/TCP as a connector (the counterpart to the inbound
+  listener), scoped by CIDR/host.
+- **`env`** — read allowlisted environment variables.
+- **`log`** — a host-side log sink vs. the existing exported-queue pattern.
+- Anything the container testing pass throws up.
+
+*(System time is already `host:time`. Nothing to do.)*
 
 ---
 
-## 3. The hour
+## 3. The hour, honestly
+
+`fs` + `headers` is close to the original one-hour build. `exec` roughly doubles
+it (the timeout/kill/output-cap plumbing, and the shape decision). So build7 is
+now **a few hours of mechanics**, not one — and that is the whole cost, because
+none of it touches the runtime or the snapshot format.
 
 | Step | Mirrors | ~ |
 |---|---|---|
-| `dhost_fs.c` + config block + register + types | `dhost_sql.c`, its config parse, `host/types/host.lua` | 30m |
-| listener `headers` (allowlist in `try_parse`/`deliver`, config) | `dhost_http.c` | 15m |
-| `host_check` cases (fs round-trip + confinement; a headers assertion) | existing host_check | 5m |
-| build7 changelog entry + `VERSION`/`.technoproj` bump; `consistency` green | build6 flip | 5m |
-
-The changelog entry is short and says the quiet part: **host-side only,
-snapshot-compatible with build6, no fingerprint move, `LUAC_FORMAT` unchanged.**
+| `dhost_fs.c` + config + register + types | `dhost_sql.c` | 40m |
+| `dhost_exec.c` + timeout/kill/output-cap | new | 60m |
+| listener `headers` allowlist + config | `dhost_http.c` | 15m |
+| `host_check` cases (fs jail, exec timeout, headers) | existing host_check | 20m |
+| changelog build7 (host-side, snapshot-compatible) + version bump | build6 flip | 10m |
 
 ---
 
-## 4. Deliberately open — for after capability testing
+## 4. Firmly out of build7
 
-Capability testing is the next conversation and it decides everything below.
-Listed so they stay decisions rather than drift, **not** so they ship in build7:
-
-- **`fs` breadth:** `stat` / `list` / `remove` / `mkdir` / `append`-only /
-  atomic replace? One `root` jail, or several named mounts? A per-guest subtree
-  keyed off capability (`host:fs/read:sessions/*`)?
-- **Is `fs` even the right shape, or does `sql` + blob columns cover the real
-  need?** Capability testing answers this before a line of `dhost_fs.c` is
-  written — do not build it speculatively.
-- **Response headers:** should a guest set arbitrary response headers, or is the
-  `content_type` field enough? (Same allowlist reasoning, other direction.)
-- **The rest of the textbook-hostcall audit:** environment variables? outbound
-  HTTP as a connector (the counterpart to the inbound listener)? a `log`
-  connector vs. the exported-queue pattern? subprocess — **never**, by the same
-  argument that seals `os`. Capability testing is exactly the exercise that
-  turns this list into a spec.
+The expression model (`doc/Capabilities.md`) in full: capability/permission/scope
+grammar, one config shape at every depth, config-in-the-program, the end of
+`.host.lua`. Also report signing / release-vs-debug reports, and runtime
+intra-instance code-path gating. Those change how grants are *said* and are a
+larger, separate build — build7 changes only what the host *can do*, on the
+current plumbing.
 
 ---
 
 ## 5. What build7 does not touch
 
-No runtime, no ABI, no snapshot format, no guest sandbox surface (no new
-globals; `io`/`os`/`package` stay sealed — file access arrives *only* through
-`host:fs/*`, which is the whole point). `LUAC_FORMAT` stays `0x46`. A build6
-snapshot restores on build7. The only new surface is two host-side connectors'
-worth of config and calls.
+No runtime, ABI, snapshot format, or guest sandbox surface — `io`/`os`/`package`
+stay sealed; file and process access arrive *only* through `host:fs/*` and
+`host:exec/*`, which is the point. `LUAC_FORMAT` stays `0x46`. A build6 snapshot
+restores on build7.
