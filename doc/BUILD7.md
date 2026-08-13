@@ -101,12 +101,35 @@ deployment named it. Bound the count and each value's length. Fixes
 Named so capability testing can pick them up, not built blind:
 
 - **`net`** — outbound HTTP/TCP as a connector (the counterpart to the inbound
-  listener), scoped by CIDR/host.
+  listener), scoped by CIDR/host. **Wanted by the capability-testing pass:** a
+  guest has no way to call an HTTP endpoint, so cap5 (ports+daemons) must test
+  the listener with an *external* client — nothing inside the swarm can hit the
+  port. `net` is what a guest-side tester needs.
 - **`env`** — read allowlisted environment variables.
 - **`log`** — a host-side log sink vs. the existing exported-queue pattern.
 - Anything the container testing pass throws up.
 
 *(System time is already `host:time`. Nothing to do.)*
+
+### 2.6 Surfaced by capability testing: two host gaps (not build7 items)
+
+Recorded here so they are not lost; both are larger than a connector and belong
+on the roadmap, not in this build.
+
+- **Inter-instance messaging is not wired in the generic host.** The swarm
+  (`src/dvs.c`) gives spawn / monitor / attenuate / budget / hibernate, but there
+  is no point-to-point channel between instances: no sibling-queue resolution, no
+  parent→child push (the only parent→child channel is the `code` string at
+  spawn), and `system/events`'s `spawned` carries an id, not an endpoint
+  reference. Endpoint references (the addressing type, `dendpoint.c`) are built
+  and unit-tested at the `dv_` ABI via `dv_endpoint_allow`, but the swarm never
+  mints or delivers them to guests. So swarm coordination today runs through a
+  shared connector (the SQLite DB in cap4). Closing it means wiring the endpoint
+  resolver through the swarm layer — real work, worth a design pass.
+- **The listener lands on the root only.** `http_in` is delivered to the root
+  instance, so the generic host cannot route a listener queue to a spawned child;
+  an API is served by the root program. Routing a connector queue to a non-root
+  instance is the same missing capability as the messaging gap above.
 
 ### 2.5 Distribution — the installer ships the CLI, not the host
 
