@@ -108,6 +108,34 @@ Named so capability testing can pick them up, not built blind:
 
 *(System time is already `host:time`. Nothing to do.)*
 
+### 2.5 Distribution — the installer ships the CLI, not the host
+
+Surfaced by the capability-testing pass and worth writing down before it is lost:
+`curl -fsSL https://diluvium.aloecraft.org/start | sh` installs **only the
+`diluvium` CLI** — the unsealed interpreter. The **generic host**
+(`diluvium-host`: connectors, listener, the driven swarm — everything the
+capability model actually lives in) is not a release asset and not on the
+installer's menu. A newcomer who follows the website, then reaches for `sql` or
+a swarm, gets a runtime that cannot do either and no signal as to why. That is a
+real onboarding cliff, not just a test-harness inconvenience.
+
+The static-musl host already builds (`make build_host_musl`, `host/Dockerfile.musl`)
+and is exactly the fetch1 deployment artifact — so the gap is purely
+*packaging*, not engineering:
+
+- **Publish `diluvium-host`** alongside the interpreter in `release.yml` (the
+  static-musl and glibc builds), with its own `SHA256SUMS` line.
+- **A flag on the installer** — `--host` / `--swarm` / `--full` — that also drops
+  `diluvium-host` (and a starter `deploy.host.lua`), so the website's one command
+  can yield the full runtime when asked. Default stays the lean CLI.
+- Until then the capability tests build the host from source in-image, which is
+  correct for a test but must not be what a *user* has to do.
+
+**Defer, but streamline soon.** No runtime or snapshot impact — pure release
+plumbing — so it can land in build7 or slip a build without cost. The point of
+recording it here is that the fix is packaging, the artifact already exists, and
+the current silent divergence is the thing to close.
+
 ---
 
 ## 3. The hour, honestly
