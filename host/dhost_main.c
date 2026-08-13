@@ -44,11 +44,13 @@ int main (int argc, char **argv) {
     else if (cfg.nlisteners > 1)
       snprintf(listening, sizeof(listening), ", listening on %d ports",
                (int)cfg.nlisteners);
-    fprintf(stderr, "diluvium-host: supervisor '%s' up%s%s%s%s\n",
+    fprintf(stderr, "diluvium-host: supervisor '%s' up%s%s%s%s%s%s\n",
             cfg.supervisor,
             listening,
             cfg.sql.enabled ? ", sql wired" : "",
             cfg.crypto.enabled ? ", crypto wired" : "",
+            cfg.fs.enabled ? ", fs wired" : "",
+            cfg.exec.enabled ? ", exec wired" : "",
             cfg.time_connector ? ", time wired" : "");
   }
   for (;;) {

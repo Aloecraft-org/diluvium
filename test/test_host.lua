@@ -30,6 +30,11 @@ end
 for _, f in ipairs({"hash", "hmac", "random", "jwt_sign", "jwt_verify"}) do
     eq(type(host.crypto[f]), "function", "host.crypto." .. f)
 end
+for _, f in ipairs({"read", "write", "try_read", "try_write"}) do
+    eq(type(host.fs[f]), "function", "host.fs." .. f)
+end
+eq(type(host.exec.run), "function", "host.exec.run")
+eq(type(host.exec.try_run), "function", "host.exec.try_run")
 eq(type(host.time), "function", "host.time")
 eq(type(host.call), "function", "host.call")
 eq(type(host.try), "function", "host.try")
@@ -162,9 +167,39 @@ eq(v.valid, false, "an invalid token is an answer, not an error")
 eq(v.reason, "signature", "with the reason")
 sent()
 
+-- ---- fs and exec: the wire shapes ------------------------------------
+
+answer({ tok = 16, status = "ok", value = "the bytes" })
+eq(host.fs.read("notes/a.txt"), "the bytes", "fs.read returns the bytes")
+req = sent()
+eq(req.call, "fs/read", "read names fs/read")
+eq(req.args.path, "notes/a.txt", "the path rides in args.path")
+
+answer({ tok = 17, status = "ok", value = { bytes = 5 } })
+local w = host.fs.write("out.txt", "12345", { append = true })
+eq(w.bytes, 5, "fs.write reports its bytes")
+req = sent()
+eq(req.args.data, "12345", "the data rides in args.data")
+eq(req.args.append, true, "and append when asked")
+
+answer({ tok = 18, status = "ok", value = { bytes = 1 } })
+host.fs.write("out.txt", "x")
+req = sent()
+eq(req.args.append, nil, "no opts, no append key")
+
+answer({ tok = 19, status = "ok",
+         value = { status = 0, stdout = "hi\n", stderr = "" } })
+local r = host.exec.run({ "echo", "hi" }, { timeout_ms = 500 })
+eq(r.status, 0, "exec.run returns the child's exit")
+eq(r.stdout, "hi\n", "and its stdout")
+req = sent()
+eq(req.call, "exec/run", "run names exec/run")
+eq(req.args.argv[1], "echo", "argv rides as a vector")
+eq(req.args.timeout_ms, 500, "with the call's own deadline")
+
 -- ---- host.try: the generic non-raising form --------------------------
 
-answer({ tok = 16, status = "error", detail = "it broke" })
+answer({ tok = 20, status = "error", detail = "it broke" })
 v, st, detail = host.try("frob/nicate", { n = 1 })
 eq(v, nil, "host.try: nil on error")
 eq(st, "error", "host.try: the status")
@@ -185,7 +220,7 @@ eq(queue.len(calls), 0, "refused before anything was sent")
 -- error level must account for the elided frame: the position must be the
 -- line that called host.time, not that line's caller.
 
-answer({ tok = 17, status = "denied", detail = "no" })
+answer({ tok = 21, status = "denied", detail = "no" })
 local atline = assert(load("host.time()", "=atline"))
 okc, err = pcall(atline)
 eq(okc, false, "the load'ed call raises")

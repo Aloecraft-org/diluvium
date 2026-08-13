@@ -1,5 +1,10 @@
 # Build 7 handoff
 
+**Status: done.** Parts 1-4 of `doc/BUILD7.md` landed in 5.5.1_build7 and
+the capability suite (cap2-cap6) passes rewritten to the `host.*` surface;
+§5 of the plan holds what was deliberately not built. This file remains as
+the record of the operational facts the build was made with.
+
 You are picking up an in-flight effort. This file is your starting point; the
 full spec is **`doc/BUILD7.md`**. Read that first, then this for the operational
 facts. Follow your own harness's git/commit conventions; the only fixed rules are

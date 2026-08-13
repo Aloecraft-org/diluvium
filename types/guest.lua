@@ -222,6 +222,8 @@ function time.of(fields) end
 ---@class diluvium.hostlib
 ---@field sql diluvium.hostsql
 ---@field crypto diluvium.hostcrypto
+---@field fs diluvium.hostfs
+---@field exec diluvium.hostexec
 host = {}
 
 ---Wall-clock milliseconds from the `time` connector. (Calendar arithmetic
@@ -289,6 +291,64 @@ function hostdb.try_exec(sql, ...) end
 ---@return string status
 ---@return string? detail
 function hostdb.try_query(sql, ...) end
+
+---@class diluvium.hostfs
+local hostfs = {}
+
+---Read a file inside the deployment's granted scope (`host:fs/read`). The
+---path is relative and may descend (`notes/a.txt`); `..`, absolute paths,
+---and anything resolving outside the scope are denied. Refuses past the
+---deployment's byte cap.
+---@param path string
+---@return string bytes
+function hostfs.read(path) end
+
+---Write a file inside the granted scope (`host:fs/write`; wired only under
+---access "readwrite"). Directories are not created on the way. Refuses
+---past the byte cap.
+---@param path string
+---@param data string
+---@param opts {append: boolean?}?
+---@return {bytes: integer}
+function hostfs.write(path, data, opts) end
+
+---`read` without the raise.
+---@param path string
+---@return string? bytes
+---@return string status
+---@return string? detail
+function hostfs.try_read(path) end
+
+---`write` without the raise.
+---@param path string
+---@param data string
+---@param opts {append: boolean?}?
+---@return {bytes: integer}? value
+---@return string status
+---@return string? detail
+function hostfs.try_write(path, data, opts) end
+
+---@class diluvium.hostexec
+local hostexec = {}
+
+---Run a subprocess (`host:exec/run`) -- the honest escape hatch: granting
+---it is leaving the sandbox. `argv` is a vector, so there is no shell
+---unless the program names one. A nonzero exit is an *answer*
+---(`{status = 1}`); the raise is for the call itself failing -- the
+---deadline (capped by the deployment's ceiling) or an output stream past
+---the byte cap, either of which kills the child.
+---@param argv string[]
+---@param opts {stdin: string?, timeout_ms: integer?, cwd: string?}?
+---@return {status: integer, stdout: string, stderr: string}
+function hostexec.run(argv, opts) end
+
+---`run` without the raise.
+---@param argv string[]
+---@param opts {stdin: string?, timeout_ms: integer?, cwd: string?}?
+---@return {status: integer, stdout: string, stderr: string}? value
+---@return string status
+---@return string? detail
+function hostexec.try_run(argv, opts) end
 
 ---@class diluvium.hostcrypto
 local hostcrypto = {}

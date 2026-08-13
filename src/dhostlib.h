@@ -20,6 +20,14 @@
 **   host.crypto.jwt_sign(claims, ttl?) -> token
 **   host.crypto.jwt_verify(token)   -> {valid, claims?|reason?}  (never raises
 **                                      on an invalid token: that is an answer)
+**   host.fs.read(path)              -> the bytes
+**   host.fs.write(path, data, opts?) -> {bytes = n}   (opts.append)
+**   host.fs.try_read / try_write    -> value,'ok' | nil,status,detail
+**   host.exec.run(argv, opts?)      -> {status, stdout, stderr}
+**                                      (opts.stdin/.timeout_ms/.cwd; a
+**                                      nonzero exit is an answer, not a
+**                                      raise -- the deadline and caps are)
+**   host.exec.try_run(argv, opts?)  -> value,'ok' | nil,status,detail
 **   host.time()                     -> wall-clock milliseconds
 **   host.call(name, args?)          -> value                raises on non-ok
 **   host.try(name, args?)           -> value,'ok' | nil,status,detail

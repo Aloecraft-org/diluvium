@@ -56,6 +56,11 @@ encoding, stated here so the two ship together:
 - The guest declares its request queue with `on_full = "reject"` — a host that
   stops draining must become a refusal the program can see, not a park. The
   reply queue is sized for the requests the program keeps outstanding.
+- The `host` guest library (build7) is the surface a program normally reaches
+  this protocol through; it allocates its tokens from `2^30` upward, so a
+  program that also pushes raw requests on the same pair keeps its own tokens
+  below that and the spaces never meet. One reply queue still cannot serve
+  two consumers *concurrently* — mix sequentially.
 - Which calls a guest may make is a capability question, resolved with the
   grammar the tree already has: a grant like `host:time` or `host:fs/*` covers
   `call` names the way `queue:work/*` covers queue names, attenuating through

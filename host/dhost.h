@@ -73,6 +73,9 @@ int dh_nil (dh_buf *b);
 #define CRYPTO_KEY_INLINE 256
 #define DH_MAX_LISTENERS 8
 
+#define DH_MAX_HDRS      8
+#define DH_HDR_NAME_MAX  64
+
 typedef struct dh_listener_cfg {
   int port;
   char bind_addr[DH_NAME_MAX];          /* default 127.0.0.1: the LB's side */
@@ -81,6 +84,10 @@ typedef struct dh_listener_cfg {
   long max_body;                        /* refuse bigger request bodies */
   long conn_deadline_ms;                /* the host-side timeout, per conn */
   int max_conns;
+  char headers[DH_MAX_HDRS][DH_HDR_NAME_MAX];  /* lowercased allowlist of
+                                           request headers forwarded to the
+                                           guest; empty = none (default) */
+  size_t nheaders;
 } dh_listener_cfg;
 
 typedef struct dh_sql_cfg {
@@ -102,6 +109,19 @@ typedef struct dh_crypto_cfg {
   long default_ttl;                     /* jwt_sign ttl when the call omits it */
 } dh_crypto_cfg;
 
+typedef struct dh_fs_cfg {
+  int enabled;
+  char scope[DH_PATH_MAX];              /* the granted directory */
+  int readwrite;                        /* access: 0 leaves fs/write unwired */
+  long max_bytes;                       /* cap on a read and on a write */
+} dh_fs_cfg;
+
+typedef struct dh_exec_cfg {
+  int enabled;
+  long max_timeout_ms;                  /* ceiling; a call may ask for less */
+  long max_output_bytes;                /* per stream, and on stdin */
+} dh_exec_cfg;
+
 typedef struct dh_config {
   char supervisor[DH_PATH_MAX];         /* required: the root program's file */
   uint32_t max_instances;
@@ -119,6 +139,8 @@ typedef struct dh_config {
   size_t nlisteners;                    /* 0 = no listener */
   dh_sql_cfg sql;                       /* connectors = { sql = {...} } */
   dh_crypto_cfg crypto;                 /* connectors = { crypto = {...} } */
+  dh_fs_cfg fs;                         /* connectors = { fs = {...} } */
+  dh_exec_cfg exec;                     /* connectors = { exec = {...} } */
 } dh_config;
 
 /* 0 on success. Nonzero leaves a sentence in 'err' saying which key and why
@@ -180,6 +202,8 @@ typedef struct dh_host {
   void *listener;                       /* the http connector's state, or NULL */
   void *sqlctx;                         /* the sql connector's state, or NULL */
   void *cryptoctx;                      /* the crypto connector's state, or NULL */
+  void *fsctx;                          /* the fs connector's state, or NULL */
+  void *execctx;                        /* the exec connector's state, or NULL */
 } dh_host;
 
 /* Roster entry -- also the per-instance ctx 'create' returns, which must be
@@ -233,5 +257,11 @@ void dh_sql_close (dh_host *h);
 
 int dh_crypto_open (dh_host *h, char *err, size_t errcap);
 void dh_crypto_close (dh_host *h);
+
+int dh_fs_open (dh_host *h, char *err, size_t errcap);
+void dh_fs_close (dh_host *h);
+
+int dh_exec_open (dh_host *h, char *err, size_t errcap);
+void dh_exec_close (dh_host *h);
 
 #endif

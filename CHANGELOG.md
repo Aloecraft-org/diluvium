@@ -50,6 +50,27 @@ per-query cap), and `mode`'s two jobs are `access`
 and `create` (the open-mode detail, defaulting to the write grant).
 The old keys are refused with directions, not as anonymous typos.
 
+**Three connector gaps filled, host-side.** The `fs` connector
+(`host:fs/read`, `host:fs/write`; `host.fs.read/write` in a program)
+works files inside a granted scope under the same discipline as sql
+-- a path may descend into existing structure, but `..`, absolute
+paths, and anything resolving (through a symlink) outside the scope
+are denied, both directions refuse past `max_bytes`, and nothing
+creates directories on the way. The `exec` connector
+(`host:exec/run`; `host.exec.run(argv, opts?)`) is the honest escape
+hatch, bounded because the instruction budget cannot reach a
+subprocess: argv is a vector so there is no shell unless the program
+names one, a wall-clock deadline (config ceiling, per-call at most
+that) kills a runaway child, each output stream refuses past its byte
+cap, and a nonzero exit is an answer, not an error -- granting exec
+is leaving the sandbox, and the docs say so. And the listener now
+forwards an **allowlisted subset of request headers**: config names
+lowercase header names (empty by default), matching values arrive as
+a `headers` map on each request message (present whenever an
+allowlist is configured, so the shape is the config's decision),
+repeats join per RFC 7230, and a value past the host's bound answers
+431 rather than truncating.
+
 ### Upgrading
 
 **Snapshots taken by 5.5.1_build6 and earlier are refused by this

@@ -206,9 +206,13 @@ static sqlite3 *db_for (dh_sql *s, const unsigned char *args, size_t argslen,
   path[s->scopelen] = '/';
   memcpy(path + s->scopelen + 1, name, namelen);
   path[s->scopelen + 1 + namelen] = '\0';
-  exists = (stat(path, &sb) == 0);
+  /* lstat, not stat: a DANGLING symlink fails stat, would look like a
+     creatable name, and sqlite's open would follow it and create the file
+     at the link's arbitrary target. lstat sees the link itself, and a link
+     whose target does not resolve back under the scope is an escape. */
+  exists = (lstat(path, &sb) == 0);
   if (exists) {
-    /* The file is there: resolve it and require the scope as a prefix, so a
+    /* The name is there: resolve it and require the scope as a prefix, so a
        symlink placed inside the scope cannot read a file outside it. */
     if (realpath(path, resolved) == NULL ||
         strncmp(resolved, s->scope, s->scopelen) != 0 ||
@@ -216,6 +220,12 @@ static sqlite3 *db_for (dh_sql *s, const unsigned char *args, size_t argslen,
       snprintf(detail, detailcap, "the database name '%.*s' resolves outside "
                                   "the granted scope", (int)namelen, name);
       *status = DH_CALL_DENIED;
+      return NULL;
+    }
+    if (stat(resolved, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+      snprintf(detail, detailcap, "'%.*s' is not a regular file",
+               (int)namelen, name);
+      *status = DH_CALL_ERROR;
       return NULL;
     }
   }

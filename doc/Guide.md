@@ -284,13 +284,27 @@ comes back as hex, two characters per byte. `host.call(name, args)` reaches any
 connector by name — the typed wrappers are exactly it, spelled out — so a
 deployment that wires a connector this runtime predates is not out of reach.
 
+Files and subprocesses follow the same grammar. `host.fs.read(path)` /
+`host.fs.write(path, data, {append=true}?)` work files inside a directory the
+deployment granted, exactly as `sql` works databases inside its scope — a
+path that says or resolves to outside it is denied, and both directions
+refuse past the deployment's byte cap. `host.exec.run(argv, opts?)` runs a
+subprocess: `argv` is a vector (a shell only if the program names one),
+`{status, stdout, stderr}` is the answer — a nonzero exit included; the
+raise is for the deadline or the output cap, either of which kills the
+child. Granting `exec` is leaving the sandbox (`doc/Capabilities.md` §5);
+the bounds are the deployment's, and they are the point.
+
 What answers is the deployment's business twice over: the connector must be
 wired in the `*.host.lua` (§7) *and* the program must hold the grant
 (`host:sql/*`, `host:time`, ...), or the reply is `denied` — never an exception
 at declare time, never a dropped request. The queues underneath
 (`host/calls`/`host/replies`) remain the substrate and the protocol is still
 `doc/Hostcall.md`; a program that wants them raw can have them — the library
-looks a pre-declared pair up before declaring its own.
+looks a pre-declared pair up before declaring its own, and allocates its
+tokens from `2^30` up so a program's own small integers never collide
+(sequential mixing only: one reply queue cannot serve two concurrent
+consumers).
 
 ---
 

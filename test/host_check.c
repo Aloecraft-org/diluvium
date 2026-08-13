@@ -18,6 +18,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <arpa/inet.h>
@@ -499,6 +500,11 @@ static void the_host_library_speaks_hostcall (void) {
     "  local v3, st3, d3 = host.sql.open('../escape.db').try_query('SELECT 1')\n"
     "  assert(v3 == nil and st3 == 'denied'\n"
     "    and string.find(d3, 'scope', 1, true), 'an escaping name is denied')\n"
+    "  -- a dangling symlink planted in the scope must not become a\n"
+    "  -- creatable name whose creation lands at the link's target\n"
+    "  local v4, st4 = host.sql.open('dangling.db').try_exec('CREATE TABLE d (a)')\n"
+    "  assert(v4 == nil and st4 == 'denied',\n"
+    "    'a dangling symlink is denied, not created through')\n"
     "  -- outside the grant entirely: the default raises, naming the call\n"
     "  local okc, e = pcall(host.crypto.hash, 'x')\n"
     "  assert(okc == false\n"
@@ -517,6 +523,14 @@ static void the_host_library_speaks_hostcall (void) {
              "    access = 'readwrite', max_result_rows = 8 } } }\n",
              tmpdir, tmpdir);
     fixture("hostlib.host.lua", cfgsrc);
+  }
+  {
+    /* The dangling symlink the guest's last sql check trips over: its
+       target is outside the scope and does not exist, so a stat-based
+       exists check would have called it creatable. */
+    char lp[512];
+    snprintf(lp, sizeof(lp), "%s/dangling.db", tmpdir);
+    (void)symlink("/nonexistent-target/held.db", lp);
   }
   {
     char path[512];
@@ -627,6 +641,164 @@ static void sql_confinement_holds (void) {
   dh_host_close(&h);
 }
 
+
+
+/* ------------------------------------------------------------- fs, exec */
+
+/*
+** The fs connector under the same scope discipline as sql: reads and writes
+** land inside the granted directory and nowhere else. A secret is planted
+** outside the scope and a symlink to it inside, so a successful escape
+** would be provable exfiltration; the byte cap and the no-structure rule
+** each refuse with their own sentence. All through the host library, which
+** is how a program will actually write it.
+*/
+static void fs_reads_and_writes_inside_its_scope (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[512];
+  char scopedir[256], outside[512], linkpath[512];
+  snprintf(scopedir, sizeof(scopedir), "%s/fs_scope", tmpdir);
+  mkdir(scopedir, 0700);
+  snprintf(outside, sizeof(outside), "%s/fs_secret.txt", tmpdir);
+  {
+    FILE *f = fopen(outside, "w");
+    if (f != NULL) { fputs("TOP-SECRET", f); fclose(f); }
+  }
+  snprintf(linkpath, sizeof(linkpath), "%s/leak.txt", scopedir);
+  (void)symlink(outside, linkpath);
+  {
+    /* A FIFO in the scope, reached through a symlink: opening it would
+       block the single-threaded host forever, so it must be refused by
+       target type before any open. */
+    char fifopath[512], fifolink[512];
+    snprintf(fifopath, sizeof(fifopath), "%s/pipe.fifo", scopedir);
+    (void)mkfifo(fifopath, 0600);
+    snprintf(fifolink, sizeof(fifolink), "%s/fifolink.txt", scopedir);
+    (void)symlink(fifopath, fifolink);
+  }
+  fixture("sup_fs.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local okrun, why = pcall(function()\n"
+    "  local w = host.fs.write('note.txt', 'hello, ')\n"
+    "  assert(w.bytes == 7, 'a write reports its bytes')\n"
+    "  host.fs.write('note.txt', 'scope', { append = true })\n"
+    "  assert(host.fs.read('note.txt') == 'hello, scope', 'append appends')\n"
+    "  local v, st = host.fs.try_read('../fs_secret.txt')\n"
+    "  assert(v == nil and st == 'denied', 'dot-dot is denied')\n"
+    "  v, st = host.fs.try_read('leak.txt')\n"
+    "  assert(v == nil and st == 'denied',\n"
+    "    'a symlink out of the scope is denied')\n"
+    "  v, st, d = host.fs.try_read('fifolink.txt')\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'regular', 1, true),\n"
+    "    'a symlink to a non-regular file is refused, not opened')\n"
+    "  local d\n"
+    "  v, st, d = host.fs.try_write('big.txt', string.rep('x', 65))\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'byte cap', 1, true), 'the write cap refuses')\n"
+    "  v, st = host.fs.try_read('absent.txt')\n"
+    "  assert(v == nil and st == 'error', 'a missing file is an error')\n"
+    "  v, st, d = host.fs.try_write('nodir/x.txt', 'y')\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'creates', 1, true),\n"
+    "    'structure is not created on the way')\n"
+    "end)\n"
+    "if okrun then queue.push(log, 'good')\n"
+    "else queue.push(log, 'bad: ' .. tostring(why)) end\n"
+    "queue.wait({park})\n");
+  {
+    char cfgsrc[768];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_fs.lua',\n"
+             "  caps = { 'host:fs/*' },\n"
+             "  connectors = { fs = { scope = '%s/fs_scope',\n"
+             "    access = 'readwrite', max_bytes = 64 } } }\n",
+             tmpdir, tmpdir);
+    fixture("fs.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/fs.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the fs deployment opens");
+      return;
+    }
+  }
+  ok(run_until_log(&h, log, sizeof(log), 200) && strcmp(log, "good") == 0,
+     "fs: write, append, read back; dot-dot and a symlink escape denied; "
+     "the byte cap and missing structure refuse");
+  if (log[0] != '\0' && strcmp(log, "good") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** exec, the honest escape hatch, bounded: argv is a vector (a shell only by
+** name), a nonzero exit is an answer, the deadline kills, the output cap
+** refuses, and a per-call timeout cannot pass the host's ceiling.
+*/
+static void exec_is_bounded_and_shell_free (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[512];
+  fixture("sup_exec.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local okrun, why = pcall(function()\n"
+    "  local r = host.exec.run({ 'echo', 'hi' })\n"
+    "  assert(r.status == 0 and r.stdout == 'hi\\n', 'echo echoes')\n"
+    "  r = host.exec.run({ 'sh', '-c', 'echo out; echo err 1>&2; exit 3' })\n"
+    "  assert(r.status == 3, 'a nonzero exit is an answer, not a raise')\n"
+    "  assert(r.stdout == 'out\\n' and r.stderr == 'err\\n',\n"
+    "    'the streams arrive separately')\n"
+    "  r = host.exec.run({ 'cat' }, { stdin = 'fed' })\n"
+    "  assert(r.stdout == 'fed', 'stdin reaches the child')\n"
+    "  local v, st, d = host.exec.try_run({ 'sleep', '5' },\n"
+    "                                     { timeout_ms = 200 })\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'deadline', 1, true), 'the deadline kills')\n"
+    "  v, st, d = host.exec.try_run({ 'true' }, { timeout_ms = 99999 })\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'ceiling', 1, true),\n"
+    "    'a call cannot ask past the ceiling')\n"
+    "  v, st, d = host.exec.try_run({ 'sh', '-c',\n"
+    "    'head -c 8192 /dev/zero' })\n"
+    "  assert(v == nil and st == 'error'\n"
+    "    and string.find(d, 'byte cap', 1, true), 'the output cap refuses')\n"
+    "end)\n"
+    "if okrun then queue.push(log, 'good')\n"
+    "else queue.push(log, 'bad: ' .. tostring(why)) end\n"
+    "queue.wait({park})\n");
+  {
+    char cfgsrc[512];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_exec.lua',\n"
+             "  caps = { 'host:exec/run' },\n"
+             "  connectors = { exec = { max_timeout_ms = 2000,\n"
+             "    max_output_bytes = 4096 } } }\n", tmpdir);
+    fixture("exec.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/exec.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the exec deployment opens");
+      return;
+    }
+  }
+  ok(run_until_log(&h, log, sizeof(log), 600) && strcmp(log, "good") == 0,
+     "exec: argv runs without a shell, exit and streams answer, the "
+     "deadline kills, the ceiling and output cap refuse");
+  if (log[0] != '\0' && strcmp(log, "good") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
 
 /* --------------------------------------------------------------- crypto */
 
@@ -942,6 +1114,75 @@ static void the_listener_refuses_injection_and_smuggling (void) {
 ** reach the connection its 'conn' token names and no other -- a token that
 ** is unique across listeners, not merely within one.
 */
+/*
+** Part 3.3: an allowlisted subset of request headers reaches the guest,
+** lowercased; repeats join per RFC 7230; everything else stays host-side.
+** With an allowlist configured the 'headers' map is always present, so the
+** message's shape is the config's decision, not the traffic's.
+*/
+static void the_listener_forwards_allowlisted_headers (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512];
+  fixture("sup_hdrs.lua",
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
+    "while true do\n"
+    "  local _, m, why = queue.wait({inq})\n"
+    "  if why == 'ok' then\n"
+    "    queue.push(outq, {conn = m.conn, status = 200,\n"
+    "      body = tostring(m.headers.authorization) .. '|' ..\n"
+    "             tostring(m.headers['x-thing']) .. '|' ..\n"
+    "             tostring(m.headers.cookie),\n"
+    "      content_type = 'text/plain'})\n"
+    "  end\n"
+    "end\n");
+  {
+    char cfgsrc[512];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_hdrs.lua',\n"
+             "  connectors = { listen = { port = 18478, deadline_ms = 3000,\n"
+             "    headers = { 'authorization', 'x-thing' } } } }\n", tmpdir);
+    fixture("hdrs.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/hdrs.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the headers deployment opens (is port 18478 free?)");
+      return;
+    }
+  }
+  {
+    static const char req[] =
+      "GET /h HTTP/1.1\r\nHost: check\r\n"
+      "Authorization: Bearer tok123\r\n"
+      "X-Thing: a\r\nX-THING: b\r\n"
+      "Cookie: secret=1\r\n\r\n";
+    char resp[2048];
+    size_t got = http_exchange(&h, 18478, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "Bearer tok123|a, b|nil") != NULL,
+       "allowlisted headers arrive lowercased, repeats joined, and an "
+       "unlisted one does not");
+    if (got > 0 && strstr(resp, "Bearer tok123|a, b|nil") == NULL)
+      printf("      (response was: %.160s)\n", resp);
+  }
+  {
+    /* Without any Authorization sent, the map is present and empty -- the
+       guest indexing it must not blow up on a shape that changed. */
+    static const char req[] = "GET /h HTTP/1.1\r\nHost: check\r\n\r\n";
+    char resp[2048];
+    size_t got = http_exchange(&h, 18478, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "nil|nil|nil") != NULL,
+       "with none sent the headers map is present and empty, same shape");
+  }
+  dh_host_close(&h);
+}
+
 static void two_ports_pre_bound_route_by_token (void) {
   dh_config cfg;
   dh_host h;
@@ -1041,10 +1282,13 @@ int main (void) {
   sql_query_and_exec_split_along_the_grant();
   the_host_library_speaks_hostcall();
   sql_confinement_holds();
+  fs_reads_and_writes_inside_its_scope();
+  exec_is_bounded_and_shell_free();
   crypto_signs_and_verifies_standard_jwts();
   a_request_becomes_a_message_and_a_message_an_answer();
   the_listener_refuses_injection_and_smuggling();
   two_ports_pre_bound_route_by_token();
+  the_listener_forwards_allowlisted_headers();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }

@@ -42,6 +42,9 @@
 ---@field listen (diluvium.HostListen|diluvium.HostListen[])?  # inbound HTTP
 ---@field sql diluvium.HostSql?                # SQLite, host-side
 ---@field crypto diluvium.HostCrypto?          # random/hash/hmac/JWT, host-side
+---@field fs diluvium.HostFs?                  # files within a granted scope
+---@field exec (diluvium.HostExec|boolean)?    # subprocesses: LEAVING THE
+---                                            # SANDBOX; true = defaults
 
 ---A listener, or an array of them. A v1 host binds at startup and never at
 ---runtime, so a deployment that will want several ports pre-binds the block
@@ -62,6 +65,12 @@
 ---@field deadline_ms integer?        # per-connection; the host's own timeout
 ---                                   # logic (default 10000)
 ---@field max_conns integer?          # table bound (default 64)
+---@field headers string[]?           # LOWERCASE allowlist of request headers
+---                                   # forwarded to the guest as a `headers`
+---                                   # map on each message; empty/omitted =
+---                                   # none (default). Up to 8; repeats in a
+---                                   # request join ", "; a value past the
+---                                   # host's bound answers 431
 
 ---The sql connector grants a *scope*: a directory the deployment's programs
 ---open databases within (`host.sql.open("name")` guest-side; `args.db` on
@@ -81,6 +90,36 @@
 ---@field max_result_rows integer?    # per-QUERY result cap; past it the
 ---                                   # result REFUSES, never truncates
 ---                                   # (default 1024)
+
+---The fs connector answers host:fs/read and host:fs/write with the same
+---scope discipline as sql: the deployment grants a directory, the program
+---names its file within it (`host.fs.read("notes/a.txt")`), and a path that
+---names or resolves outside the scope is denied. Unlike a database name a
+---path may descend into existing structure, but nothing here creates
+---directories. Both directions refuse past `max_bytes` rather than
+---truncate. `fs/write` is wired only under access "readwrite".
+---@class diluvium.HostFs
+---@field scope string                # the granted directory; required, must
+---                                   # exist
+---@field access ("read"|"readwrite")?  # default "read"; "read" leaves
+---                                   # fs/write unwired
+---@field max_bytes integer?          # cap on one read and one write
+---                                   # (default 1048576)
+
+---The exec connector answers host:exec/run: a subprocess, argv as a vector
+---(no shell unless the program names one), stdin fed, stdout/stderr
+---captured. GRANTING EXEC IS LEAVING THE SANDBOX -- the instruction budget
+---cannot reach a child -- so the bounds here are the whole point. Note the
+---host answers hostcalls synchronously: a running child stalls every guest
+---and the listener until it exits or hits the deadline. `exec = true` wires
+---it with the defaults.
+---@class diluvium.HostExec
+---@field max_timeout_ms integer?     # ceiling on a call's deadline; a child
+---                                   # still running is killed
+---                                   # (default 10000)
+---@field max_output_bytes integer?   # per stream, and on stdin; past it the
+---                                   # child is killed and the call refuses
+---                                   # (default 1048576)
 
 ---The crypto connector answers host:crypto/random, /hash, /hmac, /jwt_sign
 ---and /jwt_verify. The signing key never leaves the host: exactly one of
