@@ -28,6 +28,32 @@
 ---@field caps string[]?              # the root's ceiling; children attenuate
 ---@field budget diluvium.HostBudget? # the root's; 0/omitted means none
 ---@field connectors diluvium.HostConnectors?  # everything absent is OFF
+---@field plugins table<string, diluvium.HostPlugin>?  # capabilities that
+---                                       # live in another program
+
+---A plugin: a capability answered by a separate program, over a framed
+---msgpack channel it inherits as fd 3. The deployment names it and points at
+---its manifest; the manifest -- a self-contained `<name>.plugin.json` --
+---says what the program is and what it answers. The split is the point: the
+---manifest travels with the plugin and is its author's document, this block
+---is the operator's and says which plugins THIS deployment wires and how
+---hard it will lean on them.
+---
+---The table key becomes the first segment of every call the plugin answers,
+---so `plugins = { rest = ... }` answers `rest/get`, gated by `host:rest/get`
+---like every other hostcall. Unlike `exec`, a plugin call does not stall the
+---host: it is deferred and the swarm keeps running.
+---@class diluvium.HostPlugin
+---@field manifest string             # required; resolved against THIS file's
+---                                   # directory, not the host's cwd
+---@field max_inflight integer?       # requests written before waiting for a
+---                                   # reply (default: the manifest's, or 4).
+---                                   # Lowering it here is the operator
+---                                   # throttling a plugin they did not write
+---@field call_timeout_ms integer?    # host-side backstop per call (default
+---                                   # 30000). A plugin that never answers
+---                                   # has its call reclaimed at this moment,
+---                                   # so a guest gets a sentence not a hang
 
 ---@class diluvium.HostBudget
 ---@field instructions integer?      # lifetime VM instructions, not per-step

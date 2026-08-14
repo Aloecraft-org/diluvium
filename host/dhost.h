@@ -18,6 +18,7 @@
 #ifndef dhost_h
 #define dhost_h
 
+#include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -122,6 +123,54 @@ typedef struct dh_exec_cfg {
   long max_output_bytes;                /* per stream, and on stdin */
 } dh_exec_cfg;
 
+
+/* ----------------------------------------------------------------------
+** Plugins: a capability that lives in another program.
+**
+** The deployment names a plugin and points at its manifest; the manifest
+** -- a self-contained '<name>.plugin.json' -- says what the plugin is and
+** what it answers. The split is deliberate: the manifest is the plugin
+** author's document and travels with the plugin, the config is the
+** operator's and says which plugins this deployment wires and how hard it
+** will lean on them.
+**
+** The runtime reads only the flat metadata here. A capability's 'args' and
+** 'result' schemas are read past without being looked at: validation is the
+** plugin's job and the tooling's, and no JSON Schema validator belongs in a
+** host that has to stay small enough to static-link.
+** ---------------------------------------------------------------------- */
+
+#define DH_MAX_PLUGINS      8
+#define DH_MAX_PLUGIN_CAPS  32
+#define DH_CHECKSUM_MAX     96
+
+/* What to do with a call that was in flight when its instance hibernated.
+** The host-side pending state is not in the snapshot -- it cannot be, it
+** lives outside the sandbox -- so a wake has to decide, and the capability
+** is the only party that knows whether reissuing is safe. ERROR is the
+** default because it is the answer that is never silently wrong. */
+typedef enum dh_wake_policy {
+  DH_WAKE_ERROR = 0,
+  DH_WAKE_REISSUE,                      /* idempotent: ask again */
+  DH_WAKE_CACHED                        /* completed already: replay it */
+} dh_wake_policy;
+
+typedef struct dh_plugin_cap {
+  char name[DH_NAME_MAX];               /* "get"; the call is "<plugin>/get" */
+  dh_wake_policy wake;
+} dh_plugin_cap;
+
+typedef struct dh_plugin_cfg {
+  char name[DH_NAME_MAX];               /* the connector prefix: "rest" */
+  char manifest[DH_PATH_MAX];           /* resolved against the config file */
+  char exec[DH_PATH_MAX];               /* ABSOLUTE; execv, never execvp */
+  char checksum[DH_CHECKSUM_MAX];       /* logged at startup, not enforced */
+  long max_inflight;                    /* frames written before waiting */
+  long call_timeout_ms;                 /* host-side backstop, per call */
+  dh_plugin_cap caps[DH_MAX_PLUGIN_CAPS];
+  size_t ncaps;
+} dh_plugin_cfg;
+
 typedef struct dh_config {
   char supervisor[DH_PATH_MAX];         /* required: the root program's file */
   uint32_t max_instances;
@@ -141,7 +190,17 @@ typedef struct dh_config {
   dh_crypto_cfg crypto;                 /* connectors = { crypto = {...} } */
   dh_fs_cfg fs;                         /* connectors = { fs = {...} } */
   dh_exec_cfg exec;                     /* connectors = { exec = {...} } */
+  dh_plugin_cfg plugins[DH_MAX_PLUGINS];   /* plugins = { name = {...} } */
+  size_t nplugins;
+  int insecure_plugins;                 /* --insecure-plugins; see doc/BUILD8 */
 } dh_config;
+
+/* Read a '<name>.plugin.json' manifest into 'out', which the caller has
+   already filled with the deployment's own fields (name, manifest path, and
+   any max_inflight override). Manifest values that the config did not
+   override win; the config's overrides survive. 0 on success. */
+int dh_plugin_manifest_load (const char *path, dh_plugin_cfg *out,
+                             char *err, size_t errcap);
 
 /* 0 on success. Nonzero leaves a sentence in 'err' saying which key and why
    -- the config is the one interface a non-programmer touches, so its
@@ -252,6 +311,7 @@ typedef struct dh_host {
   void *cryptoctx;                      /* the crypto connector's state, or NULL */
   void *fsctx;                          /* the fs connector's state, or NULL */
   void *execctx;                        /* the exec connector's state, or NULL */
+  void *plugctx;                        /* the plugin channel's state, or NULL */
 } dh_host;
 
 /* Roster entry -- also the per-instance ctx 'create' returns, which must be
@@ -326,6 +386,11 @@ void dh_http_close (dh_host *h);
    write, enforce per-connection deadlines. 'timeout_ms' is how long poll may
    sleep when nothing is ready. */
 int dh_http_poll (dh_host *h, int timeout_ms);
+/* The same, but folding 'nextra' caller-owned descriptors into the single
+   poll() and returning their revents. This is how the plugin channel joins
+   the listener's wait instead of racing it for the sleep. */
+int dh_http_poll_with (dh_host *h, int timeout_ms, struct pollfd *extra,
+                       size_t nextra);
 
 /* Milliseconds until the earliest live connection deadline, or -1 when the
    listener holds none. Lets dh_host_poll_timeout bound a quiet-socket sleep
@@ -343,5 +408,34 @@ void dh_fs_close (dh_host *h);
 
 int dh_exec_open (dh_host *h, char *err, size_t errcap);
 void dh_exec_close (dh_host *h);
+
+/* ----------------------------------------------------------------------
+** The plugin channel (dhost_plugin.c).
+**
+** Spawns each configured plugin over a socketpair it inherits as fd 3, and
+** registers one deferring connector per plugin. Every call it takes goes
+** through the Part-1 ledger, so a plugin that is slow, wedged or dead
+** costs latency and never the host thread.
+** ---------------------------------------------------------------------- */
+
+int  dh_plug_open (dh_host *h, char *err, size_t errcap);
+void dh_plug_close (dh_host *h);
+
+/* Contribute channel descriptors to the host's single poll(), and act on
+   what came back. 'cap' bounds how many entries 'arm' may fill; it returns
+   how many it did. The two calls must bracket exactly one poll(). */
+size_t dh_plug_arm (dh_host *h, struct pollfd *fds, size_t cap);
+void   dh_plug_fire (dh_host *h, struct pollfd *fds, size_t n);
+
+/* Nonzero while any plugin still owes a reply, so a drained swarm with work
+   outstanding does not exit underneath it. */
+int dh_plug_busy (dh_host *h);
+
+/* Sleep until something happens or 'timeout_ms' elapses, in exactly one
+   place: the listener's sockets, the plugin channels and a plain timeout
+   are all the same wait. Build 8's whole claim is that nothing blocks the
+   shared thread, and that is only checkable if there is one place it
+   stops. */
+void dh_host_sleep (dh_host *h, int timeout_ms);
 
 #endif

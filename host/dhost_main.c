@@ -14,7 +14,6 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "dhost.h"
 
@@ -56,21 +55,14 @@ int main (int argc, char **argv) {
   for (;;) {
     int alive = dh_host_turn(&h);
     int timeout = dh_host_poll_timeout(&h);
-    if (!alive && h.listener == NULL)
+    /* A drained swarm still waits on a plugin that owes it an answer: the
+       instance that asked may be gone, but the plugin is a child of this
+       process and exiting out from under it would orphan the work. */
+    if (!alive && h.listener == NULL && !dh_plug_busy(&h))
       break;                           /* drained, and nothing can arrive */
-    if (h.listener != NULL) {
-      /* Bound the sleep so guest timeouts fire near their moment even when
-         the sockets are quiet. */
-      int t = (timeout < 0 || timeout > 100) ? 100 : timeout;
-      dh_http_poll(&h, t);
-    }
-    else {
-      struct timespec ts;
-      int t = (timeout < 0 || timeout > 50) ? 50 : timeout;
-      ts.tv_sec = t / 1000;
-      ts.tv_nsec = (long)(t % 1000) * 1000000;
-      nanosleep(&ts, NULL);
-    }
+    /* Bound the sleep so guest timeouts and the ledger's own backstops fire
+       near their moment even when every descriptor is quiet. */
+    dh_host_sleep(&h, (timeout < 0 || timeout > 100) ? 100 : timeout);
   }
   dh_host_close(&h);
   fprintf(stderr, "diluvium-host: the swarm drained; done\n");

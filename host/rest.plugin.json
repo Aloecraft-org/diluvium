@@ -1,0 +1,84 @@
+{
+  "$comment": [
+    "An example plugin manifest, and the shape doc/BUILD8.md section 6.2",
+    "specifies. It is the plugin author's document and travels with the",
+    "plugin; host/example.host.lua's `plugins` block is the operator's, and",
+    "says which plugins a deployment wires.",
+    "",
+    "The host reads only the flat metadata here: schema, plugin.exec,",
+    "plugin.checksum, plugin.transport, plugin.max_inflight, and per",
+    "capability its name and wake policy. `args`, `result` and `errors` are",
+    "read past without being looked at -- validation is the plugin's job and",
+    "the tooling's, and no JSON Schema validator belongs in a binary whose",
+    "point is to static-link onto a lean box. Keep them anyway: they are the",
+    "contract a plugin author writes against and a generator reads.",
+    "",
+    "Self-contained on purpose. There is no external $ref, because a plugin",
+    "load must never become a network fetch."
+  ],
+
+  "schema": 1,
+
+  "plugin": {
+    "name": "rest",
+    "exec": "/usr/local/libexec/diluvium-rest-plugin",
+    "checksum": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "transport": "socketpair",
+    "max_inflight": 8,
+    "call_timeout_ms": 15000
+  },
+
+  "capabilities": [
+    {
+      "name": "get",
+      "wake": "reissue",
+      "$comment": "reissue: a GET is idempotent, so an instance that hibernated mid-call can simply be asked again on wake.",
+      "args": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": { "type": "string" },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 120000 }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "integer" },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "body": {
+            "type": "string",
+            "contentEncoding": "base64",
+            "$comment": "The wire is msgpack and carries a real bin type; JSON Schema has none. Base64-in-string is the stated convention (BUILD8 section 6.1) so that each plugin does not invent its own."
+          }
+        }
+      },
+      "errors": ["dns", "tls", "timeout", "status", "too_large"]
+    },
+    {
+      "name": "post",
+      "wake": "error",
+      "$comment": "error: a POST is not safe to repeat, and the host cannot know whether the first one landed. The guest is told the call was lost and decides for itself.",
+      "args": {
+        "type": "object",
+        "required": ["url", "body"],
+        "properties": {
+          "url": { "type": "string" },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "body": { "type": "string", "contentEncoding": "base64" },
+          "timeout_ms": { "type": "integer", "minimum": 1, "maximum": 120000 }
+        }
+      },
+      "result": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "integer" },
+          "headers": { "type": "object", "additionalProperties": { "type": "string" } },
+          "body": { "type": "string", "contentEncoding": "base64" }
+        }
+      },
+      "errors": ["dns", "tls", "timeout", "status", "too_large"]
+    }
+  ]
+}

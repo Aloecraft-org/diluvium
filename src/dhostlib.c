@@ -238,8 +238,14 @@ static const char HOSTLIB_SRC[] =
   "  fs = fs,\n"
   "  exec = execlib,\n"
   "  time = function() return ask(\"time\") end,\n"
-  "  call = function(name, args) return ask(name, args) end,\n"
-  "  try = function(name, args) return try(name, args) end,\n"
+  "  -- The generic escape, and the one a plugin capability arrives\n"
+  "  -- through before any wrapper is generated for it. 'waitms' is\n"
+  "  -- forwarded because the library's own default is tuned for a\n"
+  "  -- connector answering out of local state, and a call that leaves\n"
+  "  -- the machine is not that: a REST round trip inheriting 10s by\n"
+  "  -- accident is a bug the call site cannot see.\n"
+  "  call = function(name, args, waitms) return ask(name, args, waitms) end,\n"
+  "  try = function(name, args, waitms) return try(name, args, waitms) end,\n"
   "}\n"
 ;
 

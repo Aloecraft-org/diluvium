@@ -1,9 +1,24 @@
 # 5.5.1_build8: nothing blocks the shared thread
 
-**Status:** plan, 2026-08-14. Written against the tree at `fd73209`
+**Status:** in progress, 2026-08-14. Written against the tree at `fd73209`
 (5.5.1_build7). Every claim below about existing code carries a `file:line`;
 they were checked, not remembered, because the whole shape of this build turns
 on how much is already here.
+
+**Landed so far:** Part 1 in full (the deferred reply, the ledger, the
+reply-queue accounting fix, the single sleep point) and Part 2 in full (the
+manifest, the `plugins` config block, socketpair spawn over fd 3, framing,
+the three error classes, `max_inflight`). `make host_check` is 54 checks / 0
+failed, including a real child process over a real socketpair, and the rest of
+the suite is unchanged: dvs 139, dsnap 159, dhash 252, dshim 102, dv 245,
+dtask 25, and the Lua suite at 51 passed / 3 skipped.
+
+**Not yet built, and not pretended:** Part 3 (generated wrappers — `host.call`
+carries the release without them), Part 4 (the wake policies are *declared* in
+the manifest and *validated* at load, and nothing consumes them yet), and Part
+5 (no REST plugin exists; `test/plugin_echo.c` is an echo fixture). Gates 7.6
+and 7.9 are consequently still red, and §7 is the list that keeps that
+honest.
 
 Build 7 made a hostcall *readable*. Build 8 makes it *concurrent*, and then
 makes it *extensible* — a capability can live in another program, on the far
@@ -399,9 +414,12 @@ lookup there is an injection surface with no upside (§6.1).
 Length-prefixed msgpack. A `uint32` big-endian byte count, then that many bytes
 of one msgpack map. Every frame carries:
 
-- `id` — request correlation, **the same id space as the pending table**, so a
-  frame id and a `tok` are the same integer and no translation table exists to
-  drift.
+- `id` — request correlation, a **host-global counter**, and deliberately not
+  the guest's `tok`. The plan this build came from proposed reusing `tok` so
+  that no translation table could drift; that is wrong, and the tree says why:
+  a `tok` is chosen by the guest and is unique only within its instance, so two
+  instances collide on their first call. The map from wire id back to
+  `(instance, tok)` is the plugin's in-flight table.
 - `target` — the capability name (`"get"`; the plugin knows its own prefix).
 - `version` — frame format version, `1`, present from v1 precisely because a
   format that gains a version byte later cannot be told from one that never had
@@ -542,6 +560,15 @@ limitation into a declared per-capability decision. It is also why `wake` is a
 required manifest field rather than an optional one: the default would be wrong
 for something.
 
+**Status: declared, not acted on.** The enum is in `dh_plugin_cap.wake`, the
+manifest loader requires it and refuses anything else by name, and
+`host/rest.plugin.json` shows both interesting answers (`get` is `reissue`,
+`post` is `error`, and the manifest says why beside each). No code reads the
+field yet. Recording the decision at the point the plugin author is thinking
+about it is worth doing first — the field is the hard part; consuming it is a
+branch in the wake path — but until that branch exists, gate 7.6 is red and
+this section describes a plan, not a behavior.
+
 ---
 
 ## 5. Part 5 — the REST plugin
@@ -572,8 +599,24 @@ same frame bodies. `bindings/js/` already holds a msgpack implementation
 (`bindings/js/src/msgpack.js`) and the WASI glue (`bindings/js/src/wasi.js`),
 so the JS side reuses the codec it already ships.
 
-That both bindings implement one manifest is the proof the manifest is a
-protocol and not a C header.
+Two facts to carry into that work rather than discover in it:
+
+- **Lab is not in this repository.** `doc/Lab.md` is a design brief and says so
+  itself; there is no `lab/` directory, no Worker and no `postMessage` anywhere
+  in the tree. What *is* here is the seam: `src/dvs_shim.c` declares
+  `js_host_create` / `js_host_destroy` / `js_host_drive` as `env` imports and
+  exports `dvsjs_new`, and `bindings/js/src/index.js` supplies that `env`.
+- **That seam has never executed.** `bindings/js/test/swarm.integration.mjs`
+  says as much in its own header, and CI runs only the instance integration
+  test. Running it once is a prerequisite for a Lab plugin, not a follow-up.
+
+And the reachable-URL sets will differ: a browser adds CORS, no control of the
+`Host` header, and no client certificates. Both bindings implement one manifest
+at the frame level; say so in the manifest rather than discovering it.
+
+That the fixture proving this — `test/plugin_echo.c` — includes **nothing** from
+this tree is the assertion that the manifest is a protocol and not a C header.
+If a plugin ever needs a Diluvium header, that has stopped being true.
 
 ### 5.3 WASI — optional, and honestly bounded
 
@@ -680,6 +723,38 @@ depend on **which plugins a deployment wires**, and two hosts with different
 plugin sets could never exchange a snapshot. The rule is not a convenience; it
 is what keeps a snapshot a property of the runtime rather than of the
 deployment.
+
+### 8.1 The sharp edge of that rule
+
+The stability is real and so is its cost, and the cost is worth stating
+plainly because it is silent. Since the fingerprint does not cover the `host`
+table's *shape*, a snapshot taken on a deployment that wires a plugin will
+**restore without complaint** on one that does not. `ds_hook_permanent` writes
+the name `host`, and the decoder resolves that name against the *restoring*
+runtime's own table (`src/dsnap.c:1113-1136`), erroring only if the name is
+absent — which it never is. Anything the guest stashed below the top level
+(`local get = host.rest.get`) is not a permanent, so it is content-copied: the
+restored instance can hold one deployment's wrapper beside another's `host`
+table, with no diagnostic anywhere.
+
+Three options were weighed, and the choice is deliberate:
+
+1. **Regenerate on restore** — what §3 plans. Keeps snapshots exchangeable
+   between deployments, which is the whole reason for the rule.
+2. **Name a per-deployment digest** via `diluvium_snap_addpermanent`
+   (`src/dsnap.c:1779`, worked example at `src/dv.c:290-291`). Turns the silent
+   divergence into a loud refusal — and makes the fingerprint a property of the
+   *deployment* rather than of the runtime, which kills gate 7.2 and stops a
+   build7 snapshot restoring at all.
+3. **Ship no wrappers.** `host.call` already reaches any connector; zero
+   snapshot exposure.
+
+**Take (1).** What makes it safe rather than merely convenient is §3's
+uniformity: the only per-capability datum in a generated wrapper is a name
+string, so a stale wrapper calling `host.call("rest/get")` on a host that does
+not wire `rest` is *denied by `dvs_holds`* — refused by name, never silently
+misrouted. Option (2) stays available as a one-line upgrade if that ever stops
+being true, which is why the manifest's checksum is logged from day one.
 
 If an implementation path appears to require a new permanent, stop and raise it.
 The same applies to the harder constraint above it: **no core-lua patches in

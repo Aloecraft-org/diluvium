@@ -514,6 +514,7 @@ dshim_check: _build_step0
 HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
   $(CURDIR)/host/dhost_sql.c $(CURDIR)/host/dhost_crypto.c \
   $(CURDIR)/host/dhost_fs.c $(CURDIR)/host/dhost_exec.c \
+  $(CURDIR)/host/dhost_plugin.c \
   $(CURDIR)/host/picohttpparser.c
 
 # No -DLUA_USE_LINUX, and so no -ldl: that flag turns on Lua's package.loadlib,
@@ -530,12 +531,18 @@ build_host: _build_step0
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3
 	@echo "dist/diluvium-host"
 
+# The plugin fixture is built first and separately, and deliberately links
+# NOTHING from this tree: doc/BUILD8.md's claim is that a plugin needs the
+# protocol and not a Diluvium header, and a fixture that quietly linked the
+# runtime would stop testing that.
 host_check: _build_step0
+	gcc -O2 -Wall -o $(CURDIR)/dist/plugin_echo $(CURDIR)/test/plugin_echo.c
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
 	  -o $(CURDIR)/dist/host_check \
 	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
-	@cd $(CURDIR)/test && $(CURDIR)/dist/host_check
+	@cd $(CURDIR)/test && DILUVIUM_PLUGIN_ECHO=$(CURDIR)/dist/plugin_echo \
+	  $(CURDIR)/dist/host_check
 
 # The host as one fully static binary, for a lean Alpine box (fetch1). Run
 # INSIDE an Alpine container -- 'host/build-musl.sh' drives the container;
@@ -583,6 +590,7 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
+        host_check \
         snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib \
         footprint
 

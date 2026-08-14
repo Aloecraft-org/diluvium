@@ -6,6 +6,7 @@
 ** this one stays the part every deployment runs.
 */
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -364,8 +365,10 @@ int dh_config_load (const char *path, dh_config *out, char *err,
                     size_t errcap) {
   static const char *const top_keys[] = {
     "supervisor", "max_instances", "spawns_per_step", "identity",
-    "hibernation", "caps", "budget", "connectors", NULL
+    "hibernation", "caps", "budget", "connectors", "plugins", NULL
   };
+  static const char *const plugin_keys[] = { "manifest", "max_inflight",
+                                             "call_timeout_ms", NULL };
   static const char *const budget_keys[] = { "instructions", "memory_kb", NULL };
   static const char *const conn_keys[] = { "time", "listen", "sql", "crypto",
                                            "fs", "exec", NULL };
@@ -794,6 +797,100 @@ int dh_config_load (const char *path, dh_config *out, char *err,
       }
     }
     lua_pop(L, 1);
+  }
+  lua_pop(L, 1);
+
+  /* ----------------------------------------------------------------
+  ** plugins = { rest = { manifest = "rest.plugin.json", ... } }
+  **
+  ** Sibling to 'connectors' because that is what it is: a capability the
+  ** deployment grants. The manifest resolves against the CONFIG file's
+  ** directory, not the host's cwd -- the ambiguity build 7 removed from
+  ** the sql scope is not one to reintroduce here.
+  ** ---------------------------------------------------------------- */
+  if (lua_getfield(L, -1, "plugins") != LUA_TNIL) {
+    if (!lua_istable(L, -1)) {
+      cfg_fail(err, errcap, "'plugins' must be a table of named plugins%s%s",
+               "", "");
+      goto done;
+    }
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+      dh_plugin_cfg *pc;
+      const char *pname;
+      if (lua_type(L, -2) != LUA_TSTRING) {
+        cfg_fail(err, errcap, "every plugin is named by a string key%s%s", "",
+                 "");
+        goto done;
+      }
+      pname = lua_tostring(L, -2);
+      if (!lua_istable(L, -1)) {
+        cfg_fail(err, errcap, "plugin '%s' must be a table%s", pname, "");
+        goto done;
+      }
+      if (out->nplugins >= DH_MAX_PLUGINS) {
+        cfg_fail(err, errcap, "more plugins than this host holds, starting at "
+                              "'%s'%s", pname, "");
+        goto done;
+      }
+      pc = &out->plugins[out->nplugins];
+      memset(pc, 0, sizeof(*pc));
+      if (strlen(pname) >= sizeof(pc->name) || strchr(pname, '/') != NULL) {
+        cfg_fail(err, errcap, "'%s' is not usable as a plugin name: it becomes "
+                              "the first segment of every call it answers%s",
+                 pname, "");
+        goto done;
+      }
+      strcpy(pc->name, pname);
+      {
+        char buf[DH_NAME_MAX + 16];
+        snprintf(buf, sizeof(buf), "plugins.%s", pname);
+        if (cfg_known_keys(L, -1, plugin_keys, buf, err, errcap) != 0)
+          goto done;
+        if (cfg_str(L, -1, "manifest", pc->manifest, sizeof(pc->manifest), 1,
+                    buf, err, errcap) != 0)
+          goto done;
+        n = 0;
+        if (cfg_num(L, -1, "max_inflight", &n, 1, 4096, buf, err, errcap) != 0)
+          goto done;
+        pc->max_inflight = (long)n;      /* 0 = defer to the manifest */
+        n = 0;
+        if (cfg_num(L, -1, "call_timeout_ms", &n, 1, 3600000, buf, err,
+                    errcap) != 0)
+          goto done;
+        pc->call_timeout_ms = (long)n;
+      }
+      /* Resolve the manifest beside the config that named it, then read it
+         now: a deployment whose plugin manifest is missing or malformed
+         should fail at load with the rest of the config's refusals, not at
+         the first call. */
+      {
+        char full[DH_PATH_MAX];
+        if (pc->manifest[0] != '/') {
+          const char *slash = strrchr(path, '/');
+          if (slash != NULL) {
+            size_t dlen = (size_t)(slash - path) + 1;
+            if (dlen + strlen(pc->manifest) >= sizeof(full)) {
+              cfg_fail(err, errcap, "the path to plugin '%s''s manifest is too "
+                                    "long%s", pname, "");
+              goto done;
+            }
+            memcpy(full, path, dlen);
+            strcpy(full + dlen, pc->manifest);
+          }
+          else
+            snprintf(full, sizeof(full), "%s", pc->manifest);
+        }
+        else
+          snprintf(full, sizeof(full), "%s", pc->manifest);
+        if (pc->call_timeout_ms <= 0)
+          pc->call_timeout_ms = 30000;
+        if (dh_plugin_manifest_load(full, pc, err, errcap) != 0)
+          goto done;
+      }
+      out->nplugins++;
+      lua_pop(L, 1);                     /* the plugin's table; key stays */
+    }
   }
   lua_pop(L, 1);
   rc = 0;
@@ -1403,6 +1500,10 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
     dh_host_close(h);
     return -1;
   }
+  if (cfg->nplugins > 0 && dh_plug_open(h, err, errcap) != 0) {
+    dh_host_close(h);
+    return -1;
+  }
 
   if (read_file(cfg->supervisor, &code, &codelen) != 0) {
     dh_host_close(h);
@@ -1428,6 +1529,7 @@ void dh_host_close (dh_host *h) {
   /* Before the connectors go: every pending entry names one of them, and a
      cancel that ran after its connector closed would reach freed state. */
   pending_drop_instance(h, 0, 1);
+  dh_plug_close(h);
   dh_http_close(h);
   dh_sql_close(h);
   dh_crypto_close(h);
@@ -1499,4 +1601,39 @@ int dh_host_poll_timeout (dh_host *h) {
       return http;
     return guest;
   }
+}
+
+
+/*
+** The one place the host sleeps.
+**
+** The listener's sockets, the plugin channels and a plain timeout are the
+** same wait, so they share one poll(). Calling two sleeping polls in turn
+** would not deadlock, but the first to sleep would delay the second by its
+** whole timeout -- and "nothing blocks the shared thread" is only checkable
+** if there is a single place the thread stops.
+*/
+void dh_host_sleep (dh_host *h, int timeout_ms) {
+  struct pollfd extra[DH_MAX_PLUGINS];
+  size_t nx = dh_plug_arm(h, extra, DH_MAX_PLUGINS);
+  if (h->listener != NULL) {
+    /* The listener owns the array; the plugin fds ride along inside its
+       single poll and come back with their revents filled in. */
+    dh_http_poll_with(h, timeout_ms, extra, nx);
+  }
+  else if (nx > 0) {
+    if (poll(extra, (nfds_t)nx, timeout_ms) < 0 && errno != EINTR) {
+      size_t i;
+      for (i = 0; i < nx; i++)
+        extra[i].revents = 0;
+    }
+  }
+  else if (timeout_ms != 0) {
+    struct timespec ts;
+    int t = (timeout_ms < 0 || timeout_ms > 50) ? 50 : timeout_ms;
+    ts.tv_sec = t / 1000;
+    ts.tv_nsec = (long)(t % 1000) * 1000000;
+    nanosleep(&ts, NULL);
+  }
+  dh_plug_fire(h, extra, nx);
 }

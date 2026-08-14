@@ -164,6 +164,13 @@ jobs:
       - name: Run the swarm-layer contract tests
         run: make dvs_check
 
+      # The generic host end to end: the config's refusals, every connector,
+      # the listener over a real socket, and build8's deferred-reply ledger
+      # and plugin channel over a real child process on a real socketpair.
+      # It builds its own plugin fixture, which links nothing from this tree.
+      - name: Run the generic host's contract tests
+        run: make host_check
+
       # Needs two builds of the tree, so it cannot live in dsnap_check.c: the
       # runtime fingerprint must separate builds whose version and LUAC_FORMAT
       # are identical, which is the measurement 10.6 was corrected from.

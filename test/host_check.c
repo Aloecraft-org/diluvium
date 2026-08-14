@@ -86,14 +86,20 @@ static int pop_log (dh_host *h, char *out, size_t cap) {
   return 1;
 }
 
-/* Turn the host until the log speaks or patience runs out. */
+/* Turn the host until the log speaks or patience runs out.
+**
+** The sleep goes through dh_host_sleep rather than nanosleep so this loop is
+** the loop dhost_main.c runs: descriptors get serviced between turns. Before
+** build8 the difference was invisible, because nothing the host owned needed
+** servicing; a plugin's replies arrive on a descriptor, and a test that only
+** stepped the swarm would never see one. */
 static int run_until_log (dh_host *h, char *out, size_t cap, int max_turns) {
   int i;
   for (i = 0; i < max_turns; i++) {
     dh_host_turn(h);
     if (pop_log(h, out, cap))
       return 1;
-    tiny_sleep();
+    dh_host_sleep(h, 5);
   }
   return 0;
 }
@@ -1572,6 +1578,334 @@ static void a_dead_instance_leaves_no_pending_entry (void) {
   ok(h.npending == 0, "closing the host leaves nothing owed");
 }
 
+/* ------------------------------------------------ build8: the plugin channel
+
+** These drive a real child process over a real socketpair. The fixture,
+** test/plugin_echo.c, includes nothing from this tree on purpose -- see its
+** header. What is asserted here is the contract between them.
+*/
+
+static const char *plugin_path (void) {
+  const char *p = getenv("DILUVIUM_PLUGIN_ECHO");
+  return (p != NULL && p[0] != '\0') ? p : NULL;
+}
+
+/* Write a manifest and a deployment that wires it, then open the host. */
+static int plugin_host (dh_host *h, const char *supname, long max_inflight,
+                        const char *manifest_body, char *err, size_t errcap) {
+  dh_config cfg;
+  char cfgsrc[900], path[512];
+  fixture("echo.plugin.json", manifest_body);
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/%s',\n"
+           "  max_instances = 16,\n"
+           "  caps = { 'lifecycle', 'queue:*', 'host:echo/*' },\n"
+           "  plugins = { echo = { manifest = 'echo.plugin.json',\n"
+           "                       max_inflight = %ld,\n"
+           "                       call_timeout_ms = 8000 } } }\n",
+           tmpdir, supname, max_inflight);
+  fixture("plug.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/plug.host.lua", tmpdir);
+  if (dh_config_load(path, &cfg, err, errcap) != 0)
+    return -1;
+  return dh_host_open(h, &cfg, err, errcap);
+}
+
+/* A manifest naming the built fixture, with the given schema/wake tweaks. */
+static const char *echo_manifest (const char *exec, const char *wake) {
+  static char buf[1200];
+  snprintf(buf, sizeof(buf),
+    "{\n"
+    "  \"schema\": 1,\n"
+    "  \"plugin\": {\n"
+    "    \"name\": \"echo\",\n"
+    "    \"exec\": \"%s\",\n"
+    "    \"checksum\": \"sha256:not-enforced-in-build8\",\n"
+    "    \"transport\": \"socketpair\",\n"
+    "    \"max_inflight\": 4\n"
+    "  },\n"
+    "  \"capabilities\": [\n"
+    "    { \"name\": \"echo\",  \"wake\": \"%s\",\n"
+    "      \"args\":   { \"type\": \"object\" },\n"
+    "      \"result\": { \"type\": \"object\" } },\n"
+    "    { \"name\": \"delay\", \"wake\": \"reissue\" },\n"
+    "    { \"name\": \"die\",   \"wake\": \"error\" },\n"
+    "    { \"name\": \"boom\",  \"wake\": \"error\",\n"
+    "      \"errors\": [\"teapot\"] }\n"
+    "  ]\n"
+    "}\n", exec, wake);
+  return buf;
+}
+
+/*
+** The round trip. A guest calls through the ordinary 'host.call' -- no
+** generated wrapper, no new guest surface -- and the plugin's answer comes
+** back as an ordinary reply. That the guest side needed no change at all is
+** the point being asserted.
+*/
+static void a_plugin_answers_an_ordinary_hostcall (void) {
+  dh_host h;
+  char err[512], log[256];
+  const char *exe = plugin_path();
+  if (exe == NULL) {
+    printf("      (DILUVIUM_PLUGIN_ECHO unset; run via 'make host_check')\n");
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  fixture("sup_plug.lua",
+    "local r = host.call('echo/echo', { text = 'hello', n = 7 })\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "queue.push(log, tostring(r and r.text) .. ':' .. tostring(r and r.n))\n"
+    "queue.wait({park})\n");
+  if (plugin_host(&h, "sup_plug.lua", 4, echo_manifest(exe, "reissue"),
+                  err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the plugin deployment opens");
+    return;
+  }
+  log[0] = '\0';
+  run_until_log(&h, log, sizeof(log), 300);
+  ok(strcmp(log, "hello:7") == 0,
+     "a guest's host.call reaches another process and the answer comes back "
+     "through the ordinary reply path");
+  if (strcmp(log, "hello:7") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** The three error classes are the reason errors are not strings: the guest's
+** retry decision differs for each. Assert the class survives the trip with
+** its capability-defined code beside it.
+*/
+static void a_plugin_error_arrives_with_its_class (void) {
+  dh_host h;
+  char err[512], log[256];
+  const char *exe = plugin_path();
+  if (exe == NULL) {
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  fixture("sup_boom.lua",
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local v, status, detail = host.try('echo/boom', {})\n"
+    "queue.push(log, tostring(status) .. '|' .. tostring(detail))\n"
+    "queue.wait({park})\n");
+  if (plugin_host(&h, "sup_boom.lua", 4, echo_manifest(exe, "reissue"),
+                  err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the boom deployment opens");
+    return;
+  }
+  log[0] = '\0';
+  run_until_log(&h, log, sizeof(log), 300);
+  ok(strncmp(log, "error|capability: teapot:", 25) == 0,
+     "a plugin's error keeps its class and its capability-defined code, so "
+     "the guest can tell 'the service said no' from 'the pipe broke'");
+  if (strncmp(log, "error|capability: teapot:", 25) != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** max_inflight with a deliberately naive plugin -- test/plugin_echo.c is a
+** read-work-reply loop, the exact shape §2.6 says would otherwise fill the
+** pipe and block the host's write. Twelve calls against a bound of two must
+** all be answered, in order, with nothing dropped and nothing wedged.
+*/
+static void flow_control_holds_against_a_naive_plugin (void) {
+  dh_host h;
+  char err[512], log[256];
+  const char *exe = plugin_path();
+  if (exe == NULL) {
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  fixture("sup_flow.lua",
+    "local calls = queue.declare('host/calls', {capacity = 16, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 16})\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local N = 12\n"
+    "for i = 1, N do\n"
+    "  queue.push(calls, {tok = i, call = 'echo/delay',\n"
+    "                     args = {ms = 5, n = i}})\n"
+    "end\n"
+    "local seen, sum = 0, 0\n"
+    "while seen < N do\n"
+    "  local _, m, why = queue.wait({replies}, 9000)\n"
+    "  if why ~= 'ok' or m.status ~= 'ok' then\n"
+    "    queue.push(log, 'bad:' .. tostring(why) .. '/' ..\n"
+    "               tostring(m and m.status) .. '/' ..\n"
+    "               tostring(m and m.detail))\n"
+    "    break\n"
+    "  end\n"
+    "  seen = seen + 1\n"
+    "  sum = sum + m.value.n\n"
+    "end\n"
+    "if seen == N then queue.push(log, 'flow:' .. seen .. ':' .. sum) end\n"
+    "queue.wait({park})\n");
+  if (plugin_host(&h, "sup_flow.lua", 2, echo_manifest(exe, "reissue"),
+                  err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the flow-control deployment opens");
+    return;
+  }
+  log[0] = '\0';
+  run_until_log(&h, log, sizeof(log), 900);
+  /* 78 is 1+2+...+12: every reply carried its own request's number, so no
+     answer was dropped, duplicated or delivered to the wrong token. */
+  ok(strcmp(log, "flow:12:78") == 0,
+     "twelve calls against a max_inflight of two are all answered, each with "
+     "its own request's value: the host queued the excess rather than "
+     "burying the plugin");
+  if (strcmp(log, "flow:12:78") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** The manifest is the host's refusal surface, and its refusals are the ones
+** an operator reads at 3am. Each of these is a mistake that would otherwise
+** be discovered by a plugin behaving strangely much later.
+*/
+static void a_manifest_refuses_its_mistakes_by_name (void) {
+  dh_config cfg;
+  char err[512], path[512], cfgsrc[600];
+  const char *exe = plugin_path();
+  if (exe == NULL) {
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  fixture("sup_noop.lua", "queue.wait({queue.declare('p', {capacity=1})})\n");
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/sup_noop.lua',\n"
+           "  caps = { 'queue:*', 'host:echo/*' },\n"
+           "  plugins = { echo = { manifest = 'echo.plugin.json' } } }\n",
+           tmpdir);
+  fixture("plug.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/plug.host.lua", tmpdir);
+
+  /* A relative exec path. No PATH lookup, ever -- §2.3. */
+  fixture("echo.plugin.json",
+    "{ \"schema\": 1,\n"
+    "  \"plugin\": { \"name\": \"echo\", \"exec\": \"plugin_echo\" },\n"
+    "  \"capabilities\": [ { \"name\": \"echo\", \"wake\": \"error\" } ] }\n");
+  ok(dh_config_load(path, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "absolute") != NULL && strstr(err, "PATH") != NULL,
+     "a relative exec path is refused, and the refusal says this host never "
+     "searches PATH for a plugin");
+
+  /* A missing wake policy. There is no right default, so there is no
+     default -- §4. */
+  {
+    char body[600];
+    snprintf(body, sizeof(body),
+      "{ \"schema\": 1,\n"
+      "  \"plugin\": { \"name\": \"echo\", \"exec\": \"%s\" },\n"
+      "  \"capabilities\": [ { \"name\": \"echo\" } ] }\n", exe);
+    fixture("echo.plugin.json", body);
+  }
+  ok(dh_config_load(path, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "wake") != NULL,
+     "a capability with no wake policy is refused: the host cannot guess "
+     "whether asking twice is safe");
+
+  /* A schema version this host does not read. */
+  {
+    char body[600];
+    snprintf(body, sizeof(body),
+      "{ \"schema\": 2,\n"
+      "  \"plugin\": { \"name\": \"echo\", \"exec\": \"%s\" },\n"
+      "  \"capabilities\": [ { \"name\": \"echo\", \"wake\": \"error\" } ] }\n",
+      exe);
+    fixture("echo.plugin.json", body);
+  }
+  ok(dh_config_load(path, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "schema 1") != NULL,
+     "a manifest written for a schema this host does not read is refused by "
+     "version, not parsed hopefully");
+
+  /* Malformed JSON, refused by the decoder rather than by a segfault. */
+  fixture("echo.plugin.json", "{ \"schema\": 1, oops }\n");
+  ok(dh_config_load(path, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "JSON") != NULL,
+     "a manifest that is not JSON says so");
+
+  /* And the manifest this repository ships as the worked example actually
+     parses. A specification-by-example that does not load is worse than no
+     example, because it is believed. The test runs from test/, so the
+     example is one directory up. */
+  {
+    char real[DH_PATH_MAX];
+    if (realpath("../host/rest.plugin.json", real) != NULL) {
+      snprintf(cfgsrc, sizeof(cfgsrc),
+               "return { supervisor = '%s/sup_noop.lua',\n"
+               "  caps = { 'queue:*', 'host:rest/*' },\n"
+               "  plugins = { rest = { manifest = '%s' } } }\n", tmpdir, real);
+      fixture("plug.host.lua", cfgsrc);
+      ok(dh_config_load(path, &cfg, err, sizeof(err)) == 0 &&
+         cfg.nplugins == 1 && cfg.plugins[0].ncaps == 2 &&
+         cfg.plugins[0].caps[0].wake == DH_WAKE_REISSUE &&
+         cfg.plugins[0].caps[1].wake == DH_WAKE_ERROR &&
+         cfg.plugins[0].max_inflight == 8,
+         "host/rest.plugin.json -- the example this repo ships -- parses, and "
+         "its wake policies and max_inflight arrive as written");
+      if (cfg.nplugins != 1)
+        printf("      (%s)\n", err);
+    }
+    else
+      ok(0, "the shipped example manifest is where the test expects it");
+  }
+}
+
+/*
+** A call the plugin will never answer, because the plugin is gone. The guest
+** must get a 'transport' error rather than a hang, and the ledger must come
+** back to empty -- this is the leak surface with a real process attached.
+*/
+static void a_dead_plugin_fails_its_calls_as_transport (void) {
+  dh_host h;
+  char err[512], log[256];
+  const char *exe = plugin_path();
+  int i;
+  if (exe == NULL) {
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  fixture("sup_dead.lua",
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local v, status, detail = host.try('echo/die', {})\n"
+    "queue.push(log, tostring(status) .. '|' .. tostring(detail))\n"
+    "queue.wait({park})\n");
+  if (plugin_host(&h, "sup_dead.lua", 4, echo_manifest(exe, "reissue"),
+                  err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the dead-plugin deployment opens");
+    return;
+  }
+  /* The plugin exits on 'die' without answering, which is the failure being
+     tested and is deterministic in a way that killing it from outside is
+     not -- an earlier version of this used pkill and matched the build's own
+     command line. */
+  log[0] = '\0';
+  for (i = 0; i < 400 && log[0] == '\0'; i++) {
+    dh_host_turn(&h);
+    dh_host_sleep(&h, 5);
+    pop_log(&h, log, sizeof(log));
+  }
+  ok(strncmp(log, "error|transport:", 16) == 0,
+     "a call outstanding when the plugin dies fails as 'transport', which is "
+     "the class that says retrying might work");
+  if (strncmp(log, "error|transport:", 16) != 0)
+    printf("      (guest said: %s)\n", log);
+  ok(h.npending == 0, "and the ledger is empty afterwards");
+  dh_host_close(&h);
+}
+
 int main (void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/host_check_XXXXXX");
   if (mkdtemp(tmpdir) == NULL) {
@@ -1597,6 +1931,11 @@ int main (void) {
   deferral_puts_many_calls_in_flight_at_once();
   a_parked_instance_does_not_stall_another();
   a_dead_instance_leaves_no_pending_entry();
+  a_manifest_refuses_its_mistakes_by_name();
+  a_plugin_answers_an_ordinary_hostcall();
+  a_plugin_error_arrives_with_its_class();
+  flow_control_holds_against_a_naive_plugin();
+  a_dead_plugin_fails_its_calls_as_transport();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }

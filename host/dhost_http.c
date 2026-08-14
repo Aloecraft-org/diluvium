@@ -445,12 +445,25 @@ static size_t poll_capacity (dh_http *x) {
 }
 
 int dh_http_poll (dh_host *h, int timeout_ms) {
+  return dh_http_poll_with(h, timeout_ms, NULL, 0);
+}
+
+/*
+** 'extra' rides inside this poll rather than getting one of its own. Two
+** sleeping polls in sequence do not deadlock, but the first one to sleep
+** delays the second by its whole timeout, and build8's claim that nothing
+** blocks the shared thread is only checkable if there is a single place the
+** thread stops. The extra descriptors are appended past the listener's own
+** and their revents are handed back; this function never interprets them.
+*/
+int dh_http_poll_with (dh_host *h, int timeout_ms, struct pollfd *extra,
+                       size_t nextra) {
   dh_http *x = (dh_http *)h->listener;
   struct pollfd *fds;
   int *li_of;                          /* which listener each fd belongs to */
   int *ci_of;                          /* conn index, or -1 for a listen fd */
-  int nfds = 0, i, li, rc;
-  size_t cap;
+  int nfds = 0, nown = 0, i, li, rc;
+  size_t cap, k;
   if (x == NULL)
     return 0;
   pump_replies(h, x);
@@ -461,6 +474,7 @@ int dh_http_poll (dh_host *h, int timeout_ms) {
      config inputs as a near-SIZE_MAX object size. */
   if (cap == 0 || cap > (size_t)DH_MAX_LISTENERS * 4097)
     return 0;
+  cap += nextra;
   fds = (struct pollfd *)calloc(cap, sizeof(struct pollfd));
   li_of = (int *)calloc(cap, sizeof(int));
   ci_of = (int *)calloc(cap, sizeof(int));
@@ -499,12 +513,22 @@ int dh_http_poll (dh_host *h, int timeout_ms) {
       nfds++;
     }
   }
+  /* The listener's own descriptors end here; everything past this index is
+     the caller's and is only carried, never read. */
+  nown = nfds;
+  for (k = 0; k < nextra; k++) {
+    fds[nfds] = extra[k];
+    fds[nfds].revents = 0;
+    nfds++;
+  }
   rc = poll(fds, (nfds_t)nfds, timeout_ms);
+  for (k = 0; k < nextra; k++)
+    extra[k].revents = (rc > 0) ? fds[nown + k].revents : 0;
   if (rc <= 0) {
     free(fds); free(li_of); free(ci_of);
     return 0;
   }
-  for (i = 0; i < nfds; i++) {
+  for (i = 0; i < nown; i++) {
     dh_listener_rt *lr = &x->l[li_of[i]];
     if (ci_of[i] < 0) {
       /* A listen socket: accept everything pending into this listener. */
