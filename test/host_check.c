@@ -1906,6 +1906,202 @@ static void a_dead_plugin_fails_its_calls_as_transport (void) {
   dh_host_close(&h);
 }
 
+/*
+** The rest plugin, against the host's own listener.
+**
+** This is the whole build in one case, and it is chosen because it cannot
+** pass by accident. One process: a Diluvium host serving HTTP on a port, and
+** a guest inside that same host asking the rest plugin to fetch that port.
+** The plugin blocks on its socket the entire time -- it is a serial
+** read-work-reply program by design -- so the request only completes if the
+** host answers the listener WHILE a hostcall is outstanding.
+**
+** On a synchronous connector this deadlocks on the first call, every time:
+** the host would be inside conn_fn waiting for the plugin, the plugin would
+** be waiting for the listener, and the listener is the host. That it returns
+** at all is the deferral seam; that it returns the guest's own body is the
+** whole stack.
+*/
+static void rest_self_fetch (const char *label, const char *exe, int port) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[256], cfgsrc[1200], path[512], manifest[1400];
+  char what[256];
+  if (exe == NULL || exe[0] == '\0') {
+    printf("      (no plugin path for %s; run via 'make host_check')\n", label);
+    ok(0, "the rest plugin is on the path");
+    return;
+  }
+  snprintf(manifest, sizeof(manifest),
+    "{ \"schema\": 1,\n"
+    "  \"plugin\": { \"name\": \"rest\", \"exec\": \"%s\",\n"
+    "               \"transport\": \"socketpair\", \"max_inflight\": 4 },\n"
+    "  \"capabilities\": [\n"
+    "    { \"name\": \"get\",  \"wake\": \"reissue\" },\n"
+    "    { \"name\": \"post\", \"wake\": \"error\" } ] }\n", exe);
+  fixture("rest.plugin.json", manifest);
+
+  /* The supervisor is both the HTTP server and the HTTP client. It answers
+     one request off http_in, and it fetches itself through the plugin. */
+  {
+    char sup[2400];
+    snprintf(sup, sizeof(sup),
+      "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+      "local inq = queue.declare('http_in', {capacity = 8})\n"
+      "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
+      "local calls = queue.declare('host/calls', {capacity = 8, exported = true})\n"
+      "local replies = queue.declare('host/replies', {capacity = 8})\n"
+      "local park = queue.declare('park', {capacity = 1})\n"
+      "-- The raw idiom on purpose. host.call parks on the reply queue alone,\n"
+      "-- and this program has to serve HTTP *while* its own call is in\n"
+      "-- flight -- so it waits on both queues at once, which is what a\n"
+      "-- wait-set is for. One thread, two roles, no coroutine: a guest\n"
+      "-- coroutine that yields on queue.wait yields to whoever resumed it,\n"
+      "-- not to the host, so it would park and never be driven again.\n"
+      "queue.push(calls, {tok = 1, call = 'rest/get',\n"
+      "  args = {url = 'http://127.0.0.1:%d/hello', timeout_ms = 8000}})\n"
+      "local answer\n"
+      "while not answer do\n"
+      "  local id, m, why = queue.wait({replies, inq}, 20000)\n"
+      "  if why ~= 'ok' then\n"
+      "    queue.push(log, 'wait:' .. tostring(why))\n"
+      "    break\n"
+      "  elseif id == replies then\n"
+      "    answer = m\n"
+      "  else\n"
+      "    queue.push(outq, {conn = m.conn, status = 200,\n"
+      "                      body = 'served-by-diluvium:' .. tostring(m.path),\n"
+      "                      content_type = 'text/plain'})\n"
+      "  end\n"
+      "end\n"
+      "if answer then\n"
+      "  if answer.status ~= 'ok' then\n"
+      "    queue.push(log, 'err:' .. tostring(answer.status) .. ':' ..\n"
+      "               tostring(answer.detail))\n"
+      "  else\n"
+      "    queue.push(log, tostring(answer.value.status) .. ':' ..\n"
+      "               tostring(answer.value.body))\n"
+      "  end\n"
+      "end\n"
+      "queue.wait({park})\n", port);
+    fixture("sup_rest.lua", sup);
+  }
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/sup_rest.lua',\n"
+           "  max_instances = 8,\n"
+           "  caps = { 'queue:*', 'host:rest/*' },\n"
+           "  connectors = { listen = { port = %d, queue = 'http_in',\n"
+           "                            reply_queue = 'http_out' } },\n"
+           "  plugins = { rest = { manifest = 'rest.plugin.json',\n"
+           "                       call_timeout_ms = 20000 } } }\n",
+           tmpdir, port);
+  fixture("rest.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/rest.host.lua", tmpdir);
+  if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+      dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the rest deployment opens");
+    return;
+  }
+  log[0] = '\0';
+  {
+    int i;
+    for (i = 0; i < 1200 && log[0] == '\0'; i++) {
+      dh_host_turn(&h);
+      dh_host_sleep(&h, 5);
+      pop_log(&h, log, sizeof(log));
+    }
+  }
+  snprintf(what, sizeof(what),
+           "%s: a guest fetches its own host's listener through the rest "
+           "plugin -- server, client and runtime in one thread, nothing "
+           "blocked", label);
+  ok(strcmp(log, "200:served-by-diluvium:/hello") == 0, what);
+  if (strcmp(log, "200:served-by-diluvium:/hello") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
+** Both bindings, one manifest, one scenario. The C plugin links OpenSSL and
+** the JS one calls fetch(); a guest cannot tell them apart, which is what
+** "the manifest is a protocol and not a C header" has to mean if it means
+** anything. If these two ever disagree, the frame format has drifted.
+*/
+static void the_rest_plugin_fetches_the_host_s_own_listener (void) {
+  rest_self_fetch("C", getenv("DILUVIUM_PLUGIN_REST"), 18099);
+  rest_self_fetch("JS", getenv("DILUVIUM_PLUGIN_REST_JS"), 18100);
+}
+
+/* The plugin's own refusals, which are the ones a program hits first. */
+static void the_rest_plugin_refuses_what_it_should (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[256], cfgsrc[900], path[512], manifest[1400];
+  const char *exe = getenv("DILUVIUM_PLUGIN_REST");
+  if (exe == NULL || exe[0] == '\0') {
+    ok(0, "the rest plugin is on the path");
+    return;
+  }
+  snprintf(manifest, sizeof(manifest),
+    "{ \"schema\": 1,\n"
+    "  \"plugin\": { \"name\": \"rest\", \"exec\": \"%s\",\n"
+    "               \"transport\": \"socketpair\", \"max_inflight\": 4 },\n"
+    "  \"capabilities\": [ { \"name\": \"get\", \"wake\": \"reissue\" } ] }\n",
+    exe);
+  fixture("rest.plugin.json", manifest);
+  fixture("sup_restbad.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local out = {}\n"
+    "local function probe(args)\n"
+    "  local r, status, detail = host.try('rest/get', args, 20000)\n"
+    "  out[#out+1] = tostring(detail):sub(1, 60)\n"
+    "end\n"
+    "probe({ url = 'ftp://example.com/x' })\n"
+    "probe({ url = 'http://alice:secret@example.com/x' })\n"
+    "probe({ url = 'http://127.0.0.1:1/x', timeout_ms = 2000 })\n"
+    "probe({ url = 'http://127.0.0.1:1/x', timeout_ms = 2000,\n"
+    "        headers = { ['X-Bad'] = 'a\\r\\nInjected: yes' } })\n"
+    "queue.push(log, table.concat(out, ' | '))\n"
+    "queue.wait({park})\n");
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/sup_restbad.lua',\n"
+           "  caps = { 'queue:*', 'host:rest/*' },\n"
+           "  plugins = { rest = { manifest = 'rest.plugin.json',\n"
+           "                       call_timeout_ms = 20000 } } }\n", tmpdir);
+  fixture("rest.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/rest.host.lua", tmpdir);
+  if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+      dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the rest-refusals deployment opens");
+    return;
+  }
+  log[0] = '\0';
+  {
+    int i;
+    for (i = 0; i < 1200 && log[0] == '\0'; i++) {
+      dh_host_turn(&h);
+      dh_host_sleep(&h, 5);
+      pop_log(&h, log, sizeof(log));
+    }
+  }
+  ok(strstr(log, "must begin http") != NULL,
+     "a non-http scheme is refused by name");
+  ok(strstr(log, "credentials in a url") != NULL,
+     "credentials in a url are refused rather than laundered into the log");
+  ok(strstr(log, "capability: timeout") != NULL ||
+     strstr(log, "capability: dns") != NULL,
+     "an unreachable endpoint is a 'capability' error with a declared code");
+  ok(strstr(log, "CR, LF") != NULL,
+     "a header value carrying CRLF is refused, not stripped: silently "
+     "changing what was sent is worse than refusing to send it");
+  if (failures > 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
 int main (void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/host_check_XXXXXX");
   if (mkdtemp(tmpdir) == NULL) {
@@ -1936,6 +2132,8 @@ int main (void) {
   a_plugin_error_arrives_with_its_class();
   flow_control_holds_against_a_naive_plugin();
   a_dead_plugin_fails_its_calls_as_transport();
+  the_rest_plugin_refuses_what_it_should();
+  the_rest_plugin_fetches_the_host_s_own_listener();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }

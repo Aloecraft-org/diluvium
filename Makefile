@@ -537,12 +537,42 @@ build_host: _build_step0
 # runtime would stop testing that.
 host_check: _build_step0
 	gcc -O2 -Wall -o $(CURDIR)/dist/plugin_echo $(CURDIR)/test/plugin_echo.c
+	gcc -O2 -Wall -o $(CURDIR)/dist/diluvium-rest-plugin \
+	  $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
 	  -o $(CURDIR)/dist/host_check \
 	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
 	@cd $(CURDIR)/test && DILUVIUM_PLUGIN_ECHO=$(CURDIR)/dist/plugin_echo \
+	  DILUVIUM_PLUGIN_REST=$(CURDIR)/dist/diluvium-rest-plugin \
+	  DILUVIUM_PLUGIN_REST_JS=$(CURDIR)/plugins/rest/rest_plugin.mjs \
 	  $(CURDIR)/dist/host_check
+
+# The rest plugin: outbound HTTP as a separate program. It links OpenSSL and
+# the host links none -- that split is the point of the plugin channel, and it
+# is why build_host_musl's fully-static link stays clean while this capability
+# still exists. -DREST_NO_TLS drops the dependency for an http-only build.
+# Nothing here includes a Diluvium header; plugins/dvplug.h is a copyable
+# starter kit, not a dependency of the runtime.
+build_plugin_rest:
+	gcc -O2 -Wall -Wextra -o $(CURDIR)/dist/diluvium-rest-plugin \
+	  $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto
+	@echo "dist/diluvium-rest-plugin"
+
+build_plugin_rest_notls:
+	gcc -O2 -Wall -Wextra -DREST_NO_TLS \
+	  -o $(CURDIR)/dist/diluvium-rest-plugin-notls \
+	  $(CURDIR)/plugins/rest/rest_plugin.c
+	@echo "dist/diluvium-rest-plugin-notls"
+
+# The static musl build, to sit beside dist/diluvium-host-musl on Alpine.
+# Run inside the same container host/build-musl.sh drives, where 'gcc' is
+# musl-gcc and openssl-libs-static provides libssl.a/libcrypto.a.
+build_plugin_rest_musl:
+	gcc -O2 -Wall -Wextra -static \
+	  -o $(CURDIR)/dist/diluvium-rest-plugin-musl \
+	  $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto
+	@echo "dist/diluvium-rest-plugin-musl"
 
 # The host as one fully static binary, for a lean Alpine box (fetch1). Run
 # INSIDE an Alpine container -- 'host/build-musl.sh' drives the container;
@@ -590,7 +620,8 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
-        host_check \
+        host_check build_plugin_rest build_plugin_rest_notls \
+        build_plugin_rest_musl \
         snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib \
         footprint
 

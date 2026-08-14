@@ -6,19 +6,28 @@ they were checked, not remembered, because the whole shape of this build turns
 on how much is already here.
 
 **Landed so far:** Part 1 in full (the deferred reply, the ledger, the
-reply-queue accounting fix, the single sleep point) and Part 2 in full (the
-manifest, the `plugins` config block, socketpair spawn over fd 3, framing,
-the three error classes, `max_inflight`). `make host_check` is 54 checks / 0
-failed, including a real child process over a real socketpair, and the rest of
-the suite is unchanged: dvs 139, dsnap 159, dhash 252, dshim 102, dv 245,
-dtask 25, and the Lua suite at 51 passed / 3 skipped.
+reply-queue accounting fix, the single sleep point), Part 2 in full (the
+manifest, the `plugins` config block, socketpair spawn over fd 3, framing, the
+three error classes, `max_inflight`), and Part 5 in full (`plugins/rest/` —
+outbound HTTP/HTTPS in C against OpenSSL and in JavaScript against `fetch`,
+plus `plugins/dvplug.h`, a dependency-free single-header kit for writing a
+plugin in C). `make host_check` is 60 checks / 0 failed and the rest of the
+suite is unchanged: dvs 139, dsnap 159, dhash 252, dshim 102, dv 245, dtask 25,
+and the Lua suite at 51 passed / 3 skipped.
+
+The case worth naming is `the_rest_plugin_fetches_the_host_s_own_listener`: one
+process, serving HTTP on a port while a guest inside it fetches that same port
+through the plugin. On a synchronous connector this deadlocks on the first
+call — the host inside `conn_fn` waiting for the plugin, the plugin waiting for
+the listener, the listener being the host. It runs through **both** the C and
+the JavaScript plugin and asserts a guest cannot tell them apart, which is what
+"the manifest is a protocol and not a C header" has to mean if it means
+anything.
 
 **Not yet built, and not pretended:** Part 3 (generated wrappers — `host.call`
-carries the release without them), Part 4 (the wake policies are *declared* in
-the manifest and *validated* at load, and nothing consumes them yet), and Part
-5 (no REST plugin exists; `test/plugin_echo.c` is an echo fixture). Gates 7.6
-and 7.9 are consequently still red, and §7 is the list that keeps that
-honest.
+carries the release without them) and Part 4 (the wake policies are *declared*
+in the manifest and *validated* at load, and nothing consumes them yet). Gate
+7.6 is consequently still red, and §7 is the list that keeps that honest.
 
 Build 7 made a hostcall *readable*. Build 8 makes it *concurrent*, and then
 makes it *extensible* — a capability can live in another program, on the far
@@ -585,12 +594,24 @@ rest/get    {url, headers?, timeout_ms?}         -> {status, headers, body}
 rest/post   {url, headers?, body, timeout_ms?}   -> {status, headers, body}
 ```
 
+**Built.** `plugins/rest/`, with `plugins/README.md` as its guide.
+
 ### 5.1 musl / native
 
-A standalone program, execed from an absolute path with fd 3 as the channel.
-Written in whatever is convenient — the point of the protocol is that the host
-does not care. It links its own TLS; the host links none, which is why
-`build_host_musl`'s fully-static link stays clean.
+`plugins/rest/rest_plugin.c`: a standalone program, execed from an absolute
+path with fd 3 as the channel. It links OpenSSL — verifying the chain *and* the
+name, because a client that skips either is doing obfuscation rather than TLS —
+and the host links none, which is why `build_host_musl`'s fully-static link
+stays clean. `make build_plugin_rest_musl` is the static Alpine build;
+`-DREST_NO_TLS` drops the dependency for an http-only build.
+
+Three refusals are the plugin's own, not the host's, and each is asserted:
+a non-`http(s)` scheme, credentials in a URL (refused rather than laundered
+into the host's log and the guest's message log), and a header value carrying
+CR or LF — **refused, never stripped**, because silently changing what was sent
+is worse than declining to send it. All three are checked before a socket is
+opened, so a request the plugin will reject costs no DNS lookup and no
+handshake.
 
 ### 5.2 Lab (browser)
 
