@@ -43,6 +43,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+/* getrandom(2) on Linux; getentropy/arc4random_buf on macOS and the BSDs.
+   The header is spelled the same on both, the function inside it is not --
+   see csprng below. */
 #include <sys/random.h>
 
 #include "dhash.h"
@@ -68,10 +71,20 @@ typedef struct dh_crypto {
 
 /* ---- CSPRNG ---------------------------------------------------------- */
 
-/* Fill 'buf' with 'n' cryptographically secure bytes. 0 on success. Prefers
-   getrandom(2); falls back to /dev/urandom for a kernel without it. */
+/* Fill 'buf' with 'n' cryptographically secure bytes. 0 on success.
+   Prefers the platform's own call; falls back to /dev/urandom for a system
+   without one.
+
+   The platform split is a compile-time one because the call does not exist
+   everywhere: getrandom(2) is Linux's, and on macOS and the BSDs
+   <sys/random.h> declares getentropy() and not getrandom, so an unguarded
+   call is not a runtime fallback -- it is a build failure. It was one: the
+   generic host had never been compiled on macOS, because host_check did not
+   run in CI until build 8 turned it on, and this was the first thing the
+   macOS runner said. */
 static int csprng (unsigned char *buf, size_t n) {
   size_t got = 0;
+#if defined(__linux__)
   while (got < n) {
     ssize_t r = getrandom(buf + got, n - got, 0);
     if (r < 0) {
@@ -81,6 +94,14 @@ static int csprng (unsigned char *buf, size_t n) {
     }
     got += (size_t)r;
   }
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || \
+      defined(__NetBSD__)
+  /* arc4random_buf cannot fail and cannot short-read, which is why it has no
+     return value to check. */
+  if (n > 0)
+    arc4random_buf(buf, n);
+  got = n;
+#endif
   if (got == n)
     return 0;
   {

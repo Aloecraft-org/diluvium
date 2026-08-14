@@ -45,6 +45,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>   /* strcasecmp/strncasecmp: POSIX puts them here,
+                          and macOS means it */
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>

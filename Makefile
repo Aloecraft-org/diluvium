@@ -537,8 +537,22 @@ build_host: _build_step0
 # runtime would stop testing that.
 host_check: _build_step0
 	gcc -O2 -Wall -o $(CURDIR)/dist/plugin_echo $(CURDIR)/test/plugin_echo.c
-	gcc -O2 -Wall -o $(CURDIR)/dist/diluvium-rest-plugin \
-	  $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto
+# The rest plugin needs OpenSSL for https, and the plugin cases only ever
+# fetch http://127.0.0.1 -- so where there are no OpenSSL headers (a stock
+# macOS runner has none on the default include path) build the http-only
+# variant rather than failing the suite. A missing TLS library is a reason to
+# test less, not a reason to test nothing.
+	@if printf '#include <openssl/ssl.h>\nint main(void){return 0;}\n' \
+	    | gcc -x c - -o /dev/null -lssl -lcrypto >/dev/null 2>&1; then \
+	  echo "host_check: building the rest plugin with TLS"; \
+	  gcc -O2 -Wall -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto; \
+	else \
+	  echo "host_check: no OpenSSL headers here; building the rest plugin \
+without TLS (the plugin cases only fetch http://127.0.0.1)"; \
+	  gcc -O2 -Wall -DREST_NO_TLS -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c; \
+	fi
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
 	  -o $(CURDIR)/dist/host_check \
 	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \

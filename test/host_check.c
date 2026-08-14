@@ -2030,7 +2030,15 @@ static void rest_self_fetch (const char *label, const char *exe, int port) {
 */
 static void the_rest_plugin_fetches_the_host_s_own_listener (void) {
   rest_self_fetch("C", getenv("DILUVIUM_PLUGIN_REST"), 18099);
-  rest_self_fetch("JS", getenv("DILUVIUM_PLUGIN_REST_JS"), 18100);
+  /* The JS plugin runs under whatever node its shebang finds. Where there is
+     no node, skip it rather than fail: the C case already covers the
+     protocol, and this one covers the claim that two implementations of it
+     agree -- which is untestable, not false, without an interpreter. */
+  if (system("command -v node >/dev/null 2>&1") == 0)
+    rest_self_fetch("JS", getenv("DILUVIUM_PLUGIN_REST_JS"), 18100);
+  else
+    printf("      (no node on PATH; skipping the JS plugin's half of the "
+           "same scenario)\n");
 }
 
 /* The plugin's own refusals, which are the ones a program hits first. */
