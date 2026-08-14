@@ -1290,6 +1290,7 @@ typedef struct slow_call {
   dvs_id id;
   int64_t tok;
   int64_t due_ms;
+  int64_t ms;                           /* how slow this one asked to be */
   int64_t n;                            /* echoed, so a reply names its call */
 } slow_call;
 
@@ -1297,6 +1298,7 @@ typedef struct slow_ctx {
   dh_host *h;
   slow_call calls[SLOW_MAX];
   int taken;
+  int answered;
   int cancelled;
   int refused;
 } slow_ctx;
@@ -1342,6 +1344,7 @@ static dh_call_status conn_slow (void *ud, dvs_id id, int64_t tok,
   s->calls[i].id = id;
   s->calls[i].tok = tok;
   s->calls[i].due_ms = dh_now_ms() + ms;
+  s->calls[i].ms = ms;
   s->calls[i].n = n;
   s->taken++;
   return DH_CALL_PENDING;
@@ -1366,11 +1369,24 @@ static void slow_tick (slow_ctx *s) {
       dh_buf_init(&v);
       dh_int(&v, s->calls[i].n);
       s->calls[i].live = 0;
+      s->answered++;
       dh_reply(s->h, s->calls[i].id, s->calls[i].tok, DH_CALL_OK,
                v.p, v.len, NULL);
       dh_buf_free(&v);
     }
   }
+}
+
+/* Is the one deliberately-slow call still outstanding? Identified by what it
+   asked for rather than by who made it, so the caller does not need the
+   child's id. */
+static int slow_long_live (slow_ctx *s) {
+  int i;
+  for (i = 0; i < SLOW_MAX; i++) {
+    if (s->calls[i].live && s->calls[i].ms >= 200)
+      return 1;
+  }
+  return 0;
 }
 
 static int run_until_log_slow (dh_host *h, slow_ctx *s, char *out, size_t cap,
@@ -1480,7 +1496,7 @@ static void a_parked_instance_does_not_stall_another (void) {
   dh_host h;
   slow_ctx s;
   char err[512], log[256];
-  size_t owed_at_finish;
+  int during;
   fixture("sup_two.lua",
     "local sys = queue.declare('system/lifecycle', {capacity = 4})\n"
     "local calls = queue.declare('host/calls', {capacity = 8, exported = true})\n"
@@ -1516,16 +1532,39 @@ static void a_parked_instance_does_not_stall_another (void) {
     return;
   }
   log[0] = '\0';
-  run_until_log_slow(&h, &s, log, sizeof(log), 400);
-  owed_at_finish = h.npending;
+  /* Count how many OTHER calls the host answered between the child's slow
+     call being taken and being answered. That is the property stated
+     directly: if a parked instance stalled another, the count is zero, and
+     no amount of slowness on the machine can make it nonzero. Asserting
+     instead that the child's call is still outstanding when the root
+     finishes -- which this used to do -- measures the same thing through a
+     clock race, and a slow runner loses it. */
+  {
+    int i, started = 0;
+    int at_start = 0;
+    for (i = 0; i < 900; i++) {
+      dh_host_turn(&h);
+      slow_tick(&s);
+      if (!started && slow_long_live(&s)) {
+        started = 1;
+        at_start = s.answered;
+      }
+      if (log[0] == '\0')
+        pop_log(&h, log, sizeof(log));
+      if (started && !slow_long_live(&s) && log[0] != '\0')
+        break;
+      dh_host_sleep(&h, 5);
+    }
+    during = started ? (s.answered - at_start) : -1;
+  }
   ok(strcmp(log, "root:30") == 0,
      "the root completes thirty of its own hostcalls");
   if (strcmp(log, "root:30") != 0)
     printf("      (guest said: %s)\n", log);
-  ok(owed_at_finish >= 1,
-     "and the child's 500ms call was still in flight when it did: a parked "
-     "instance does not stall another");
-  printf("      (owed at finish: %d, taken: %d)\n", (int)owed_at_finish,
+  ok(during >= 5,
+     "and the host answered the root's calls throughout the child's single "
+     "slow one: a parked instance does not stall another");
+  printf("      (answered during the child's call: %d, taken: %d)\n", during,
          s.taken);
   dh_host_close(&h);
 }
