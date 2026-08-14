@@ -868,12 +868,14 @@ static dh_call_status do_jwt_verify (dh_crypto *k, dh_buf *value,
   return DH_CALL_OK;
 }
 
-static dh_call_status conn_crypto (void *ud, dvs_id id, const char *call,
+static dh_call_status conn_crypto (void *ud, dvs_id id, int64_t tok,
+                                  const char *call,
                                    const unsigned char *args, size_t argslen,
                                    dh_buf *value, char *detail,
                                    size_t detailcap) {
   dh_crypto *k = (dh_crypto *)ud;
   (void)id;
+  (void)tok;
   if (strcmp(call, "crypto/random") == 0)
     return do_random(value, args, argslen, detail, detailcap);
   if (strcmp(call, "crypto/hash") == 0)

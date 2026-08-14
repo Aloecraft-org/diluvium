@@ -832,10 +832,16 @@ static void *host_create (void *ud, dvs_id id, dv_instance *inst) {
   return sc;
 }
 
+static void pending_drop_instance (dh_host *h, dvs_id id, int all);
+
 static void host_destroy (void *ud, dvs_id id, void *ctx) {
   dh_host *h = (dh_host *)ud;
   dh_slot **pp = &h->slots;
-  (void)id;
+  /* Whatever this instance was owed, nobody will collect. Dropping the
+     entries here is what keeps the ledger bounded by live instances rather
+     than by the host's lifetime, and it is where a connector learns to
+     abandon work whose answer now has nowhere to go. */
+  pending_drop_instance(h, id, 0);
   while (*pp != NULL && *pp != ctx)
     pp = &(*pp)->next;
   if (*pp != NULL)
@@ -891,7 +897,8 @@ static int host_drive (void *ud, dvs_id id, dv_instance *inst, void *ctx) {
 ** The hostcall pump: doc/Hostcall.md's host half.
 ** ====================================================================== */
 
-int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud) {
+int dh_register_deferrable (dh_host *h, const char *prefix, dh_call_fn fn,
+                            dh_cancel_fn cancel, void *ud) {
   size_t i;
   if (h->nconns >= DH_MAX_CONNECTORS || strlen(prefix) >= 32)
     return -1;
@@ -901,9 +908,206 @@ int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud) {
   }
   strcpy(h->conns[h->nconns].prefix, prefix);
   h->conns[h->nconns].fn = fn;
+  h->conns[h->nconns].cancel = cancel;
   h->conns[h->nconns].ud = ud;
   h->nconns++;
   return 0;
+}
+
+int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud) {
+  return dh_register_deferrable(h, prefix, fn, NULL, ud);
+}
+
+
+/* ======================================================================
+** The deferred-reply ledger.
+**
+** A list rather than a hash: the entries are bounded by max_inflight summed
+** over the wired plugins, which is a small number by construction, and a
+** list keeps the sweeps (by instance, by deadline) trivially correct. If
+** that bound ever stops holding, this is the thing to index -- not before.
+** ====================================================================== */
+
+/* The connector currently being invoked, so dh_defer can attribute the entry
+** without threading a handle through dh_call_fn. Set by 'answer' around the
+** one call it makes, and read only there: a connector cannot reach dh_defer
+** except from inside its own dh_call_fn, which is exactly when this is
+** valid. */
+static size_t dh_calling_conn = (size_t)-1;
+
+static dh_pending **pending_find (dh_host *h, dvs_id id, int64_t tok) {
+  dh_pending **pp = &h->pending;
+  while (*pp != NULL) {
+    if ((*pp)->id == id && (*pp)->tok == tok)
+      return pp;
+    pp = &(*pp)->next;
+  }
+  return NULL;
+}
+
+int dh_defer (dh_host *h, dvs_id id, int64_t tok, void *callud,
+              int64_t deadline_ms) {
+  dh_pending *e;
+  if (dh_calling_conn >= h->nconns)
+    return -1;                           /* not inside a connector call */
+  if (pending_find(h, id, tok) != NULL)
+    return -1;                           /* (id, tok) is already owed */
+  e = (dh_pending *)calloc(1, sizeof(dh_pending));
+  if (e == NULL)
+    return -1;
+  e->id = id;
+  e->tok = tok;
+  e->conn = dh_calling_conn;
+  e->callud = callud;
+  e->deadline_ms = deadline_ms;
+  e->next = h->pending;
+  h->pending = e;
+  h->npending++;
+  return 0;
+}
+
+size_t dh_pending_count (dh_host *h, dvs_id id) {
+  dh_pending *e;
+  size_t n = 0;
+  for (e = h->pending; e != NULL; e = e->next) {
+    if (e->id == id)
+      n++;
+  }
+  return n;
+}
+
+/*
+** Build the reply envelope. Shared by the inline path in 'answer' and the
+** deferred path in 'dh_reply' so the two cannot drift: a guest must not be
+** able to tell from the bytes whether its call was answered at once or an
+** hour later.
+*/
+static void envelope (dh_buf *reply, int64_t tok, dh_call_status st,
+                      const unsigned char *value, size_t vlen,
+                      const char *detail) {
+  dh_map(reply, 3);
+  dh_str(reply, "tok"); dh_int(reply, tok);
+  dh_str(reply, "status");
+  dh_str(reply, (st == DH_CALL_OK) ? "ok"
+               : (st == DH_CALL_DENIED) ? "denied" : "error");
+  if (st == DH_CALL_OK) {
+    dh_str(reply, "value");
+    if (vlen > 0)
+      dh_raw(reply, value, vlen);
+    else
+      dh_nil(reply);
+  }
+  else {
+    dh_str(reply, "detail");
+    dh_str(reply, (detail != NULL && detail[0] != '\0')
+                  ? detail
+                  : "the connector refused without saying why, which is its "
+                    "bug");
+  }
+}
+
+int dh_reply (dh_host *h, dvs_id id, int64_t tok, dh_call_status st,
+              const unsigned char *value, size_t vlen, const char *detail) {
+  dh_pending **pp = pending_find(h, id, tok);
+  dh_pending *e;
+  dv_instance *inst;
+  dh_buf reply;
+  int rc = -1;
+  if (pp == NULL)
+    return -1;   /* swept already: the instance died, or the deadline fired */
+  e = *pp;
+  *pp = e->next;
+  h->npending--;
+  free(e);
+  /* The instance may have hibernated between the deferral and now, in which
+     case its queues went with it and the reply waits for the wake the same
+     way any other undelivered message does -- there is nothing to push to
+     yet. And it may simply be gone, which is the drop the ledger exists to
+     make silent rather than fatal. */
+  inst = dvs_instance(h->sw, id);
+  if (inst == NULL)
+    return -1;
+  {
+    dv_queue_id replies = dv_queue_lookup(inst, DH_REPLIES_QUEUE);
+    if (replies == 0)
+      return -1;                         /* asked, declared nowhere to hear */
+    dh_buf_init(&reply);
+    envelope(&reply, tok, st, value, vlen, detail);
+    if (reply.len > 0 && dv_queue_push(inst, replies, reply.p, reply.len)
+        == DV_OK)
+      rc = 0;
+    dh_buf_free(&reply);
+  }
+  return rc;
+}
+
+/*
+** Drop every entry a connector will never be able to collect, telling the
+** connector so it can abandon the work. Called when an instance dies and
+** when the host closes.
+*/
+static void pending_drop_instance (dh_host *h, dvs_id id, int all) {
+  dh_pending **pp = &h->pending;
+  while (*pp != NULL) {
+    dh_pending *e = *pp;
+    if (all || e->id == id) {
+      dh_cancel_fn cancel = (e->conn < h->nconns) ? h->conns[e->conn].cancel
+                                                  : NULL;
+      void *ud = (e->conn < h->nconns) ? h->conns[e->conn].ud : NULL;
+      *pp = e->next;
+      h->npending--;
+      if (cancel != NULL)
+        cancel(ud, e->id, e->tok, e->callud);
+      free(e);
+    }
+    else
+      pp = &e->next;
+  }
+}
+
+/*
+** The host-side backstop. A connector that dies mid-call would otherwise
+** leave its entry forever, and the guest -- whose own queue.wait timeout has
+** long since fired -- would hold reply-queue headroom it will never use.
+*/
+static void pending_fire_deadlines (dh_host *h) {
+  dh_pending **pp = &h->pending;
+  while (*pp != NULL) {
+    dh_pending *e = *pp;
+    if (e->deadline_ms > 0 && e->deadline_ms <= h->now_ms) {
+      dh_cancel_fn cancel = (e->conn < h->nconns) ? h->conns[e->conn].cancel
+                                                  : NULL;
+      void *ud = (e->conn < h->nconns) ? h->conns[e->conn].ud : NULL;
+      dvs_id id = e->id;
+      int64_t tok = e->tok;
+      void *callud = e->callud;
+      *pp = e->next;
+      h->npending--;
+      free(e);
+      if (cancel != NULL)
+        cancel(ud, id, tok, callud);
+      /* Answer it, so the guest gets a sentence rather than a silence. The
+         entry is already unlinked, so this cannot recurse into itself. */
+      {
+        dv_instance *inst = dvs_instance(h->sw, id);
+        if (inst != NULL) {
+          dv_queue_id replies = dv_queue_lookup(inst, DH_REPLIES_QUEUE);
+          if (replies != 0) {
+            dh_buf reply;
+            dh_buf_init(&reply);
+            envelope(&reply, tok, DH_CALL_ERROR, NULL, 0,
+                     "the connector that took this call never answered it; "
+                     "the host reclaimed the request at its deadline");
+            if (reply.len > 0)
+              dv_queue_push(inst, replies, reply.p, reply.len);
+            dh_buf_free(&reply);
+          }
+        }
+      }
+    }
+    else
+      pp = &e->next;
+  }
 }
 
 static dh_connector *route (dh_host *h, const char *call) {
@@ -1008,26 +1212,31 @@ static void answer (dh_host *h, dvs_id id, const unsigned char *req,
     return;
   }
 
-  st = conn->fn(conn->ud, id, call, args, argslen, &value, detail,
+  dh_calling_conn = (size_t)(conn - h->conns);
+  st = conn->fn(conn->ud, id, tok, call, args, argslen, &value, detail,
                 sizeof(detail));
-  dh_map(reply, 3);
-  dh_str(reply, "tok"); dh_int(reply, tok);
-  dh_str(reply, "status");
-  dh_str(reply, (st == DH_CALL_OK) ? "ok"
-               : (st == DH_CALL_DENIED) ? "denied" : "error");
-  if (st == DH_CALL_OK) {
-    dh_str(reply, "value");
-    if (value.len > 0)
-      dh_raw(reply, value.p, value.len);
-    else
-      dh_nil(reply);
+  dh_calling_conn = (size_t)-1;
+
+  if (st == DH_CALL_PENDING) {
+    /* Taken. The reply buffer stays empty, so pump_instance pushes nothing
+       and the request is still consumed -- the calls queue cannot wedge on a
+       call that is merely slow. The connector owes exactly one dh_reply for
+       this (id, tok), and the ledger is what will notice if it never comes.
+
+       A connector that returned PENDING without recording the entry has a
+       bug that would otherwise be silent: it would never be answered and
+       never be counted. Answer it here instead, because a guest deserves a
+       sentence and the alternative is a hang. */
+    if (pending_find(h, id, tok) == NULL) {
+      envelope(reply, tok, DH_CALL_ERROR, NULL, 0,
+               "the connector deferred this call without recording it, which "
+               "is its bug: a deferred call must be taken with dh_defer");
+    }
+    dh_buf_free(&value);
+    return;
   }
-  else {
-    dh_str(reply, "detail");
-    dh_str(reply, (detail[0] != '\0') ? detail : "the connector refused "
-                                                 "without saying why, which "
-                                                 "is its bug");
-  }
+
+  envelope(reply, tok, st, value.p, value.len, detail);
   dh_buf_free(&value);
 }
 
@@ -1055,8 +1264,17 @@ static void pump_instance (dh_host *h, dh_slot *sc) {
     if (replies != 0) {
       dv_queue_info info;
       memset(&info, 0, sizeof(info));
-      if (dv_queue_state(inst, replies, &info) == DV_OK &&
-          info.capacity > 0 && info.len >= info.capacity)
+      /* Pending calls count against the headroom. One has been drained but
+         has produced no reply yet, so without this term the queue looks
+         emptier than it is: defer twenty calls into a sixteen-deep queue and
+         four answers have nowhere to land, and the guest waits out a timeout
+         for a reply the host already computed. This is the same flow control
+         a plugin's max_inflight applies at the pipe, applied here at the
+         queue -- and this is the more fundamental of the two, because it
+         bounds what the guest can be *owed* rather than what the far side
+         can be sent. */
+      if (dv_queue_state(inst, replies, &info) == DV_OK && info.capacity > 0 &&
+          info.len + dh_pending_count(h, sc->id) >= (size_t)info.capacity)
         break;
     }
     if (dv_queue_peek(inst, calls, &req, &reqlen) != DV_OK)
@@ -1083,12 +1301,13 @@ static void pump_instance (dh_host *h, dh_slot *sc) {
 ** the same moment instead of the replayer's.
 ** ====================================================================== */
 
-static dh_call_status conn_time (void *ud, dvs_id id, const char *call,
+static dh_call_status conn_time (void *ud, dvs_id id, int64_t tok,
+                                 const char *call,
                                  const unsigned char *args, size_t argslen,
                                  dh_buf *value, char *detail,
                                  size_t detailcap) {
   struct timespec ts;
-  (void)ud; (void)id; (void)args; (void)argslen;
+  (void)ud; (void)id; (void)tok; (void)args; (void)argslen;
   if (strcmp(call, "time") != 0) {
     snprintf(detail, detailcap, "the time connector answers 'time' and "
                                 "nothing else; '%s' is not it", call);
@@ -1206,6 +1425,9 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
 }
 
 void dh_host_close (dh_host *h) {
+  /* Before the connectors go: every pending entry names one of them, and a
+     cancel that ran after its connector closed would reach freed state. */
+  pending_drop_instance(h, 0, 1);
   dh_http_close(h);
   dh_sql_close(h);
   dh_crypto_close(h);
@@ -1225,6 +1447,7 @@ void dh_host_close (dh_host *h) {
 int dh_host_turn (dh_host *h) {
   dh_slot *sc;
   h->now_ms = dh_now_ms();
+  pending_fire_deadlines(h);
   dvs_step(h->sw);
   /* Elapsed guest wait timeouts. The resume happens outside dvs_step; the
      swarm reconciles the instance's fate on its next step, which is the
@@ -1246,11 +1469,19 @@ int dh_host_turn (dh_host *h) {
 
 int dh_host_poll_timeout (dh_host *h) {
   dh_slot *sc;
+  dh_pending *e;
   int64_t next = -1;
   int http;
   for (sc = h->slots; sc != NULL; sc = sc->next) {
     if (sc->has_deadline && (next < 0 || sc->deadline_ms < next))
       next = sc->deadline_ms;
+  }
+  /* And the ledger's own backstops, for the same reason the guest timeouts
+     are here: a sleep that outran one would let a dead connector's entry sit
+     past the moment it was supposed to be reclaimed. */
+  for (e = h->pending; e != NULL; e = e->next) {
+    if (e->deadline_ms > 0 && (next < 0 || e->deadline_ms < next))
+      next = e->deadline_ms;
   }
   /* Fold in the listener's earliest connection deadline, so a caller that
      sleeps for this value still wakes to enforce a slow client's timeout --

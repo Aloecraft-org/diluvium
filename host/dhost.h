@@ -159,26 +159,72 @@ int dh_config_load (const char *path, dh_config *out, char *err, size_t errcap);
 ** via dvs_holds -- so a connector only ever sees calls it is entitled to
 ** answer. It appends its reply *value* as msgpack and returns OK, or fills
 ** 'detail' and returns ERROR/DENIED; the pump owns the envelope.
+**
+** Or it returns PENDING, and answers later. That is build8's seam: a
+** connector that cannot answer now says so, the pump writes nothing, and
+** the host goes back to driving the swarm. The connector then owes exactly
+** one 'dh_reply' for the (id, tok) it was handed -- never zero, never two.
+** The debt is why the pump keeps a table of them (see dh_pending): a reply
+** that never comes is a leak, and a leak nobody counts is invisible.
+**
+** 'tok' is the request's correlation token, passed so a connector that
+** defers can name the call it is answering. A connector that answers inline
+** does not need it.
 ** ====================================================================== */
 
 typedef enum dh_call_status {
   DH_CALL_OK = 0,
   DH_CALL_ERROR,
-  DH_CALL_DENIED
+  DH_CALL_DENIED,
+  DH_CALL_PENDING                       /* taken; one dh_reply is owed */
 } dh_call_status;
 
-typedef dh_call_status (*dh_call_fn) (void *ud, dvs_id id, const char *call,
+typedef dh_call_status (*dh_call_fn) (void *ud, dvs_id id, int64_t tok,
+                                      const char *call,
                                       const unsigned char *args, size_t argslen,
                                       dh_buf *value,
                                       char *detail, size_t detailcap);
 
-#define DH_MAX_CONNECTORS 8
+/* Told that a pending call will never be collected -- its instance died, or
+** the host is closing. The connector abandons whatever it started; it must
+** NOT call dh_reply for that call, because the entry is already gone. */
+typedef void (*dh_cancel_fn) (void *ud, dvs_id id, int64_t tok, void *callud);
+
+#define DH_MAX_CONNECTORS 16
 
 typedef struct dh_connector {
   char prefix[32];
   dh_call_fn fn;
+  dh_cancel_fn cancel;                  /* optional; NULL when inline-only */
   void *ud;
 } dh_connector;
+
+
+/* ======================================================================
+** Pending calls: the deferred-reply ledger.
+**
+** One entry per call a connector took as PENDING. The key is (id, tok) --
+** two integers, not a pointer and not a registry reference: the host lives
+** outside the sandbox and addresses instances by id, so a parked coroutine
+** is kept alive by its instance and the instance by the swarm, exactly as
+** it is for a guest parked on any other queue. Nothing here anchors a Lua
+** object, so nothing here can leak one.
+**
+** What CAN leak is the entry itself, if a connector never answers. Two
+** sweeps prevent it: the instance's death (host_destroy) drops its entries,
+** and an entry with a deadline is reclaimed when it elapses.
+** ====================================================================== */
+
+typedef struct dh_pending dh_pending;
+
+struct dh_pending {
+  dvs_id id;
+  int64_t tok;
+  size_t conn;                          /* index into dh_host.conns */
+  void *callud;                         /* the connector's handle for it */
+  int64_t deadline_ms;                  /* 0 = no host-side backstop */
+  dh_pending *next;
+};
 
 
 /* ======================================================================
@@ -199,6 +245,8 @@ typedef struct dh_host {
   int64_t now_ms;                       /* monotonic, refreshed per loop turn */
   dh_slot *slots;                       /* roster head; entries are the ctx
                                            pointers dvs hands back */
+  dh_pending *pending;                  /* deferred-reply ledger head */
+  size_t npending;                      /* entries, for the leak assertion */
   void *listener;                       /* the http connector's state, or NULL */
   void *sqlctx;                         /* the sql connector's state, or NULL */
   void *cryptoctx;                      /* the crypto connector's state, or NULL */
@@ -235,8 +283,40 @@ int64_t dh_now_ms (void);
 
 /* Register a connector; 0 on success, nonzero when the table is full or the
    prefix is already taken. Exposed for tests and for connectors that live
-   outside this file. */
+   outside this file. 'cancel' may be NULL for a connector that only ever
+   answers inline. */
 int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud);
+int dh_register_deferrable (dh_host *h, const char *prefix, dh_call_fn fn,
+                            dh_cancel_fn cancel, void *ud);
+
+/* ----------------------------------------------------------------------
+** The deferred-reply half of the connector contract.
+** ---------------------------------------------------------------------- */
+
+/* Take ownership of the call currently being answered. Called by a connector
+   from inside its dh_call_fn, immediately before it returns DH_CALL_PENDING.
+   'callud' is the connector's own handle for the call and comes back to it
+   in 'cancel'. 'deadline_ms' is an absolute dh_now_ms() moment after which
+   the host reclaims the entry itself; 0 means the connector is trusted to
+   answer. Returns 0, or nonzero when the entry could not be recorded -- in
+   which case the connector must answer inline instead, because an unrecorded
+   pending call is one nothing will ever collect. */
+int dh_defer (dh_host *h, dvs_id id, int64_t tok, void *callud,
+              int64_t deadline_ms);
+
+/* Answer a call taken with dh_defer. Returns 0 when the reply was delivered,
+   and nonzero when there was no such entry -- the normal outcome after the
+   instance died or the deadline fired, and not an error the caller must
+   handle beyond freeing its own state. 'value' is msgpack, or NULL with
+   'detail' for the not-ok statuses. */
+int dh_reply (dh_host *h, dvs_id id, int64_t tok, dh_call_status st,
+              const unsigned char *value, size_t vlen, const char *detail);
+
+/* How many replies this instance is still owed. The pump subtracts this from
+   its reply-queue headroom: a pending call has been drained but has produced
+   no reply yet, so without it the queue looks emptier than it is and a burst
+   of deferrals can compute answers that have nowhere to land. */
+size_t dh_pending_count (dh_host *h, dvs_id id);
 
 /* The built-in listener and sql connectors, implemented in dhost_http.c and
    dhost_sql.c; opened by dh_host_open when their config blocks say so. */

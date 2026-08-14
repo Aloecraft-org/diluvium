@@ -85,7 +85,8 @@ static int64_t now_ms (void) {
   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static dh_call_status conn_exec (void *ud, dvs_id id, const char *call,
+static dh_call_status conn_exec (void *ud, dvs_id id, int64_t tok,
+                                 const char *call,
                                  const unsigned char *args, size_t argslen,
                                  dh_buf *value, char *detail,
                                  size_t detailcap) {
@@ -106,6 +107,7 @@ static dh_call_status conn_exec (void *ud, dvs_id id, const char *call,
   dh_call_status result = DH_CALL_ERROR;
   int exit_status = -1;
   (void)id;
+  (void)tok;
 
   memset(argv, 0, sizeof(argv));
   if (strcmp(call, "exec/run") != 0) {

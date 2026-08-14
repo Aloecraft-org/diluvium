@@ -1267,6 +1267,311 @@ static void two_ports_pre_bound_route_by_token (void) {
 }
 
 
+/* ------------------------------------------------- build8: the deferral seam
+
+** 'slow' is a deliberately slow capability with no transport, no subprocess
+** and no frame: it defers every call and answers it N milliseconds later off
+** the host clock. What it exercises is exactly the seam DH_CALL_PENDING adds
+** and nothing else, which is the point of testing it before a plugin exists
+** -- when the plugin channel misbehaves later, this test says whether the
+** fault is in the transport or underneath it.
+*/
+
+#define SLOW_MAX 64
+
+typedef struct slow_call {
+  int live;
+  dvs_id id;
+  int64_t tok;
+  int64_t due_ms;
+  int64_t n;                            /* echoed, so a reply names its call */
+} slow_call;
+
+typedef struct slow_ctx {
+  dh_host *h;
+  slow_call calls[SLOW_MAX];
+  int taken;
+  int cancelled;
+  int refused;
+} slow_ctx;
+
+static dh_call_status conn_slow (void *ud, dvs_id id, int64_t tok,
+                                 const char *call, const unsigned char *args,
+                                 size_t argslen, dh_buf *value, char *detail,
+                                 size_t detailcap) {
+  slow_ctx *s = (slow_ctx *)ud;
+  diluvium_mp_cursor c;
+  diluvium_mp_token t;
+  int64_t ms = 50, n = 0;
+  int i;
+  (void)value;
+  if (strcmp(call, "slow/work") != 0) {
+    snprintf(detail, detailcap, "the slow connector answers 'slow/work'");
+    return DH_CALL_ERROR;
+  }
+  diluvium_mp_open(&c, args, argslen);
+  if (diluvium_mp_field(&c, "ms") && diluvium_mp_read(&c, &t) &&
+      t.kind == DILUVIUM_MP_INT)
+    ms = t.i;
+  diluvium_mp_open(&c, args, argslen);
+  if (diluvium_mp_field(&c, "n") && diluvium_mp_read(&c, &t) &&
+      t.kind == DILUVIUM_MP_INT)
+    n = t.i;
+  for (i = 0; i < SLOW_MAX && s->calls[i].live; i++)
+    ;
+  if (i == SLOW_MAX) {
+    s->refused++;
+    snprintf(detail, detailcap, "slow: no room for another call in flight");
+    return DH_CALL_ERROR;
+  }
+  /* Record BEFORE returning PENDING. A connector that returns PENDING
+     without a ledger entry has deferred a call nothing will ever collect,
+     and 'answer' turns that into a named error rather than a hang. */
+  if (dh_defer(s->h, id, tok, &s->calls[i], 0) != 0) {
+    s->refused++;
+    snprintf(detail, detailcap, "slow: the host would not take the deferral");
+    return DH_CALL_ERROR;
+  }
+  s->calls[i].live = 1;
+  s->calls[i].id = id;
+  s->calls[i].tok = tok;
+  s->calls[i].due_ms = dh_now_ms() + ms;
+  s->calls[i].n = n;
+  s->taken++;
+  return DH_CALL_PENDING;
+}
+
+static void slow_cancel (void *ud, dvs_id id, int64_t tok, void *callud) {
+  slow_ctx *s = (slow_ctx *)ud;
+  slow_call *sc = (slow_call *)callud;
+  (void)id; (void)tok;
+  if (sc != NULL)
+    sc->live = 0;
+  s->cancelled++;
+}
+
+/* What a plugin's poll turn will do: answer everything whose moment came. */
+static void slow_tick (slow_ctx *s) {
+  int64_t now = dh_now_ms();
+  int i;
+  for (i = 0; i < SLOW_MAX; i++) {
+    if (s->calls[i].live && s->calls[i].due_ms <= now) {
+      dh_buf v;
+      dh_buf_init(&v);
+      dh_int(&v, s->calls[i].n);
+      s->calls[i].live = 0;
+      dh_reply(s->h, s->calls[i].id, s->calls[i].tok, DH_CALL_OK,
+               v.p, v.len, NULL);
+      dh_buf_free(&v);
+    }
+  }
+}
+
+static int run_until_log_slow (dh_host *h, slow_ctx *s, char *out, size_t cap,
+                               int max_turns) {
+  int i;
+  for (i = 0; i < max_turns; i++) {
+    dh_host_turn(h);
+    slow_tick(s);
+    if (pop_log(h, out, cap))
+      return 1;
+    tiny_sleep();
+  }
+  return 0;
+}
+
+/* Open a deployment whose only connector is 'slow', with the given caps. */
+static int slow_host (dh_host *h, slow_ctx *s, const char *supname,
+                      const char *caps, char *err, size_t errcap) {
+  dh_config cfg;
+  char cfgsrc[640], path[512];
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/%s',\n"
+           "  max_instances = 16,\n"
+           "  caps = { %s } }\n", tmpdir, supname, caps);
+  fixture("slow.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/slow.host.lua", tmpdir);
+  if (dh_config_load(path, &cfg, err, errcap) != 0 ||
+      dh_host_open(h, &cfg, err, errcap) != 0)
+    return -1;
+  memset(s, 0, sizeof(*s));
+  s->h = h;
+  if (dh_register_deferrable(h, "slow", conn_slow, slow_cancel, s) != 0) {
+    snprintf(err, errcap, "the slow connector would not register");
+    dh_host_close(h);
+    return -1;
+  }
+  return 0;
+}
+
+/*
+** Many calls in flight from one instance. Eight 200ms calls answered
+** concurrently take about 200ms; answered the way the host answered before
+** build8 -- one at a time, inside the pump -- they take 1600. The assertion
+** is on the gap, which is far wider than any scheduling noise.
+*/
+static void deferral_puts_many_calls_in_flight_at_once (void) {
+  dh_host h;
+  slow_ctx s;
+  char err[512], log[256];
+  int64_t t0, elapsed;
+  fixture("sup_inflight.lua",
+    "local calls = queue.declare('host/calls', {capacity = 16, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 16})\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local N = 8\n"
+    "for i = 1, N do\n"
+    "  queue.push(calls, {tok = i, call = 'slow/work', args = {ms = 200, n = i}})\n"
+    "end\n"
+    "local seen, sum = 0, 0\n"
+    "while seen < N do\n"
+    "  local _, m, why = queue.wait({replies}, 5000)\n"
+    "  if why ~= 'ok' then\n"
+    "    queue.push(log, 'bad wait: ' .. tostring(why)) break\n"
+    "  elseif m.status ~= 'ok' then\n"
+    "    queue.push(log, 'bad status: ' .. tostring(m.status) .. '/' ..\n"
+    "               tostring(m.detail)) break\n"
+    "  end\n"
+    "  seen = seen + 1\n"
+    "  sum = sum + m.value\n"
+    "end\n"
+    "if seen == N then queue.push(log, 'all:' .. seen .. ':' .. sum) end\n"
+    "queue.wait({park})\n");
+  if (slow_host(&h, &s, "sup_inflight.lua", "'queue:*', 'host:slow/work'",
+                err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the slow deployment opens");
+    return;
+  }
+  t0 = dh_now_ms();
+  log[0] = '\0';
+  run_until_log_slow(&h, &s, log, sizeof(log), 400);
+  elapsed = dh_now_ms() - t0;
+  /* 36 is 1+2+...+8: every reply carried its own request's number back, so
+     the sum proves correlation held across eight simultaneous deferrals. */
+  ok(strcmp(log, "all:8:36") == 0,
+     "eight deferred calls all answer, each carrying its own token's value");
+  if (strcmp(log, "all:8:36") != 0)
+    printf("      (guest said: %s)\n", log);
+  ok(elapsed < 1000,
+     "and they overlap: eight 200ms calls finish in well under the 1600ms "
+     "that answering them one at a time would cost");
+  printf("      (elapsed %d ms, %d taken, %d refused)\n", (int)elapsed,
+         s.taken, s.refused);
+  ok(h.npending == 0, "the ledger is empty once every call is answered");
+  dh_host_close(&h);
+}
+
+/*
+** The claim the whole build rests on: one instance parked in a slow call does
+** not stop another from running. The root spawns a child that asks for 500ms
+** of slowness, then makes thirty round-trips of its own. If the host still
+** owes the child a reply when the root finishes, the root ran *through* the
+** child's call rather than after it.
+*/
+static void a_parked_instance_does_not_stall_another (void) {
+  dh_host h;
+  slow_ctx s;
+  char err[512], log[256];
+  size_t owed_at_finish;
+  fixture("sup_two.lua",
+    "local sys = queue.declare('system/lifecycle', {capacity = 4})\n"
+    "local calls = queue.declare('host/calls', {capacity = 8, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 8})\n"
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local KID = \"local c = queue.declare('host/calls', \"\n"
+    "         .. \"{capacity = 4, exported = true})\\n\"\n"
+    "         .. \"local r = queue.declare('host/replies', {capacity = 4})\\n\"\n"
+    "         .. \"queue.push(c, {tok = 1, call = 'slow/work', \"\n"
+    "         .. \"args = {ms = 500, n = 1}})\\n\"\n"
+    "         .. \"queue.wait({r}, 9000)\\n\"\n"
+    "queue.push(sys, {op = 'spawn', code = KID,\n"
+    "                 caps = {'queue:*', 'host:slow/work'}})\n"
+    "local n = 0\n"
+    "while n < 30 do\n"
+    "  queue.push(calls, {tok = 1000 + n, call = 'slow/work',\n"
+    "                     args = {ms = 0, n = 1}})\n"
+    "  local _, m, why = queue.wait({replies}, 5000)\n"
+    "  if why ~= 'ok' or m.status ~= 'ok' then\n"
+    "    queue.push(log, 'root stalled at ' .. n .. ': ' .. tostring(why))\n"
+    "    break\n"
+    "  end\n"
+    "  n = n + 1\n"
+    "end\n"
+    "if n == 30 then queue.push(log, 'root:' .. n) end\n"
+    "queue.wait({park})\n");
+  if (slow_host(&h, &s, "sup_two.lua",
+                "'lifecycle', 'queue:*', 'host:slow/work'",
+                err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the two-instance slow deployment opens");
+    return;
+  }
+  log[0] = '\0';
+  run_until_log_slow(&h, &s, log, sizeof(log), 400);
+  owed_at_finish = h.npending;
+  ok(strcmp(log, "root:30") == 0,
+     "the root completes thirty of its own hostcalls");
+  if (strcmp(log, "root:30") != 0)
+    printf("      (guest said: %s)\n", log);
+  ok(owed_at_finish >= 1,
+     "and the child's 500ms call was still in flight when it did: a parked "
+     "instance does not stall another");
+  printf("      (owed at finish: %d, taken: %d)\n", (int)owed_at_finish,
+         s.taken);
+  dh_host_close(&h);
+}
+
+/*
+** The leak surface, asserted rather than documented. An instance that dies
+** with a call outstanding must leave no entry behind, and the connector must
+** be told so it can abandon the work -- otherwise the ledger grows for the
+** life of the host and a plugin computes answers for programs that are gone.
+*/
+static void a_dead_instance_leaves_no_pending_entry (void) {
+  dh_host h;
+  slow_ctx s;
+  char err[512];
+  int i;
+  size_t peak = 0;
+  fixture("sup_die.lua",
+    /* Ask, give up after 100ms, and end -- while the connector is still
+       five seconds from answering. The short wait is load-bearing twice: it
+       leaves the instance alive long enough for the pump to take the call,
+       and it makes the instance die with that call still outstanding, which
+       is the state the ledger has to survive. */
+    "local calls = queue.declare('host/calls', {capacity = 4, exported = true})\n"
+    "local replies = queue.declare('host/replies', {capacity = 4})\n"
+    "queue.declare('log', {capacity = 4, exported = true})\n"
+    "queue.push(calls, {tok = 1, call = 'slow/work', args = {ms = 5000, n = 1}})\n"
+    "queue.wait({replies}, 100)\n");
+  if (slow_host(&h, &s, "sup_die.lua", "'queue:*', 'host:slow/work'",
+                err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the dying-instance deployment opens");
+    return;
+  }
+  for (i = 0; i < 200; i++) {
+    dh_host_turn(&h);
+    slow_tick(&s);
+    if (h.npending > peak)
+      peak = h.npending;
+    if (peak > 0 && h.npending == 0)
+      break;
+    tiny_sleep();
+  }
+  ok(peak == 1, "the call was taken and counted while the instance lived");
+  ok(h.npending == 0,
+     "and the ledger released it when the instance died, without waiting out "
+     "the call");
+  ok(s.cancelled == 1,
+     "the connector was told to abandon the work, so a plugin can stop it");
+  dh_host_close(&h);
+  ok(h.npending == 0, "closing the host leaves nothing owed");
+}
+
 int main (void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/host_check_XXXXXX");
   if (mkdtemp(tmpdir) == NULL) {
@@ -1289,6 +1594,9 @@ int main (void) {
   the_listener_refuses_injection_and_smuggling();
   two_ports_pre_bound_route_by_token();
   the_listener_forwards_allowlisted_headers();
+  deferral_puts_many_calls_in_flight_at_once();
+  a_parked_instance_does_not_stall_another();
+  a_dead_instance_leaves_no_pending_entry();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }
