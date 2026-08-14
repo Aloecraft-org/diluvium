@@ -211,7 +211,15 @@ Recorded on the roadmap, built later, never pretended:
 - **Listener routing to a non-root instance** (cap5 gap): `http_in` lands on the
   root; an API can't be served by a spawned child yet.
 - **`net`** — outbound HTTP/TCP connector; among other things, what a guest-side
-  endpoint tester (cap5) needs.
+  endpoint tester (cap5) needs, and what any deployment calling a REST API
+  wants. Its scope-type is the point of building it: a grant names **which
+  hosts may be reached** (`doc/Capabilities.md` §1 — `net` takes a CIDR, and
+  a domain allowlist for the HTTP verb on top), so outbound reach is a stated,
+  auditable part of a deployment rather than a property of whatever the
+  platform happens to make reachable. Until it exists, a deployment that needs
+  an outbound request reaches for `exec` and an HTTP client — which works, and
+  is a wider grant than the one being asked for. That gap is the argument for
+  the connector, and it is why `net` ranks above the rest of this list.
 - **Installer ships the host** (`--host`/`--full`) + publishes `diluvium-host` as
   a release asset — the distribution gap that makes `curl … | sh` yield a runtime
   that can't do half of what the docs describe.

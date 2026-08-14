@@ -103,14 +103,28 @@ capability configuration easy and obvious, not making it a fight:
   stays — general capabilities underneath, ergonomic verbs on top. From a
   permission view the config should not care whether a path holds a SQLite file
   or a text file; `sql` is a verb layered on `fs`, not its own universe.
+- **Push it outward, and say so.** The runtime does not have to be the only
+  place a control lives, and often should not be. Authentication, TLS, egress
+  policy and rate limiting belong at the perimeter, in components built for
+  them; `doc/Host.md` §"The perimeter is not the core" is the deployment shape
+  and treats it as the recommendation rather than as a compromise. The docs'
+  job is to make what a program can touch *visible*, not to argue with an
+  operator who has decided where a control belongs.
+- **A missing narrow capability is a bug in this list, not a lesson for the
+  user.** When the only way to do an ordinary thing is a wide grant, people
+  take the wide grant — correctly, because the work has to ship. Every time
+  that happens the answer is to build the narrow capability, not to write a
+  warning about the wide one. Restriction that has no ergonomic path through
+  it does not produce caution; it produces a catch-all, and a catch-all is
+  strictly worse than the specific grant that was withheld.
 
 ## 5. `exec`, and the one category that is not a sandbox
 
 Most capabilities map cleanly onto scoped resource access, the way WASI's
 fine-grained `fs`/`net` control does. `exec` does not: it hands control to a
-**native subprocess outside every sandbox**, which no scope reaches. It is easy
-to implement (a naive pass-through) and honest to offer, but two things are true
-and must be said in its docs:
+**native subprocess outside every sandbox**, which no scope reaches. It is the
+seam where the core stops and the platform takes over, it is offered on
+purpose, and two things about it are load-bearing:
 
 - **The instruction budget cannot bound it** — a subprocess runs outside the VM
   and costs ~zero VM instructions, so `exec` is bounded by a **wall-clock timeout
@@ -118,6 +132,14 @@ and must be said in its docs:
   reason `os` is sealed.)
 - **Granting `exec` is leaving the sandbox.** Enable it freely; do not let the
   docs claim a guarantee it voids.
+
+Both are statements of fact, not discouragement. The corollary that belongs
+beside them, from §4: when `exec` is being reached for because the specific
+capability someone needs does not exist yet, the finding is about the missing
+capability. A deployment shelling out to an HTTP client is telling the roadmap
+that `net` is late — not telling the operator to be more careful. Read
+reach-for-`exec` as a measurement, and treat the narrow capability it points
+at as the work.
 
 Replay is unaffected: an `exec` result arrives as a connector reply in the
 message log, so a replay replays the logged output rather than re-running it —

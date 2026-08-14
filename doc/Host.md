@@ -121,6 +121,49 @@ A host with persistence hibernates what it wants to keep first. Nothing here
 is graceful-by-magic: a program that should flush on shutdown should be told,
 by a message, like everything else.
 
+## The perimeter is not the core
+
+A host runs inside a deployment, not instead of one. Several controls that
+sound like they belong to a runtime belong to the edge in front of it —
+terminating TLS, authenticating a caller, deciding which hosts may be reached
+outbound, rate limiting, request size limits before a body is buffered. This
+document does not treat delegating those as a shortfall. **Pushing a control
+outward to a purpose-built component that already does it well is the
+recommended shape**, and the recommendation is not grudging.
+
+Two reasons, and both are architecture rather than convenience:
+
+- **The core stays small and legible.** Every control re-implemented inside
+  the runtime is one more thing to specify, test, version and get wrong, in a
+  codebase whose value is that you can read all of it. A reverse proxy that
+  has terminated TLS for twenty years is not a dependency to apologise for.
+- **A vulnerability at the edge is a vulnerability you can see and replace.**
+  Hijacked DNS, a forged CA in a test bench, a token-issuing service having a
+  bad year — these are real, and the useful property is not that they cannot
+  happen but that when they do, the blast radius sits in a component you can
+  swap, in front of a core whose behaviour did not change.
+
+The standard shape, then: a gateway in front of the host authenticates the
+caller and hands the listener a request that is **already trusted to be from
+who it says**; the host's job starts after that. A guest sees `{conn, method,
+path, body}` and, when configured, an allowlisted `headers` map — the same
+message whether a gateway, a socket or a test fixture produced it, which is
+duty 4's whole point.
+
+Asymmetry is worth exploiting when choosing where a control lives. Verifying
+a signature is categorically less privilege than issuing one; checking a token
+is less than minting it. A deployment that keeps issuance outside and only
+ever verifies has already made the important reduction, and should not be
+talked out of it because verification depends on someone else's key material.
+Depending on a service to do the thing it exists to do is an engineering
+judgement with a cost you can state — not a failure of nerve.
+
+What this document does insist on is the part that is genuinely the runtime's:
+whatever the perimeter decides, the grant a program holds is still the grant
+it holds, still attenuated through every spawn, and still enumerable ahead of
+time by the analyzer. Perimeter and capability are different layers and
+neither substitutes for the other.
+
 ## What a host must not do
 
 Reach around the boundary. No connector hands a guest a live object, a shared
