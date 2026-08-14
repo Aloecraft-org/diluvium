@@ -641,21 +641,46 @@ If a plugin ever needs a Diluvium header, that has stopped being true.
 
 ### 5.3 WASI — optional, and honestly bounded
 
-Nice to have, blocking nothing. The build already targets WASI
-(`Makefile:98-125`, via a digest-pinned `wasi-sdk` container), but **WASI
-preview 1 has no subprocess spawn**, so an exec-based plugin cannot exist under
-it. The options, in order of honesty:
+Asked for as a nice-to-have, blocking nothing. **It is not reachable in build
+8, and the reason is structural rather than a matter of effort.** Checked
+rather than assumed:
 
-1. A **preopened fd** supplied by the embedder, with the plugin run outside the
-   sandbox by whoever launched wasmtime. Works today, moves the launch problem
-   out of the module.
-2. **wasi-sockets** / the component model, where the "plugin" is a component
-   import. This is what §5.1's table means by *component import*, and it is a
-   preview-2 story.
-3. Nothing — the WASI build ships without plugins and says so.
+- **There is no wasmtime-runnable host today, and `host/` is not close to
+  being one.** `build_host` and `build_host_musl` are native gcc over
+  `HOST_SRCS`; no `host/*.c` appears in any wasm target. The host uses `fork`,
+  `socketpair`, `getaddrinfo` and `poll` in fifteen places, and links SQLite.
+  WASI preview 1 supplies none of that: **no subprocess spawn** (which alone
+  rules out an exec'd plugin), and no sockets, which also rules out the
+  listener. A WASI host is a port, not a build flag.
+- **`diluvium_swarm_wasi.wasm` cannot even be instantiated by wasmtime**, by
+  design: `src/dvs_shim.c` declares `js_host_create` / `js_host_destroy` /
+  `js_host_drive` as mandatory `env` imports, so a runtime that supplies no
+  host fails at instantiation. `Makefile:217-224` says so. Only
+  `diluvium_wasi.wasm` — the interpreter CLI — runs under wasmtime today.
+- **The toolchain is not present here either.** The wasm targets drive a
+  digest-pinned `wasi-sdk` container through podman, which is not installed;
+  docker is installed but its daemon is not running, and there is no local
+  wasi-sysroot. So even the existing wasm artifacts could not be rebuilt in
+  this environment to check against.
 
-Option 1 is what to attempt if there is time. Option 3 is the default and is
-not a failure.
+The three options, unchanged but now ranked against that:
+
+1. A **preopened fd** supplied by the embedder, with the plugin launched
+   outside the sandbox by whoever ran wasmtime. This is the only one reachable
+   without a preview-2 port, and it still needs a WASI host to exist first.
+2. **wasi-sockets** / the component model, where the plugin is a component
+   import. A preview-2 story; the whole stack here is core modules plus
+   `wasi_snapshot_preview1`.
+3. **The WASI build ships without plugins and says so.**
+
+**Build 8 takes option 3.** Nothing in the plugin channel forecloses (1) — the
+transport is already a `dh_plug_arm` / `dh_plug_fire` pair over a descriptor
+the host does not otherwise interpret, so an embedder-supplied fd slots in
+where the socketpair's does. That is the seam to use when a WASI host exists.
+
+The JavaScript half of §5.2 is unaffected and is built: `rest_plugin.mjs` runs
+under Node against the native host today, and the same file speaks
+`postMessage` for Lab.
 
 ---
 
