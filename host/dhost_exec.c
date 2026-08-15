@@ -29,9 +29,16 @@
 ** convention. ERROR is reserved for the call itself failing (the deadline,
 ** an output cap, a malformed request).
 **
-** One more honesty note, in the config's face rather than buried: the host
-** answers hostcalls synchronously, so a running child stalls every guest
-** and the listener until it exits or hits the deadline. Bound it tight.
+** One more honesty note, in the config's face rather than buried: THIS
+** connector answers synchronously, so a running child stalls every guest and
+** the listener until it exits or hits the deadline. Bound it tight.
+**
+** That used to be true of the host and is now true only of exec. Build 8
+** added DH_CALL_PENDING -- a connector may take a call, return, and answer
+** later, which is how the plugin channel keeps a slow capability off the
+** shared thread -- and deliberately did not convert this file. Converting it
+** is a behaviour change to a shipped connector and belongs in its own build,
+** not smuggled into the one that made it possible.
 **
 ** Replay: the reply is a message like any other, logged and replayed --
 ** a replay does NOT re-run the subprocess.
@@ -85,7 +92,8 @@ static int64_t now_ms (void) {
   return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-static dh_call_status conn_exec (void *ud, dvs_id id, const char *call,
+static dh_call_status conn_exec (void *ud, dvs_id id, int64_t tok,
+                                 const char *call,
                                  const unsigned char *args, size_t argslen,
                                  dh_buf *value, char *detail,
                                  size_t detailcap) {
@@ -106,6 +114,7 @@ static dh_call_status conn_exec (void *ud, dvs_id id, const char *call,
   dh_call_status result = DH_CALL_ERROR;
   int exit_status = -1;
   (void)id;
+  (void)tok;
 
   memset(argv, 0, sizeof(argv));
   if (strcmp(call, "exec/run") != 0) {

@@ -433,6 +433,24 @@ sanitize_checks: _build_step0
 	gcc $(SAN_CFLAGS) -I$(CURDIR)/.data -o $(CURDIR)/dist/dhash_check_asan \
 	  $(CURDIR)/test/dhash_check.c $(CURDIR)/.data/dhash.c; \
 	$(SAN_ENV) $(CURDIR)/dist/dhash_check_asan >/dev/null; \
+	echo "=== host_check (asan+ubsan)"; \
+	gcc -O2 -Wall -o $(CURDIR)/dist/plugin_echo $(CURDIR)/test/plugin_echo.c; \
+	if printf '#include <openssl/ssl.h>\nint main(void){return 0;}\n' \
+	    | gcc -x c - -o /dev/null -lssl -lcrypto >/dev/null 2>&1; then \
+	  gcc -O2 -Wall -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto; \
+	else \
+	  gcc -O2 -Wall -DREST_NO_TLS -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c; \
+	fi; \
+	gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -I$(CURDIR)/host -o $(CURDIR)/dist/host_check_asan \
+	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \
+	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl; \
+	cd $(CURDIR)/test && DILUVIUM_PLUGIN_ECHO=$(CURDIR)/dist/plugin_echo \
+	  DILUVIUM_PLUGIN_REST=$(CURDIR)/dist/diluvium-rest-plugin \
+	  DILUVIUM_PLUGIN_REST_JS=$(CURDIR)/plugins/rest/rest_plugin.mjs \
+	  $(SAN_ENV) $(CURDIR)/dist/host_check_asan >/dev/null; \
 	echo "all contract tests clean under asan+ubsan"
 
 # The token cursor on hostile input, under the sanitizers.
@@ -514,6 +532,7 @@ dshim_check: _build_step0
 HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
   $(CURDIR)/host/dhost_sql.c $(CURDIR)/host/dhost_crypto.c \
   $(CURDIR)/host/dhost_fs.c $(CURDIR)/host/dhost_exec.c \
+  $(CURDIR)/host/dhost_plugin.c \
   $(CURDIR)/host/picohttpparser.c
 
 # No -DLUA_USE_LINUX, and so no -ldl: that flag turns on Lua's package.loadlib,
@@ -530,12 +549,62 @@ build_host: _build_step0
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3
 	@echo "dist/diluvium-host"
 
+# The plugin fixture is built first and separately, and deliberately links
+# NOTHING from this tree: doc/BUILD8.md's claim is that a plugin needs the
+# protocol and not a Diluvium header, and a fixture that quietly linked the
+# runtime would stop testing that.
 host_check: _build_step0
+	gcc -O2 -Wall -o $(CURDIR)/dist/plugin_echo $(CURDIR)/test/plugin_echo.c
+# The rest plugin needs OpenSSL for https, and the plugin cases only ever
+# fetch http://127.0.0.1 -- so where there are no OpenSSL headers (a stock
+# macOS runner has none on the default include path) build the http-only
+# variant rather than failing the suite. A missing TLS library is a reason to
+# test less, not a reason to test nothing.
+	@if printf '#include <openssl/ssl.h>\nint main(void){return 0;}\n' \
+	    | gcc -x c - -o /dev/null -lssl -lcrypto >/dev/null 2>&1; then \
+	  echo "host_check: building the rest plugin with TLS"; \
+	  gcc -O2 -Wall -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto; \
+	else \
+	  echo "host_check: no OpenSSL headers here; building the rest plugin \
+without TLS (the plugin cases only fetch http://127.0.0.1)"; \
+	  gcc -O2 -Wall -DREST_NO_TLS -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c; \
+	fi
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
 	  -o $(CURDIR)/dist/host_check \
 	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
-	@cd $(CURDIR)/test && $(CURDIR)/dist/host_check
+	@cd $(CURDIR)/test && DILUVIUM_PLUGIN_ECHO=$(CURDIR)/dist/plugin_echo \
+	  DILUVIUM_PLUGIN_REST=$(CURDIR)/dist/diluvium-rest-plugin \
+	  DILUVIUM_PLUGIN_REST_JS=$(CURDIR)/plugins/rest/rest_plugin.mjs \
+	  $(CURDIR)/dist/host_check
+
+# The rest plugin: outbound HTTP as a separate program. It links OpenSSL and
+# the host links none -- that split is the point of the plugin channel, and it
+# is why build_host_musl's fully-static link stays clean while this capability
+# still exists. -DREST_NO_TLS drops the dependency for an http-only build.
+# Nothing here includes a Diluvium header; plugins/dvplug.h is a copyable
+# starter kit, not a dependency of the runtime.
+build_plugin_rest:
+	gcc -O2 -Wall -Wextra -o $(CURDIR)/dist/diluvium-rest-plugin \
+	  $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto
+	@echo "dist/diluvium-rest-plugin"
+
+build_plugin_rest_notls:
+	gcc -O2 -Wall -Wextra -DREST_NO_TLS \
+	  -o $(CURDIR)/dist/diluvium-rest-plugin-notls \
+	  $(CURDIR)/plugins/rest/rest_plugin.c
+	@echo "dist/diluvium-rest-plugin-notls"
+
+# The static musl build, to sit beside dist/diluvium-host-musl on Alpine.
+# Run inside the same container host/build-musl.sh drives, where 'gcc' is
+# musl-gcc and openssl-libs-static provides libssl.a/libcrypto.a.
+build_plugin_rest_musl:
+	gcc -O2 -Wall -Wextra -static \
+	  -o $(CURDIR)/dist/diluvium-rest-plugin-musl \
+	  $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto
+	@echo "dist/diluvium-rest-plugin-musl"
 
 # The host as one fully static binary, for a lean Alpine box (fetch1). Run
 # INSIDE an Alpine container -- 'host/build-musl.sh' drives the container;
@@ -583,6 +652,8 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
+        host_check build_plugin_rest build_plugin_rest_notls \
+        build_plugin_rest_musl \
         snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib \
         footprint
 

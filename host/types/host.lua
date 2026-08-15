@@ -28,6 +28,43 @@
 ---@field caps string[]?              # the root's ceiling; children attenuate
 ---@field budget diluvium.HostBudget? # the root's; 0/omitted means none
 ---@field connectors diluvium.HostConnectors?  # everything absent is OFF
+---@field plugins table<string, diluvium.HostPlugin>?  # capabilities that
+---                                       # live in another program
+---@field visibility ("public"|"private"|"hidden")?  # what `capabilities/list`
+---                                       # tells a caller EXISTS, which is not
+---                                       # what it may DO (default "public")
+
+---A plugin: a capability answered by a separate program, over a framed
+---msgpack channel it inherits as fd 3. The deployment names it and points at
+---its manifest; the manifest -- a self-contained `<name>.plugin.json` --
+---says what the program is and what it answers. The split is the point: the
+---manifest travels with the plugin and is its author's document, this block
+---is the operator's and says which plugins THIS deployment wires and how
+---hard it will lean on them.
+---
+---The table key becomes the first segment of every call the plugin answers,
+---so `plugins = { rest = ... }` answers `rest/get`, gated by `host:rest/get`
+---like every other hostcall. Unlike `exec`, a plugin call does not stall the
+---host: it is deferred and the swarm keeps running.
+---@class diluvium.HostPlugin
+---@field manifest string             # required; resolved against THIS file's
+---                                   # directory, not the host's cwd
+---@field max_inflight integer?       # requests written before waiting for a
+---                                   # reply (default: the manifest's, or 4).
+---                                   # Lowering it here is the operator
+---                                   # throttling a plugin they did not write
+---@field call_timeout_ms integer?    # host-side backstop per call (default
+---                                   # 30000). A plugin that never answers
+---                                   # has its call reclaimed at this moment,
+---                                   # so a guest gets a sentence not a hang
+---@field visibility ("public"|"private"|"hidden"|"inherit")?  # whether
+---                                   # `capabilities/list` reports this
+---                                   # plugin. "public" (the default via
+---                                   # inherit) lists it to every caller with
+---                                   # granted=true/false beside it;
+---                                   # "private" lists it only to callers
+---                                   # that hold it; "hidden" never lists it,
+---                                   # though a holder can still call it
 
 ---@class diluvium.HostBudget
 ---@field instructions integer?      # lifetime VM instructions, not per-step
@@ -109,10 +146,13 @@
 ---The exec connector answers host:exec/run: a subprocess, argv as a vector
 ---(no shell unless the program names one), stdin fed, stdout/stderr
 ---captured. GRANTING EXEC IS LEAVING THE SANDBOX -- the instruction budget
----cannot reach a child -- so the bounds here are the whole point. Note the
----host answers hostcalls synchronously: a running child stalls every guest
----and the listener until it exits or hits the deadline. `exec = true` wires
----it with the defaults.
+---cannot reach a child -- so the bounds here are the whole point. Note that
+---THIS connector still answers synchronously, so a running child stalls
+---every guest and the listener until it exits or hits the deadline. Build 8
+---made deferral possible (a connector may take a call and answer later, as
+---the plugin channel does) and deliberately did not convert `exec`, which
+---is a behaviour change to a shipped connector and belongs in its own
+---build. Bound it tight. `exec = true` wires it with the defaults.
 ---@class diluvium.HostExec
 ---@field max_timeout_ms integer?     # ceiling on a call's deadline; a child
 ---                                   # still running is killed

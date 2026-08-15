@@ -18,6 +18,7 @@
 #ifndef dhost_h
 #define dhost_h
 
+#include <poll.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -122,6 +123,92 @@ typedef struct dh_exec_cfg {
   long max_output_bytes;                /* per stream, and on stdin */
 } dh_exec_cfg;
 
+
+/* ----------------------------------------------------------------------
+** Plugins: a capability that lives in another program.
+**
+** The deployment names a plugin and points at its manifest; the manifest
+** -- a self-contained '<name>.plugin.json' -- says what the plugin is and
+** what it answers. The split is deliberate: the manifest is the plugin
+** author's document and travels with the plugin, the config is the
+** operator's and says which plugins this deployment wires and how hard it
+** will lean on them.
+**
+** The runtime reads only the flat metadata here. A capability's 'args' and
+** 'result' schemas are read past without being looked at: validation is the
+** plugin's job and the tooling's, and no JSON Schema validator belongs in a
+** host that has to stay small enough to static-link.
+** ---------------------------------------------------------------------- */
+
+#define DH_MAX_PLUGINS      8
+#define DH_MAX_PLUGIN_CAPS  32
+#define DH_CHECKSUM_MAX     96
+
+
+/* ----------------------------------------------------------------------
+** Visibility: what a caller is told EXISTS, which is not what it may DO.
+**
+** doc/Capabilities.md keeps three axes apart -- capability (what a host can
+** do; the menu, declared once, and "restricting a program can never shrink
+** it"), permission (grant or deny, per instance, attenuated), and scope
+** (what a permission applies to). Discovery reads the first. Conflating it
+** with the second would make the host lie about itself: a program without
+** the grant would be told the capability does not exist, when what is true
+** is that it exists and is not theirs.
+**
+** So the default is 'public', and a listing entry carries 'granted'
+** alongside the name. A caller can then tell "this host cannot do that"
+** from "this host can, and I may not" -- two different problems with two
+** different fixes, and today a program cannot distinguish them at all.
+** It also makes an auditor agent possible: one permitted to SEE the menu
+** and not to use it.
+**
+** 'inherit' is the field's future. Once a configuration is the same object
+** at every depth (Capabilities.md section 2) and the host is simply the
+** root's parent, visibility propagates and attenuates down the tree like
+** everything else, and only the enclosing default changes -- not the shape
+** of this field.
+** ---------------------------------------------------------------------- */
+typedef enum dh_visibility {
+  DH_VIS_INHERIT = 0,                   /* take the enclosing default */
+  DH_VIS_PUBLIC,                        /* listed to any caller, held or not */
+  DH_VIS_PRIVATE,                       /* listed only to callers that hold it */
+  DH_VIS_HIDDEN                         /* never listed; callable if held */
+} dh_visibility;
+
+/* "public" | "private" | "hidden" | "inherit" -> the enum; -1 for anything
+   else, so a caller can refuse it by name. */
+int dh_visibility_of (const char *s);
+const char *dh_visibility_name (dh_visibility v);
+
+/* What to do with a call that was in flight when its instance hibernated.
+** The host-side pending state is not in the snapshot -- it cannot be, it
+** lives outside the sandbox -- so a wake has to decide, and the capability
+** is the only party that knows whether reissuing is safe. ERROR is the
+** default because it is the answer that is never silently wrong. */
+typedef enum dh_wake_policy {
+  DH_WAKE_ERROR = 0,
+  DH_WAKE_REISSUE,                      /* idempotent: ask again */
+  DH_WAKE_CACHED                        /* completed already: replay it */
+} dh_wake_policy;
+
+typedef struct dh_plugin_cap {
+  char name[DH_NAME_MAX];               /* "get"; the call is "<plugin>/get" */
+  dh_wake_policy wake;
+} dh_plugin_cap;
+
+typedef struct dh_plugin_cfg {
+  char name[DH_NAME_MAX];               /* the connector prefix: "rest" */
+  char manifest[DH_PATH_MAX];           /* resolved against the config file */
+  char exec[DH_PATH_MAX];               /* ABSOLUTE; execv, never execvp */
+  char checksum[DH_CHECKSUM_MAX];       /* logged at startup, not enforced */
+  long max_inflight;                    /* frames written before waiting */
+  long call_timeout_ms;                 /* host-side backstop, per call */
+  dh_visibility visibility;             /* default inherit -> the host's */
+  dh_plugin_cap caps[DH_MAX_PLUGIN_CAPS];
+  size_t ncaps;
+} dh_plugin_cfg;
+
 typedef struct dh_config {
   char supervisor[DH_PATH_MAX];         /* required: the root program's file */
   uint32_t max_instances;
@@ -141,7 +228,18 @@ typedef struct dh_config {
   dh_crypto_cfg crypto;                 /* connectors = { crypto = {...} } */
   dh_fs_cfg fs;                         /* connectors = { fs = {...} } */
   dh_exec_cfg exec;                     /* connectors = { exec = {...} } */
+  dh_plugin_cfg plugins[DH_MAX_PLUGINS];   /* plugins = { name = {...} } */
+  size_t nplugins;
+  dh_visibility visibility;             /* the deployment's default; public */
+  int insecure_plugins;                 /* --insecure-plugins; see doc/BUILD8 */
 } dh_config;
+
+/* Read a '<name>.plugin.json' manifest into 'out', which the caller has
+   already filled with the deployment's own fields (name, manifest path, and
+   any max_inflight override). Manifest values that the config did not
+   override win; the config's overrides survive. 0 on success. */
+int dh_plugin_manifest_load (const char *path, dh_plugin_cfg *out,
+                             char *err, size_t errcap);
 
 /* 0 on success. Nonzero leaves a sentence in 'err' saying which key and why
    -- the config is the one interface a non-programmer touches, so its
@@ -159,26 +257,79 @@ int dh_config_load (const char *path, dh_config *out, char *err, size_t errcap);
 ** via dvs_holds -- so a connector only ever sees calls it is entitled to
 ** answer. It appends its reply *value* as msgpack and returns OK, or fills
 ** 'detail' and returns ERROR/DENIED; the pump owns the envelope.
+**
+** Or it returns PENDING, and answers later. That is build8's seam: a
+** connector that cannot answer now says so, the pump writes nothing, and
+** the host goes back to driving the swarm. The connector then owes exactly
+** one 'dh_reply' for the (id, tok) it was handed -- never zero, never two.
+** The debt is why the pump keeps a table of them (see dh_pending): a reply
+** that never comes is a leak, and a leak nobody counts is invisible.
+**
+** 'tok' is the request's correlation token, passed so a connector that
+** defers can name the call it is answering. A connector that answers inline
+** does not need it.
 ** ====================================================================== */
 
 typedef enum dh_call_status {
   DH_CALL_OK = 0,
   DH_CALL_ERROR,
-  DH_CALL_DENIED
+  DH_CALL_DENIED,
+  DH_CALL_PENDING                       /* taken; one dh_reply is owed */
 } dh_call_status;
 
-typedef dh_call_status (*dh_call_fn) (void *ud, dvs_id id, const char *call,
+typedef dh_call_status (*dh_call_fn) (void *ud, dvs_id id, int64_t tok,
+                                      const char *call,
                                       const unsigned char *args, size_t argslen,
                                       dh_buf *value,
                                       char *detail, size_t detailcap);
 
-#define DH_MAX_CONNECTORS 8
+/* Told that a pending call will never be collected -- its instance died, or
+** the host is closing. The connector abandons whatever it started; it must
+** NOT call dh_reply for that call, because the entry is already gone. */
+typedef void (*dh_cancel_fn) (void *ud, dvs_id id, int64_t tok, void *callud);
+
+#define DH_MAX_CONNECTORS 16
 
 typedef struct dh_connector {
   char prefix[32];
   dh_call_fn fn;
+  dh_cancel_fn cancel;                  /* optional; NULL when inline-only */
+  /* The exact call names this connector answers, NULL-terminated -- what
+     discovery reports. The router only ever matches the prefix, so without
+     this a listing could say "sql" and not "sql/query", which is the shape
+     of answer a person cannot act on. NULL means the connector did not say,
+     and the prefix is reported alone. */
+  const char *const *calls;
+  dh_visibility visibility;
   void *ud;
 } dh_connector;
+
+
+/* ======================================================================
+** Pending calls: the deferred-reply ledger.
+**
+** One entry per call a connector took as PENDING. The key is (id, tok) --
+** two integers, not a pointer and not a registry reference: the host lives
+** outside the sandbox and addresses instances by id, so a parked coroutine
+** is kept alive by its instance and the instance by the swarm, exactly as
+** it is for a guest parked on any other queue. Nothing here anchors a Lua
+** object, so nothing here can leak one.
+**
+** What CAN leak is the entry itself, if a connector never answers. Two
+** sweeps prevent it: the instance's death (host_destroy) drops its entries,
+** and an entry with a deadline is reclaimed when it elapses.
+** ====================================================================== */
+
+typedef struct dh_pending dh_pending;
+
+struct dh_pending {
+  dvs_id id;
+  int64_t tok;
+  size_t conn;                          /* index into dh_host.conns */
+  void *callud;                         /* the connector's handle for it */
+  int64_t deadline_ms;                  /* 0 = no host-side backstop */
+  dh_pending *next;
+};
 
 
 /* ======================================================================
@@ -199,11 +350,14 @@ typedef struct dh_host {
   int64_t now_ms;                       /* monotonic, refreshed per loop turn */
   dh_slot *slots;                       /* roster head; entries are the ctx
                                            pointers dvs hands back */
+  dh_pending *pending;                  /* deferred-reply ledger head */
+  size_t npending;                      /* entries, for the leak assertion */
   void *listener;                       /* the http connector's state, or NULL */
   void *sqlctx;                         /* the sql connector's state, or NULL */
   void *cryptoctx;                      /* the crypto connector's state, or NULL */
   void *fsctx;                          /* the fs connector's state, or NULL */
   void *execctx;                        /* the exec connector's state, or NULL */
+  void *plugctx;                        /* the plugin channel's state, or NULL */
 } dh_host;
 
 /* Roster entry -- also the per-instance ctx 'create' returns, which must be
@@ -235,8 +389,47 @@ int64_t dh_now_ms (void);
 
 /* Register a connector; 0 on success, nonzero when the table is full or the
    prefix is already taken. Exposed for tests and for connectors that live
-   outside this file. */
+   outside this file. 'cancel' may be NULL for a connector that only ever
+   answers inline. */
 int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud);
+int dh_register_deferrable (dh_host *h, const char *prefix, dh_call_fn fn,
+                            dh_cancel_fn cancel, void *ud);
+/* The full form. 'calls' is a NULL-terminated list of the exact names this
+   connector answers, for discovery; 'visibility' is DH_VIS_INHERIT to take
+   the deployment's default. The two short forms above are this one with
+   NULL and INHERIT. */
+int dh_register_full (dh_host *h, const char *prefix, dh_call_fn fn,
+                      dh_cancel_fn cancel, const char *const *calls,
+                      dh_visibility visibility, void *ud);
+
+/* ----------------------------------------------------------------------
+** The deferred-reply half of the connector contract.
+** ---------------------------------------------------------------------- */
+
+/* Take ownership of the call currently being answered. Called by a connector
+   from inside its dh_call_fn, immediately before it returns DH_CALL_PENDING.
+   'callud' is the connector's own handle for the call and comes back to it
+   in 'cancel'. 'deadline_ms' is an absolute dh_now_ms() moment after which
+   the host reclaims the entry itself; 0 means the connector is trusted to
+   answer. Returns 0, or nonzero when the entry could not be recorded -- in
+   which case the connector must answer inline instead, because an unrecorded
+   pending call is one nothing will ever collect. */
+int dh_defer (dh_host *h, dvs_id id, int64_t tok, void *callud,
+              int64_t deadline_ms);
+
+/* Answer a call taken with dh_defer. Returns 0 when the reply was delivered,
+   and nonzero when there was no such entry -- the normal outcome after the
+   instance died or the deadline fired, and not an error the caller must
+   handle beyond freeing its own state. 'value' is msgpack, or NULL with
+   'detail' for the not-ok statuses. */
+int dh_reply (dh_host *h, dvs_id id, int64_t tok, dh_call_status st,
+              const unsigned char *value, size_t vlen, const char *detail);
+
+/* How many replies this instance is still owed. The pump subtracts this from
+   its reply-queue headroom: a pending call has been drained but has produced
+   no reply yet, so without it the queue looks emptier than it is and a burst
+   of deferrals can compute answers that have nowhere to land. */
+size_t dh_pending_count (dh_host *h, dvs_id id);
 
 /* The built-in listener and sql connectors, implemented in dhost_http.c and
    dhost_sql.c; opened by dh_host_open when their config blocks say so. */
@@ -246,6 +439,11 @@ void dh_http_close (dh_host *h);
    write, enforce per-connection deadlines. 'timeout_ms' is how long poll may
    sleep when nothing is ready. */
 int dh_http_poll (dh_host *h, int timeout_ms);
+/* The same, but folding 'nextra' caller-owned descriptors into the single
+   poll() and returning their revents. This is how the plugin channel joins
+   the listener's wait instead of racing it for the sleep. */
+int dh_http_poll_with (dh_host *h, int timeout_ms, struct pollfd *extra,
+                       size_t nextra);
 
 /* Milliseconds until the earliest live connection deadline, or -1 when the
    listener holds none. Lets dh_host_poll_timeout bound a quiet-socket sleep
@@ -263,5 +461,34 @@ void dh_fs_close (dh_host *h);
 
 int dh_exec_open (dh_host *h, char *err, size_t errcap);
 void dh_exec_close (dh_host *h);
+
+/* ----------------------------------------------------------------------
+** The plugin channel (dhost_plugin.c).
+**
+** Spawns each configured plugin over a socketpair it inherits as fd 3, and
+** registers one deferring connector per plugin. Every call it takes goes
+** through the Part-1 ledger, so a plugin that is slow, wedged or dead
+** costs latency and never the host thread.
+** ---------------------------------------------------------------------- */
+
+int  dh_plug_open (dh_host *h, char *err, size_t errcap);
+void dh_plug_close (dh_host *h);
+
+/* Contribute channel descriptors to the host's single poll(), and act on
+   what came back. 'cap' bounds how many entries 'arm' may fill; it returns
+   how many it did. The two calls must bracket exactly one poll(). */
+size_t dh_plug_arm (dh_host *h, struct pollfd *fds, size_t cap);
+void   dh_plug_fire (dh_host *h, struct pollfd *fds, size_t n);
+
+/* Nonzero while any plugin still owes a reply, so a drained swarm with work
+   outstanding does not exit underneath it. */
+int dh_plug_busy (dh_host *h);
+
+/* Sleep until something happens or 'timeout_ms' elapses, in exactly one
+   place: the listener's sockets, the plugin channels and a plain timeout
+   are all the same wait. Build 8's whole claim is that nothing blocks the
+   shared thread, and that is only checkable if there is one place it
+   stops. */
+void dh_host_sleep (dh_host *h, int timeout_ms);
 
 #endif

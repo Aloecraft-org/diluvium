@@ -21,8 +21,15 @@ return {
   -- The root's ceiling. Everything any descendant will ever hold is a
   -- subset of this list, and the host:* names gate hostcalls the same way
   -- queue:* names gate queues.
-  caps = { "lifecycle", "queue:*", "host:time", "host:sql/query",
-           "host:crypto/*", "host:fs/*" },
+  caps = { "lifecycle", "queue:*", "host:capabilities/list", "host:time",
+           "host:sql/query", "host:crypto/*", "host:fs/*", "host:rest/*" },
+
+  -- What `host.capabilities()` tells a caller EXISTS. Not what it may DO --
+  -- those are different questions, and the listing answers both by marking
+  -- each entry granted or not. Public by default on purpose: a host that
+  -- conceals its menu because a caller lacks a grant is a host that lies
+  -- about what it is, and it makes an auditing agent impossible.
+  visibility = "public",
 
   budget = { instructions = 5000000, memory_kb = 512 },
 
@@ -56,5 +63,19 @@ return {
     -- exec = true,              -- LEAVING THE SANDBOX; uncomment knowingly
                                  -- (or a table: { max_timeout_ms = 10000,
                                  -- max_output_bytes = 1048576 })
+  },
+
+  -- Capabilities that live in another program. The key is the call's first
+  -- segment: this one answers `rest/get`, granted above as `host:rest/*`.
+  -- The host never learns to speak HTTP; the plugin does, and it is replaced
+  -- without replacing Diluvium.
+  plugins = {
+    rest = {
+      manifest = "rest.plugin.json",  -- beside THIS file
+      max_inflight = 8,               -- what this deployment will send at
+                                      -- once, whatever the manifest allows
+      call_timeout_ms = 15000,        -- the host reclaims the call here, so
+                                      -- a wedged plugin cannot hang a guest
+    },
   },
 }

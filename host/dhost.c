@@ -6,6 +6,7 @@
 ** this one stays the part every deployment runs.
 */
 
+#include <errno.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -268,7 +269,11 @@ static void listener_defaults (dh_listener_cfg *l) {
 }
 
 static void cfg_defaults (dh_config *c) {
+  /* Public by default, deliberately. Capabilities.md section 4 leads with
+     visibility, and a host that conceals its menu because a caller lacks a
+     grant is a host that lies about what it is. */
   memset(c, 0, sizeof(*c));
+  c->visibility = DH_VIS_PUBLIC;
   c->max_instances = 64;
   c->spawns_per_step = 4;
   c->hibernation = 1;
@@ -364,8 +369,12 @@ int dh_config_load (const char *path, dh_config *out, char *err,
                     size_t errcap) {
   static const char *const top_keys[] = {
     "supervisor", "max_instances", "spawns_per_step", "identity",
-    "hibernation", "caps", "budget", "connectors", NULL
+    "hibernation", "caps", "budget", "connectors", "plugins", "visibility",
+    NULL
   };
+  static const char *const plugin_keys[] = { "manifest", "max_inflight",
+                                             "call_timeout_ms", "visibility",
+                                             NULL };
   static const char *const budget_keys[] = { "instructions", "memory_kb", NULL };
   static const char *const conn_keys[] = { "time", "listen", "sql", "crypto",
                                            "fs", "exec", NULL };
@@ -413,6 +422,26 @@ int dh_config_load (const char *path, dh_config *out, char *err,
     goto done;
   }
   if (cfg_known_keys(L, -1, top_keys, "config", err, errcap) != 0) goto done;
+  {
+    char vis[DH_NAME_MAX];
+    vis[0] = '\0';
+    if (cfg_str(L, -1, "visibility", vis, sizeof(vis), 0, "config", err,
+                errcap) != 0) goto done;
+    if (vis[0] != '\0') {
+      int v = dh_visibility_of(vis);
+      /* 'inherit' at the top has nothing to inherit from, and silently
+         meaning 'public' would hide a config that says something it does
+         not mean. */
+      if (v < 0 || v == DH_VIS_INHERIT) {
+        cfg_fail(err, errcap, "config.visibility is public, private or hidden; "
+                              "'%s' is none of them (there is nothing above "
+                              "the deployment for 'inherit' to reach)%s",
+                 vis, "");
+        goto done;
+      }
+      out->visibility = (dh_visibility)v;
+    }
+  }
   if (cfg_str(L, -1, "supervisor", out->supervisor, sizeof(out->supervisor),
               1, "config", err, errcap) != 0) goto done;
   n = out->max_instances;
@@ -796,6 +825,116 @@ int dh_config_load (const char *path, dh_config *out, char *err,
     lua_pop(L, 1);
   }
   lua_pop(L, 1);
+
+  /* ----------------------------------------------------------------
+  ** plugins = { rest = { manifest = "rest.plugin.json", ... } }
+  **
+  ** Sibling to 'connectors' because that is what it is: a capability the
+  ** deployment grants. The manifest resolves against the CONFIG file's
+  ** directory, not the host's cwd -- the ambiguity build 7 removed from
+  ** the sql scope is not one to reintroduce here.
+  ** ---------------------------------------------------------------- */
+  if (lua_getfield(L, -1, "plugins") != LUA_TNIL) {
+    if (!lua_istable(L, -1)) {
+      cfg_fail(err, errcap, "'plugins' must be a table of named plugins%s%s",
+               "", "");
+      goto done;
+    }
+    lua_pushnil(L);
+    while (lua_next(L, -2) != 0) {
+      dh_plugin_cfg *pc;
+      const char *pname;
+      if (lua_type(L, -2) != LUA_TSTRING) {
+        cfg_fail(err, errcap, "every plugin is named by a string key%s%s", "",
+                 "");
+        goto done;
+      }
+      pname = lua_tostring(L, -2);
+      if (!lua_istable(L, -1)) {
+        cfg_fail(err, errcap, "plugin '%s' must be a table%s", pname, "");
+        goto done;
+      }
+      if (out->nplugins >= DH_MAX_PLUGINS) {
+        cfg_fail(err, errcap, "more plugins than this host holds, starting at "
+                              "'%s'%s", pname, "");
+        goto done;
+      }
+      pc = &out->plugins[out->nplugins];
+      memset(pc, 0, sizeof(*pc));
+      if (strlen(pname) >= sizeof(pc->name) || strchr(pname, '/') != NULL) {
+        cfg_fail(err, errcap, "'%s' is not usable as a plugin name: it becomes "
+                              "the first segment of every call it answers%s",
+                 pname, "");
+        goto done;
+      }
+      strcpy(pc->name, pname);
+      {
+        char buf[DH_NAME_MAX + 16];
+        snprintf(buf, sizeof(buf), "plugins.%s", pname);
+        if (cfg_known_keys(L, -1, plugin_keys, buf, err, errcap) != 0)
+          goto done;
+        if (cfg_str(L, -1, "manifest", pc->manifest, sizeof(pc->manifest), 1,
+                    buf, err, errcap) != 0)
+          goto done;
+        n = 0;
+        if (cfg_num(L, -1, "max_inflight", &n, 1, 4096, buf, err, errcap) != 0)
+          goto done;
+        pc->max_inflight = (long)n;      /* 0 = defer to the manifest */
+        n = 0;
+        if (cfg_num(L, -1, "call_timeout_ms", &n, 1, 3600000, buf, err,
+                    errcap) != 0)
+          goto done;
+        pc->call_timeout_ms = (long)n;
+        {
+          char vis[DH_NAME_MAX];
+          vis[0] = '\0';
+          if (cfg_str(L, -1, "visibility", vis, sizeof(vis), 0, buf, err,
+                      errcap) != 0)
+            goto done;
+          if (vis[0] != '\0') {
+            int v = dh_visibility_of(vis);
+            if (v < 0) {
+              cfg_fail(err, errcap, "plugin '%s': visibility is public, "
+                                    "private, hidden or inherit%s", pname, "");
+              goto done;
+            }
+            pc->visibility = (dh_visibility)v;
+          }
+        }
+      }
+      /* Resolve the manifest beside the config that named it, then read it
+         now: a deployment whose plugin manifest is missing or malformed
+         should fail at load with the rest of the config's refusals, not at
+         the first call. */
+      {
+        char full[DH_PATH_MAX];
+        if (pc->manifest[0] != '/') {
+          const char *slash = strrchr(path, '/');
+          if (slash != NULL) {
+            size_t dlen = (size_t)(slash - path) + 1;
+            if (dlen + strlen(pc->manifest) >= sizeof(full)) {
+              cfg_fail(err, errcap, "the path to plugin '%s''s manifest is too "
+                                    "long%s", pname, "");
+              goto done;
+            }
+            memcpy(full, path, dlen);
+            strcpy(full + dlen, pc->manifest);
+          }
+          else
+            snprintf(full, sizeof(full), "%s", pc->manifest);
+        }
+        else
+          snprintf(full, sizeof(full), "%s", pc->manifest);
+        if (pc->call_timeout_ms <= 0)
+          pc->call_timeout_ms = 30000;
+        if (dh_plugin_manifest_load(full, pc, err, errcap) != 0)
+          goto done;
+      }
+      out->nplugins++;
+      lua_pop(L, 1);                     /* the plugin's table; key stays */
+    }
+  }
+  lua_pop(L, 1);
   rc = 0;
 done:
   lua_close(L);
@@ -832,10 +971,16 @@ static void *host_create (void *ud, dvs_id id, dv_instance *inst) {
   return sc;
 }
 
+static void pending_drop_instance (dh_host *h, dvs_id id, int all);
+
 static void host_destroy (void *ud, dvs_id id, void *ctx) {
   dh_host *h = (dh_host *)ud;
   dh_slot **pp = &h->slots;
-  (void)id;
+  /* Whatever this instance was owed, nobody will collect. Dropping the
+     entries here is what keeps the ledger bounded by live instances rather
+     than by the host's lifetime, and it is where a connector learns to
+     abandon work whose answer now has nowhere to go. */
+  pending_drop_instance(h, id, 0);
   while (*pp != NULL && *pp != ctx)
     pp = &(*pp)->next;
   if (*pp != NULL)
@@ -891,7 +1036,27 @@ static int host_drive (void *ud, dvs_id id, dv_instance *inst, void *ctx) {
 ** The hostcall pump: doc/Hostcall.md's host half.
 ** ====================================================================== */
 
-int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud) {
+int dh_visibility_of (const char *s) {
+  if (s == NULL) return -1;
+  if (strcmp(s, "public") == 0)  return DH_VIS_PUBLIC;
+  if (strcmp(s, "private") == 0) return DH_VIS_PRIVATE;
+  if (strcmp(s, "hidden") == 0)  return DH_VIS_HIDDEN;
+  if (strcmp(s, "inherit") == 0) return DH_VIS_INHERIT;
+  return -1;
+}
+
+const char *dh_visibility_name (dh_visibility v) {
+  switch (v) {
+    case DH_VIS_PUBLIC:  return "public";
+    case DH_VIS_PRIVATE: return "private";
+    case DH_VIS_HIDDEN:  return "hidden";
+    default:             return "inherit";
+  }
+}
+
+int dh_register_full (dh_host *h, const char *prefix, dh_call_fn fn,
+                      dh_cancel_fn cancel, const char *const *calls,
+                      dh_visibility visibility, void *ud) {
   size_t i;
   if (h->nconns >= DH_MAX_CONNECTORS || strlen(prefix) >= 32)
     return -1;
@@ -899,11 +1064,216 @@ int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud) {
     if (strcmp(h->conns[i].prefix, prefix) == 0)
       return -1;
   }
+  memset(&h->conns[h->nconns], 0, sizeof(h->conns[0]));
   strcpy(h->conns[h->nconns].prefix, prefix);
   h->conns[h->nconns].fn = fn;
+  h->conns[h->nconns].cancel = cancel;
+  h->conns[h->nconns].calls = calls;
+  h->conns[h->nconns].visibility = visibility;
   h->conns[h->nconns].ud = ud;
   h->nconns++;
   return 0;
+}
+
+int dh_register_deferrable (dh_host *h, const char *prefix, dh_call_fn fn,
+                            dh_cancel_fn cancel, void *ud) {
+  return dh_register_full(h, prefix, fn, cancel, NULL, DH_VIS_INHERIT, ud);
+}
+
+int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud) {
+  return dh_register_full(h, prefix, fn, NULL, NULL, DH_VIS_INHERIT, ud);
+}
+
+
+/* ======================================================================
+** The deferred-reply ledger.
+**
+** A list rather than a hash: the entries are bounded by max_inflight summed
+** over the wired plugins, which is a small number by construction, and a
+** list keeps the sweeps (by instance, by deadline) trivially correct. If
+** that bound ever stops holding, this is the thing to index -- not before.
+** ====================================================================== */
+
+/* The connector currently being invoked, so dh_defer can attribute the entry
+** without threading a handle through dh_call_fn. Set by 'answer' around the
+** one call it makes, and read only there: a connector cannot reach dh_defer
+** except from inside its own dh_call_fn, which is exactly when this is
+** valid. */
+static size_t dh_calling_conn = (size_t)-1;
+
+static dh_pending **pending_find (dh_host *h, dvs_id id, int64_t tok) {
+  dh_pending **pp = &h->pending;
+  while (*pp != NULL) {
+    if ((*pp)->id == id && (*pp)->tok == tok)
+      return pp;
+    pp = &(*pp)->next;
+  }
+  return NULL;
+}
+
+int dh_defer (dh_host *h, dvs_id id, int64_t tok, void *callud,
+              int64_t deadline_ms) {
+  dh_pending *e;
+  if (dh_calling_conn >= h->nconns)
+    return -1;                           /* not inside a connector call */
+  if (pending_find(h, id, tok) != NULL)
+    return -1;                           /* (id, tok) is already owed */
+  e = (dh_pending *)calloc(1, sizeof(dh_pending));
+  if (e == NULL)
+    return -1;
+  e->id = id;
+  e->tok = tok;
+  e->conn = dh_calling_conn;
+  e->callud = callud;
+  e->deadline_ms = deadline_ms;
+  e->next = h->pending;
+  h->pending = e;
+  h->npending++;
+  return 0;
+}
+
+size_t dh_pending_count (dh_host *h, dvs_id id) {
+  dh_pending *e;
+  size_t n = 0;
+  for (e = h->pending; e != NULL; e = e->next) {
+    if (e->id == id)
+      n++;
+  }
+  return n;
+}
+
+/*
+** Build the reply envelope. Shared by the inline path in 'answer' and the
+** deferred path in 'dh_reply' so the two cannot drift: a guest must not be
+** able to tell from the bytes whether its call was answered at once or an
+** hour later.
+*/
+static void envelope (dh_buf *reply, int64_t tok, dh_call_status st,
+                      const unsigned char *value, size_t vlen,
+                      const char *detail) {
+  dh_map(reply, 3);
+  dh_str(reply, "tok"); dh_int(reply, tok);
+  dh_str(reply, "status");
+  dh_str(reply, (st == DH_CALL_OK) ? "ok"
+               : (st == DH_CALL_DENIED) ? "denied" : "error");
+  if (st == DH_CALL_OK) {
+    dh_str(reply, "value");
+    if (vlen > 0)
+      dh_raw(reply, value, vlen);
+    else
+      dh_nil(reply);
+  }
+  else {
+    dh_str(reply, "detail");
+    dh_str(reply, (detail != NULL && detail[0] != '\0')
+                  ? detail
+                  : "the connector refused without saying why, which is its "
+                    "bug");
+  }
+}
+
+int dh_reply (dh_host *h, dvs_id id, int64_t tok, dh_call_status st,
+              const unsigned char *value, size_t vlen, const char *detail) {
+  dh_pending **pp = pending_find(h, id, tok);
+  dh_pending *e;
+  dv_instance *inst;
+  dh_buf reply;
+  int rc = -1;
+  if (pp == NULL)
+    return -1;   /* swept already: the instance died, or the deadline fired */
+  e = *pp;
+  *pp = e->next;
+  h->npending--;
+  free(e);
+  /* The instance may have hibernated between the deferral and now, in which
+     case its queues went with it and the reply waits for the wake the same
+     way any other undelivered message does -- there is nothing to push to
+     yet. And it may simply be gone, which is the drop the ledger exists to
+     make silent rather than fatal. */
+  inst = dvs_instance(h->sw, id);
+  if (inst == NULL)
+    return -1;
+  {
+    dv_queue_id replies = dv_queue_lookup(inst, DH_REPLIES_QUEUE);
+    if (replies == 0)
+      return -1;                         /* asked, declared nowhere to hear */
+    dh_buf_init(&reply);
+    envelope(&reply, tok, st, value, vlen, detail);
+    if (reply.len > 0 && dv_queue_push(inst, replies, reply.p, reply.len)
+        == DV_OK)
+      rc = 0;
+    dh_buf_free(&reply);
+  }
+  return rc;
+}
+
+/*
+** Drop every entry a connector will never be able to collect, telling the
+** connector so it can abandon the work. Called when an instance dies and
+** when the host closes.
+*/
+static void pending_drop_instance (dh_host *h, dvs_id id, int all) {
+  dh_pending **pp = &h->pending;
+  while (*pp != NULL) {
+    dh_pending *e = *pp;
+    if (all || e->id == id) {
+      dh_cancel_fn cancel = (e->conn < h->nconns) ? h->conns[e->conn].cancel
+                                                  : NULL;
+      void *ud = (e->conn < h->nconns) ? h->conns[e->conn].ud : NULL;
+      *pp = e->next;
+      h->npending--;
+      if (cancel != NULL)
+        cancel(ud, e->id, e->tok, e->callud);
+      free(e);
+    }
+    else
+      pp = &e->next;
+  }
+}
+
+/*
+** The host-side backstop. A connector that dies mid-call would otherwise
+** leave its entry forever, and the guest -- whose own queue.wait timeout has
+** long since fired -- would hold reply-queue headroom it will never use.
+*/
+static void pending_fire_deadlines (dh_host *h) {
+  dh_pending **pp = &h->pending;
+  while (*pp != NULL) {
+    dh_pending *e = *pp;
+    if (e->deadline_ms > 0 && e->deadline_ms <= h->now_ms) {
+      dh_cancel_fn cancel = (e->conn < h->nconns) ? h->conns[e->conn].cancel
+                                                  : NULL;
+      void *ud = (e->conn < h->nconns) ? h->conns[e->conn].ud : NULL;
+      dvs_id id = e->id;
+      int64_t tok = e->tok;
+      void *callud = e->callud;
+      *pp = e->next;
+      h->npending--;
+      free(e);
+      if (cancel != NULL)
+        cancel(ud, id, tok, callud);
+      /* Answer it, so the guest gets a sentence rather than a silence. The
+         entry is already unlinked, so this cannot recurse into itself. */
+      {
+        dv_instance *inst = dvs_instance(h->sw, id);
+        if (inst != NULL) {
+          dv_queue_id replies = dv_queue_lookup(inst, DH_REPLIES_QUEUE);
+          if (replies != 0) {
+            dh_buf reply;
+            dh_buf_init(&reply);
+            envelope(&reply, tok, DH_CALL_ERROR, NULL, 0,
+                     "the connector that took this call never answered it; "
+                     "the host reclaimed the request at its deadline");
+            if (reply.len > 0)
+              dv_queue_push(inst, replies, reply.p, reply.len);
+            dh_buf_free(&reply);
+          }
+        }
+      }
+    }
+    else
+      pp = &e->next;
+  }
 }
 
 static dh_connector *route (dh_host *h, const char *call) {
@@ -1008,26 +1378,31 @@ static void answer (dh_host *h, dvs_id id, const unsigned char *req,
     return;
   }
 
-  st = conn->fn(conn->ud, id, call, args, argslen, &value, detail,
+  dh_calling_conn = (size_t)(conn - h->conns);
+  st = conn->fn(conn->ud, id, tok, call, args, argslen, &value, detail,
                 sizeof(detail));
-  dh_map(reply, 3);
-  dh_str(reply, "tok"); dh_int(reply, tok);
-  dh_str(reply, "status");
-  dh_str(reply, (st == DH_CALL_OK) ? "ok"
-               : (st == DH_CALL_DENIED) ? "denied" : "error");
-  if (st == DH_CALL_OK) {
-    dh_str(reply, "value");
-    if (value.len > 0)
-      dh_raw(reply, value.p, value.len);
-    else
-      dh_nil(reply);
+  dh_calling_conn = (size_t)-1;
+
+  if (st == DH_CALL_PENDING) {
+    /* Taken. The reply buffer stays empty, so pump_instance pushes nothing
+       and the request is still consumed -- the calls queue cannot wedge on a
+       call that is merely slow. The connector owes exactly one dh_reply for
+       this (id, tok), and the ledger is what will notice if it never comes.
+
+       A connector that returned PENDING without recording the entry has a
+       bug that would otherwise be silent: it would never be answered and
+       never be counted. Answer it here instead, because a guest deserves a
+       sentence and the alternative is a hang. */
+    if (pending_find(h, id, tok) == NULL) {
+      envelope(reply, tok, DH_CALL_ERROR, NULL, 0,
+               "the connector deferred this call without recording it, which "
+               "is its bug: a deferred call must be taken with dh_defer");
+    }
+    dh_buf_free(&value);
+    return;
   }
-  else {
-    dh_str(reply, "detail");
-    dh_str(reply, (detail[0] != '\0') ? detail : "the connector refused "
-                                                 "without saying why, which "
-                                                 "is its bug");
-  }
+
+  envelope(reply, tok, st, value.p, value.len, detail);
   dh_buf_free(&value);
 }
 
@@ -1055,8 +1430,17 @@ static void pump_instance (dh_host *h, dh_slot *sc) {
     if (replies != 0) {
       dv_queue_info info;
       memset(&info, 0, sizeof(info));
-      if (dv_queue_state(inst, replies, &info) == DV_OK &&
-          info.capacity > 0 && info.len >= info.capacity)
+      /* Pending calls count against the headroom. One has been drained but
+         has produced no reply yet, so without this term the queue looks
+         emptier than it is: defer twenty calls into a sixteen-deep queue and
+         four answers have nowhere to land, and the guest waits out a timeout
+         for a reply the host already computed. This is the same flow control
+         a plugin's max_inflight applies at the pipe, applied here at the
+         queue -- and this is the more fundamental of the two, because it
+         bounds what the guest can be *owed* rather than what the far side
+         can be sent. */
+      if (dv_queue_state(inst, replies, &info) == DV_OK && info.capacity > 0 &&
+          info.len + dh_pending_count(h, sc->id) >= (size_t)info.capacity)
         break;
     }
     if (dv_queue_peek(inst, calls, &req, &reqlen) != DV_OK)
@@ -1075,6 +1459,125 @@ static void pump_instance (dh_host *h, dh_slot *sc) {
 
 
 /* ======================================================================
+** Built-in connector: capabilities.
+**
+** The menu, and what of it is yours. doc/Capabilities.md section 1 keeps
+** "what a host can do" and "what this instance may do" apart, and section
+** 4's third bullet is "lead with visibility" -- so this reports both, and
+** never collapses one into the other. An entry the caller cannot use is
+** still an entry, marked 'granted = false'.
+**
+** That distinction is the whole feature. Without it a program that names a
+** capability slightly wrong and a program that names one it was not granted
+** get the same silence, and the two have completely different fixes. It also
+** makes an auditing agent expressible: grant it 'host:capabilities/list' and
+** nothing else, and it can report what a swarm can reach without being able
+** to reach any of it.
+**
+** 'hidden' entries are omitted entirely, held or not. That is the escape
+** hatch for a deployment where admitting existence is itself the leak, and
+** it is opt-in precisely because it is the setting that lets the host be
+** less than honest.
+** ====================================================================== */
+
+static dh_visibility effective_vis (dh_host *h, dh_visibility v) {
+  if (v != DH_VIS_INHERIT)
+    return v;
+  /* The deployment's default, and 'public' if it did not say either: a host
+     that has not thought about visibility should describe itself, not
+     conceal itself. */
+  return (h->cfg.visibility != DH_VIS_INHERIT) ? h->cfg.visibility
+                                               : DH_VIS_PUBLIC;
+}
+
+/* Emit one entry. 'granted' is asked of dvs_holds exactly as the pump asks
+   it, so a listing cannot drift from what a call would actually do. */
+static int cap_entry (dh_host *h, dvs_id id, dh_buf *value, const char *name,
+                      const char *kind, const char *owner, dh_visibility vis) {
+  char cap[DH_NAME_MAX + 8];
+  int granted;
+  dh_visibility eff = effective_vis(h, vis);
+  if (eff == DH_VIS_HIDDEN)
+    return 0;                            /* never listed, held or not */
+  snprintf(cap, sizeof(cap), "host:%s", name);
+  granted = dvs_holds(h->sw, id, cap) ? 1 : 0;
+  if (eff == DH_VIS_PRIVATE && !granted)
+    return 0;                            /* listed only to holders */
+  dh_map(value, 5);
+  dh_str(value, "name");       dh_str(value, name);
+  dh_str(value, "kind");       dh_str(value, kind);
+  dh_str(value, "owner");
+  if (owner != NULL) dh_str(value, owner); else dh_nil(value);
+  dh_str(value, "granted");    dh_bool(value, granted);
+  dh_str(value, "visibility"); dh_str(value, dh_visibility_name(eff));
+  return 1;
+}
+
+static dh_call_status conn_capabilities (void *ud, dvs_id id, int64_t tok,
+                                         const char *call,
+                                         const unsigned char *args,
+                                         size_t argslen, dh_buf *value,
+                                         char *detail, size_t detailcap) {
+  dh_host *h = (dh_host *)ud;
+  size_t i, j;
+  unsigned n = 0;
+  dh_buf body;
+  (void)tok; (void)args; (void)argslen;
+  if (strcmp(call, "capabilities/list") != 0) {
+    snprintf(detail, detailcap, "the capabilities connector answers "
+                                "'capabilities/list'; '%s' is not it", call);
+    return DH_CALL_ERROR;
+  }
+  /* Built twice: once to count, once to write, because a msgpack array
+     header carries its length and the entries are filtered as they are
+     produced. Counting by emitting into a scratch buffer keeps the filter
+     in exactly one place -- two copies of "should this be listed" would be
+     two policies, and the quiet one would be wrong. */
+  dh_buf_init(&body);
+  for (i = 0; i < h->nconns; i++) {
+    dh_connector *c = &h->conns[i];
+    /* A plugin owns a connector slot too, but the plugin loop below reports
+       it properly -- by capability, with its wake policy and its owner. A
+       bare prefix entry beside those would be the same capability listed
+       twice, once uselessly. */
+    {
+      int is_plugin = 0;
+      for (j = 0; j < h->cfg.nplugins; j++) {
+        if (strcmp(h->cfg.plugins[j].name, c->prefix) == 0) { is_plugin = 1; break; }
+      }
+      if (is_plugin)
+        continue;
+    }
+    if (c->calls != NULL) {
+      for (j = 0; c->calls[j] != NULL; j++)
+        n += (unsigned)cap_entry(h, id, &body, c->calls[j], "connector", NULL,
+                                 c->visibility);
+    }
+    else
+      n += (unsigned)cap_entry(h, id, &body, c->prefix, "connector", NULL,
+                               c->visibility);
+  }
+  /* Plugins after the built-ins, each entry naming its plugin, so a reader
+     can tell a capability that lives in another program from one this
+     binary answers itself. */
+  for (i = 0; i < h->cfg.nplugins; i++) {
+    dh_plugin_cfg *p = &h->cfg.plugins[i];
+    for (j = 0; j < p->ncaps; j++) {
+      char full[DH_NAME_MAX];
+      snprintf(full, sizeof(full), "%s/%s", p->name, p->caps[j].name);
+      n += (unsigned)cap_entry(h, id, &body, full, "plugin", p->name,
+                               p->visibility);
+    }
+  }
+  dh_array(value, n);
+  if (body.len > 0)
+    dh_raw(value, body.p, body.len);
+  dh_buf_free(&body);
+  return DH_CALL_OK;
+}
+
+
+/* ======================================================================
 ** Built-in connector: time.
 **
 ** Wall-clock milliseconds since the epoch. The one nondeterminism every
@@ -1083,12 +1586,13 @@ static void pump_instance (dh_host *h, dh_slot *sc) {
 ** the same moment instead of the replayer's.
 ** ====================================================================== */
 
-static dh_call_status conn_time (void *ud, dvs_id id, const char *call,
+static dh_call_status conn_time (void *ud, dvs_id id, int64_t tok,
+                                 const char *call,
                                  const unsigned char *args, size_t argslen,
                                  dh_buf *value, char *detail,
                                  size_t detailcap) {
   struct timespec ts;
-  (void)ud; (void)id; (void)args; (void)argslen;
+  (void)ud; (void)id; (void)tok; (void)args; (void)argslen;
   if (strcmp(call, "time") != 0) {
     snprintf(detail, detailcap, "the time connector answers 'time' and "
                                 "nothing else; '%s' is not it", call);
@@ -1162,6 +1666,15 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
   }
   dvs_allow_hibernation(h->sw, cfg->hibernation);
 
+  /* Discovery is itself a capability and is gated like any other: a program
+     reaches it holding 'host:capabilities/list' and not otherwise. It is
+     registered unconditionally because a host that cannot describe itself
+     is the thing this exists to fix; the grant decides who may ask. */
+  {
+    static const char *const CALLS_CAPS[] = { "capabilities/list", NULL };
+    dh_register_full(h, "capabilities", conn_capabilities, NULL, CALLS_CAPS,
+                     DH_VIS_INHERIT, h);
+  }
   if (cfg->time_connector)
     dh_register(h, "time", conn_time, NULL);
   if (cfg->sql.enabled && dh_sql_open(h, err, errcap) != 0) {
@@ -1183,6 +1696,43 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
   if (cfg->nlisteners > 0 && dh_http_open(h, err, errcap) != 0) {
     dh_host_close(h);
     return -1;
+  }
+  if (cfg->nplugins > 0 && dh_plug_open(h, err, errcap) != 0) {
+    dh_host_close(h);
+    return -1;
+  }
+
+  /* What each built-in actually answers, for discovery. The router matches
+     only the prefix, so without this a listing would say "sql" where a
+     caller needs "sql/query" -- a shape of answer nobody can act on. Filled
+     in here rather than at each connector's own dh_register so that adding
+     discovery cost the four connector files nothing; a connector that wants
+     to say for itself uses dh_register_full and is left alone. */
+  {
+    static const char *const CALLS_TIME[] = { "time", NULL };
+    static const char *const CALLS_SQL[]  = { "sql/query", "sql/exec", NULL };
+    static const char *const CALLS_FS[]   = { "fs/read", "fs/write", NULL };
+    static const char *const CALLS_EXEC[] = { "exec/run", NULL };
+    static const char *const CALLS_CRYPTO[] = {
+      "crypto/random", "crypto/hash", "crypto/hmac",
+      "crypto/jwt_sign", "crypto/jwt_verify", NULL
+    };
+    static const struct { const char *prefix; const char *const *calls; }
+      KNOWN[] = {
+        { "time", CALLS_TIME }, { "sql", CALLS_SQL }, { "fs", CALLS_FS },
+        { "exec", CALLS_EXEC }, { "crypto", CALLS_CRYPTO }, { NULL, NULL }
+      };
+    size_t ci, ki;
+    for (ci = 0; ci < h->nconns; ci++) {
+      if (h->conns[ci].calls != NULL)
+        continue;
+      for (ki = 0; KNOWN[ki].prefix != NULL; ki++) {
+        if (strcmp(h->conns[ci].prefix, KNOWN[ki].prefix) == 0) {
+          h->conns[ci].calls = KNOWN[ki].calls;
+          break;
+        }
+      }
+    }
   }
 
   if (read_file(cfg->supervisor, &code, &codelen) != 0) {
@@ -1206,6 +1756,10 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
 }
 
 void dh_host_close (dh_host *h) {
+  /* Before the connectors go: every pending entry names one of them, and a
+     cancel that ran after its connector closed would reach freed state. */
+  pending_drop_instance(h, 0, 1);
+  dh_plug_close(h);
   dh_http_close(h);
   dh_sql_close(h);
   dh_crypto_close(h);
@@ -1225,6 +1779,7 @@ void dh_host_close (dh_host *h) {
 int dh_host_turn (dh_host *h) {
   dh_slot *sc;
   h->now_ms = dh_now_ms();
+  pending_fire_deadlines(h);
   dvs_step(h->sw);
   /* Elapsed guest wait timeouts. The resume happens outside dvs_step; the
      swarm reconciles the instance's fate on its next step, which is the
@@ -1246,11 +1801,19 @@ int dh_host_turn (dh_host *h) {
 
 int dh_host_poll_timeout (dh_host *h) {
   dh_slot *sc;
+  dh_pending *e;
   int64_t next = -1;
   int http;
   for (sc = h->slots; sc != NULL; sc = sc->next) {
     if (sc->has_deadline && (next < 0 || sc->deadline_ms < next))
       next = sc->deadline_ms;
+  }
+  /* And the ledger's own backstops, for the same reason the guest timeouts
+     are here: a sleep that outran one would let a dead connector's entry sit
+     past the moment it was supposed to be reclaimed. */
+  for (e = h->pending; e != NULL; e = e->next) {
+    if (e->deadline_ms > 0 && (next < 0 || e->deadline_ms < next))
+      next = e->deadline_ms;
   }
   /* Fold in the listener's earliest connection deadline, so a caller that
      sleeps for this value still wakes to enforce a slow client's timeout --
@@ -1268,4 +1831,39 @@ int dh_host_poll_timeout (dh_host *h) {
       return http;
     return guest;
   }
+}
+
+
+/*
+** The one place the host sleeps.
+**
+** The listener's sockets, the plugin channels and a plain timeout are the
+** same wait, so they share one poll(). Calling two sleeping polls in turn
+** would not deadlock, but the first to sleep would delay the second by its
+** whole timeout -- and "nothing blocks the shared thread" is only checkable
+** if there is a single place the thread stops.
+*/
+void dh_host_sleep (dh_host *h, int timeout_ms) {
+  struct pollfd extra[DH_MAX_PLUGINS];
+  size_t nx = dh_plug_arm(h, extra, DH_MAX_PLUGINS);
+  if (h->listener != NULL) {
+    /* The listener owns the array; the plugin fds ride along inside its
+       single poll and come back with their revents filled in. */
+    dh_http_poll_with(h, timeout_ms, extra, nx);
+  }
+  else if (nx > 0) {
+    if (poll(extra, (nfds_t)nx, timeout_ms) < 0 && errno != EINTR) {
+      size_t i;
+      for (i = 0; i < nx; i++)
+        extra[i].revents = 0;
+    }
+  }
+  else if (timeout_ms != 0) {
+    struct timespec ts;
+    int t = (timeout_ms < 0 || timeout_ms > 50) ? 50 : timeout_ms;
+    ts.tv_sec = t / 1000;
+    ts.tv_nsec = (long)(t % 1000) * 1000000;
+    nanosleep(&ts, NULL);
+  }
+  dh_plug_fire(h, extra, nx);
 }

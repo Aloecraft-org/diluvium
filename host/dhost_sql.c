@@ -343,7 +343,8 @@ static int bind_params (sqlite3_stmt *st, const unsigned char *args,
   return 0;
 }
 
-static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
+static dh_call_status conn_sql (void *ud, dvs_id id, int64_t tok,
+                                const char *call,
                                 const unsigned char *args, size_t argslen,
                                 dh_buf *value, char *detail,
                                 size_t detailcap) {
@@ -358,6 +359,7 @@ static dh_call_status conn_sql (void *ud, dvs_id id, const char *call,
   int rc;
   dh_call_status dbstatus = DH_CALL_ERROR;
   (void)id;
+  (void)tok;
 
   if (strcmp(call, "sql/query") == 0)
     is_exec = 0;

@@ -198,7 +198,8 @@ static int resolve_path (dh_fs *s, const unsigned char *args, size_t argslen,
   return 0;
 }
 
-static dh_call_status conn_fs (void *ud, dvs_id id, const char *call,
+static dh_call_status conn_fs (void *ud, dvs_id id, int64_t tok,
+                               const char *call,
                                const unsigned char *args, size_t argslen,
                                dh_buf *value, char *detail,
                                size_t detailcap) {
@@ -208,6 +209,7 @@ static dh_call_status conn_fs (void *ud, dvs_id id, const char *call,
   int is_write;
   dh_call_status status = DH_CALL_ERROR;
   (void)id;
+  (void)tok;
 
   if (strcmp(call, "fs/read") == 0)
     is_write = 0;
