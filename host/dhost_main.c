@@ -15,16 +15,41 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "lua.h"                        /* LUA_RELEASE */
 #include "dhost.h"
+
+/*
+** Which build this binary is.
+**
+** The VERSION file is the single source of truth and the makefile passes it
+** in, so there is no second copy to drift. A build that does not define it
+** still compiles and says so, which is more useful than a number that might
+** be a lie.
+**
+** This exists because it was missing when it was needed: a host built before
+** a feature refused a config that used it, correctly and by name, and the
+** only way to find out that the BINARY was old rather than the config wrong
+** was to go and read the source. `--version`, and the startup banner, are
+** the two places that question gets asked.
+*/
+#ifndef DILUVIUM_HOST_BUILD
+#define DILUVIUM_HOST_BUILD "(version not compiled in)"
+#endif
 
 int main (int argc, char **argv) {
   dh_config cfg;
   dh_host h;
   char err[512];
+  if (argc == 2 && (strcmp(argv[1], "--version") == 0 ||
+                    strcmp(argv[1], "-v") == 0)) {
+    printf("diluvium-host %s (%s)\n", DILUVIUM_HOST_BUILD, LUA_RELEASE);
+    return 0;
+  }
   if (argc != 2 || strcmp(argv[1], "--help") == 0) {
     fprintf(stderr, "usage: %s <deployment.host.lua>\n"
+                    "       %s --version\n"
                     "The config format is host/types/host.lua; the duties "
-                    "are doc/Host.md.\n", argv[0]);
+                    "are doc/Host.md.\n", argv[0], argv[0]);
     return 2;
   }
   if (dh_config_load(argv[1], &cfg, err, sizeof(err)) != 0) {
@@ -43,8 +68,8 @@ int main (int argc, char **argv) {
     else if (cfg.nlisteners > 1)
       snprintf(listening, sizeof(listening), ", listening on %d ports",
                (int)cfg.nlisteners);
-    fprintf(stderr, "diluvium-host: supervisor '%s' up%s%s%s%s%s%s\n",
-            cfg.supervisor,
+    fprintf(stderr, "diluvium-host %s: supervisor '%s' up%s%s%s%s%s%s\n",
+            DILUVIUM_HOST_BUILD, cfg.supervisor,
             listening,
             cfg.sql.enabled ? ", sql wired" : "",
             cfg.crypto.enabled ? ", crypto wired" : "",

@@ -529,6 +529,12 @@ dshim_check: _build_step0
 # The generic host: doc/Host.md as a binary. Links the system sqlite for now;
 # the pinned amalgamation is the full-variant packaging decision and lands
 # with it. Built from src via .data like everything else.
+# The build number, from the one file that carries it. Passed to every host
+# build so `diluvium-host --version` and the startup banner can answer "which
+# binary is this", which is the first question a refused config raises.
+HOST_VERSION := $(shell cat $(CURDIR)/VERSION 2>/dev/null || echo unknown)
+HOST_VERSION_CFLAGS = -DDILUVIUM_HOST_BUILD='"$(HOST_VERSION)"'
+
 HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
   $(CURDIR)/host/dhost_sql.c $(CURDIR)/host/dhost_crypto.c \
   $(CURDIR)/host/dhost_fs.c $(CURDIR)/host/dhost_exec.c \
@@ -544,6 +550,7 @@ HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
 # would carry a capability it never uses).
 build_host: _build_step0
 	gcc -O2 -Wall -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
+	  $(HOST_VERSION_CFLAGS) \
 	  -o $(CURDIR)/dist/diluvium-host \
 	  $(HOST_SRCS) $(CURDIR)/host/dhost_main.c \
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3
@@ -572,6 +579,7 @@ without TLS (the plugin cases only fetch http://127.0.0.1)"; \
 	    $(CURDIR)/plugins/rest/rest_plugin.c; \
 	fi
 	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
+	  $(HOST_VERSION_CFLAGS) \
 	  -o $(CURDIR)/dist/host_check \
 	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
@@ -618,6 +626,7 @@ build_plugin_rest_musl:
 build_host_musl: _build_step0
 	gcc -O2 -Wall -static -DMAKE_LIB \
 	  -I$(CURDIR)/.data -I$(CURDIR)/host \
+	  $(HOST_VERSION_CFLAGS) \
 	  -o $(CURDIR)/dist/diluvium-host-musl \
 	  $(HOST_SRCS) $(CURDIR)/host/dhost_main.c \
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c \
