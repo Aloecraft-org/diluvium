@@ -30,6 +30,9 @@
 ---@field connectors diluvium.HostConnectors?  # everything absent is OFF
 ---@field plugins table<string, diluvium.HostPlugin>?  # capabilities that
 ---                                       # live in another program
+---@field visibility ("public"|"private"|"hidden")?  # what `capabilities/list`
+---                                       # tells a caller EXISTS, which is not
+---                                       # what it may DO (default "public")
 
 ---A plugin: a capability answered by a separate program, over a framed
 ---msgpack channel it inherits as fd 3. The deployment names it and points at
@@ -54,6 +57,14 @@
 ---                                   # 30000). A plugin that never answers
 ---                                   # has its call reclaimed at this moment,
 ---                                   # so a guest gets a sentence not a hang
+---@field visibility ("public"|"private"|"hidden"|"inherit")?  # whether
+---                                   # `capabilities/list` reports this
+---                                   # plugin. "public" (the default via
+---                                   # inherit) lists it to every caller with
+---                                   # granted=true/false beside it;
+---                                   # "private" lists it only to callers
+---                                   # that hold it; "hidden" never lists it,
+---                                   # though a holder can still call it
 
 ---@class diluvium.HostBudget
 ---@field instructions integer?      # lifetime VM instructions, not per-step

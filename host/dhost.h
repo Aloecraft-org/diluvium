@@ -144,6 +144,43 @@ typedef struct dh_exec_cfg {
 #define DH_MAX_PLUGIN_CAPS  32
 #define DH_CHECKSUM_MAX     96
 
+
+/* ----------------------------------------------------------------------
+** Visibility: what a caller is told EXISTS, which is not what it may DO.
+**
+** doc/Capabilities.md keeps three axes apart -- capability (what a host can
+** do; the menu, declared once, and "restricting a program can never shrink
+** it"), permission (grant or deny, per instance, attenuated), and scope
+** (what a permission applies to). Discovery reads the first. Conflating it
+** with the second would make the host lie about itself: a program without
+** the grant would be told the capability does not exist, when what is true
+** is that it exists and is not theirs.
+**
+** So the default is 'public', and a listing entry carries 'granted'
+** alongside the name. A caller can then tell "this host cannot do that"
+** from "this host can, and I may not" -- two different problems with two
+** different fixes, and today a program cannot distinguish them at all.
+** It also makes an auditor agent possible: one permitted to SEE the menu
+** and not to use it.
+**
+** 'inherit' is the field's future. Once a configuration is the same object
+** at every depth (Capabilities.md section 2) and the host is simply the
+** root's parent, visibility propagates and attenuates down the tree like
+** everything else, and only the enclosing default changes -- not the shape
+** of this field.
+** ---------------------------------------------------------------------- */
+typedef enum dh_visibility {
+  DH_VIS_INHERIT = 0,                   /* take the enclosing default */
+  DH_VIS_PUBLIC,                        /* listed to any caller, held or not */
+  DH_VIS_PRIVATE,                       /* listed only to callers that hold it */
+  DH_VIS_HIDDEN                         /* never listed; callable if held */
+} dh_visibility;
+
+/* "public" | "private" | "hidden" | "inherit" -> the enum; -1 for anything
+   else, so a caller can refuse it by name. */
+int dh_visibility_of (const char *s);
+const char *dh_visibility_name (dh_visibility v);
+
 /* What to do with a call that was in flight when its instance hibernated.
 ** The host-side pending state is not in the snapshot -- it cannot be, it
 ** lives outside the sandbox -- so a wake has to decide, and the capability
@@ -167,6 +204,7 @@ typedef struct dh_plugin_cfg {
   char checksum[DH_CHECKSUM_MAX];       /* logged at startup, not enforced */
   long max_inflight;                    /* frames written before waiting */
   long call_timeout_ms;                 /* host-side backstop, per call */
+  dh_visibility visibility;             /* default inherit -> the host's */
   dh_plugin_cap caps[DH_MAX_PLUGIN_CAPS];
   size_t ncaps;
 } dh_plugin_cfg;
@@ -192,6 +230,7 @@ typedef struct dh_config {
   dh_exec_cfg exec;                     /* connectors = { exec = {...} } */
   dh_plugin_cfg plugins[DH_MAX_PLUGINS];   /* plugins = { name = {...} } */
   size_t nplugins;
+  dh_visibility visibility;             /* the deployment's default; public */
   int insecure_plugins;                 /* --insecure-plugins; see doc/BUILD8 */
 } dh_config;
 
@@ -255,6 +294,13 @@ typedef struct dh_connector {
   char prefix[32];
   dh_call_fn fn;
   dh_cancel_fn cancel;                  /* optional; NULL when inline-only */
+  /* The exact call names this connector answers, NULL-terminated -- what
+     discovery reports. The router only ever matches the prefix, so without
+     this a listing could say "sql" and not "sql/query", which is the shape
+     of answer a person cannot act on. NULL means the connector did not say,
+     and the prefix is reported alone. */
+  const char *const *calls;
+  dh_visibility visibility;
   void *ud;
 } dh_connector;
 
@@ -348,6 +394,13 @@ int64_t dh_now_ms (void);
 int dh_register (dh_host *h, const char *prefix, dh_call_fn fn, void *ud);
 int dh_register_deferrable (dh_host *h, const char *prefix, dh_call_fn fn,
                             dh_cancel_fn cancel, void *ud);
+/* The full form. 'calls' is a NULL-terminated list of the exact names this
+   connector answers, for discovery; 'visibility' is DH_VIS_INHERIT to take
+   the deployment's default. The two short forms above are this one with
+   NULL and INHERIT. */
+int dh_register_full (dh_host *h, const char *prefix, dh_call_fn fn,
+                      dh_cancel_fn cancel, const char *const *calls,
+                      dh_visibility visibility, void *ud);
 
 /* ----------------------------------------------------------------------
 ** The deferred-reply half of the connector contract.

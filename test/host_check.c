@@ -2149,6 +2149,177 @@ static void the_rest_plugin_refuses_what_it_should (void) {
   dh_host_close(&h);
 }
 
+/* ------------------------------------------- build8: capability discovery
+
+** doc/Capabilities.md section 1 keeps "what a host can do" and "what this
+** instance may do" apart; section 4's third bullet is "lead with
+** visibility". These assert the host reports both and never collapses one
+** into the other -- which is what makes an auditor agent possible, and what
+** stops a program that named a capability wrong looking exactly like one
+** that was not granted it.
+*/
+
+/* Run a supervisor that prints its capability listing to 'log', and return
+   the whole listing as one string for substring assertions. */
+static int discovery_listing (const char *caps, const char *plugin_vis,
+                              const char *host_vis, char *out, size_t cap) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], cfgsrc[1200], path[512], manifest[1200];
+  const char *exe = plugin_path();
+  if (exe == NULL)
+    return 0;
+  snprintf(manifest, sizeof(manifest),
+    "{ \"schema\": 1,\n"
+    "  \"plugin\": { \"name\": \"echo\", \"exec\": \"%s\",\n"
+    "               \"transport\": \"socketpair\", \"max_inflight\": 2 },\n"
+    "  \"capabilities\": [ { \"name\": \"echo\", \"wake\": \"reissue\" },\n"
+    "                     { \"name\": \"boom\", \"wake\": \"error\" } ] }\n", exe);
+  fixture("echo.plugin.json", manifest);
+  fixture("sup_disco.lua",
+    "local log = queue.declare('log', {capacity = 4, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local out = {}\n"
+    "for _, c in ipairs(host.capabilities()) do\n"
+    "  out[#out+1] = c.name .. ':' .. c.kind .. ':' ..\n"
+    "                tostring(c.granted) .. ':' .. c.visibility\n"
+    "end\n"
+    "queue.push(log, '[' .. table.concat(out, '] [') .. ']')\n"
+    "queue.wait({park})\n");
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/sup_disco.lua',\n"
+           "  %s\n"
+           "  caps = { %s },\n"
+           "  connectors = { time = true },\n"
+           "  plugins = { echo = { manifest = 'echo.plugin.json'%s } } }\n",
+           tmpdir, host_vis, caps, plugin_vis);
+  fixture("disco.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/disco.host.lua", tmpdir);
+  if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+      dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    return 0;
+  }
+  out[0] = '\0';
+  run_until_log(&h, out, cap, 300);
+  dh_host_close(&h);
+  return out[0] != '\0';
+}
+
+static void discovery_reports_the_menu_not_the_grant (void) {
+  char log[2048];
+  if (plugin_path() == NULL) {
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  /* Granted: discovery, time and the plugin's 'echo'. NOT granted:
+     'echo/boom'. It must still be listed. */
+  if (!discovery_listing("'queue:*', 'host:capabilities/list', 'host:time', "
+                         "'host:echo/echo'", "", "", log, sizeof(log))) {
+    ok(0, "the discovery deployment runs");
+    return;
+  }
+  ok(strstr(log, "[time:connector:true:public]") != NULL,
+     "a granted connector is listed as granted");
+  ok(strstr(log, "[echo/echo:plugin:true:public]") != NULL,
+     "a plugin capability names its kind, so a caller can tell a capability "
+     "answered by another program from one this binary answers itself");
+  ok(strstr(log, "[echo/boom:plugin:false:public]") != NULL,
+     "and a capability the caller may NOT use is still listed, marked "
+     "granted=false: the host reports its menu, not the caller's grant");
+  ok(strstr(log, "[capabilities/list:connector:true:public]") != NULL,
+     "discovery lists itself, because it is a capability like any other");
+  if (failures > 0)
+    printf("      (listing: %s)\n", log);
+}
+
+static void visibility_narrows_what_is_listed_without_hiding_the_rest (void) {
+  char log[2048];
+  if (plugin_path() == NULL) {
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  /* private: listed only to holders. 'echo' is granted, 'boom' is not. */
+  if (!discovery_listing("'queue:*', 'host:capabilities/list', 'host:time', "
+                         "'host:echo/echo'", ", visibility = 'private'", "",
+                         log, sizeof(log))) {
+    ok(0, "the private-visibility deployment runs");
+    return;
+  }
+  ok(strstr(log, "echo/echo:plugin:true:private") != NULL &&
+     strstr(log, "echo/boom") == NULL,
+     "'private' lists a capability to the callers that hold it and to no "
+     "one else");
+
+  /* hidden: never listed, held or not -- the escape hatch for a deployment
+     where admitting existence is itself the leak. */
+  if (!discovery_listing("'queue:*', 'host:capabilities/list', 'host:time', "
+                         "'host:echo/echo'", ", visibility = 'hidden'", "",
+                         log, sizeof(log))) {
+    ok(0, "the hidden-visibility deployment runs");
+    return;
+  }
+  ok(strstr(log, "echo/") == NULL && strstr(log, "time:connector") != NULL,
+     "'hidden' removes a capability from the listing even for a caller that "
+     "holds it, and leaves everything else alone");
+
+  /* The deployment default reaches capabilities that did not say. */
+  if (!discovery_listing("'queue:*', 'host:capabilities/list', 'host:time'",
+                         "", "visibility = 'private',", log, sizeof(log))) {
+    ok(0, "the default-visibility deployment runs");
+    return;
+  }
+  ok(strstr(log, "time:connector:true:private") != NULL &&
+     strstr(log, "echo/") == NULL,
+     "a deployment-wide default reaches every capability that did not say, "
+     "which is what 'inherit' will carry down the tree later");
+  if (failures > 0)
+    printf("      (listing: %s)\n", log);
+}
+
+static void discovery_is_itself_gated_and_visibility_is_typed (void) {
+  char log[2048];
+  dh_config cfg;
+  char err[512], cfgsrc[700], path[512];
+  if (plugin_path() == NULL) {
+    ok(0, "the plugin fixture is on the path");
+    return;
+  }
+  /* No 'host:capabilities/list' in the grant. Discovery is a capability, so
+     it is refused like any other -- the menu is not a back door. */
+  if (!discovery_listing("'queue:*', 'host:time'", "", "", log, sizeof(log)))
+    ok(1, "a program without the discovery grant gets no listing at all");
+  else
+    ok(strstr(log, "time:connector") == NULL,
+       "a program without the discovery grant gets no listing at all");
+
+  /* And the field is typed: a misspelling is refused by name rather than
+     silently defaulting to the permissive value. */
+  fixture("sup_vis.lua", "queue.wait({queue.declare('p', {capacity=1})})\n");
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/sup_vis.lua',\n"
+           "  visibility = 'publicc',\n"
+           "  caps = { 'queue:*' } }\n", tmpdir);
+  fixture("vis.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/vis.host.lua", tmpdir);
+  ok(dh_config_load(path, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "visibility") != NULL,
+     "a misspelled visibility is refused by name, not defaulted to the "
+     "permissive value");
+
+  /* 'inherit' at the top has nothing above it to reach. */
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/sup_vis.lua',\n"
+           "  visibility = 'inherit',\n"
+           "  caps = { 'queue:*' } }\n", tmpdir);
+  fixture("vis.host.lua", cfgsrc);
+  ok(dh_config_load(path, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "inherit") != NULL,
+     "'inherit' at the deployment's own level is refused: there is nothing "
+     "above it to inherit from, and quietly meaning 'public' would let a "
+     "config say something it does not mean");
+}
+
 int main (void) {
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/host_check_XXXXXX");
   if (mkdtemp(tmpdir) == NULL) {
@@ -2181,6 +2352,9 @@ int main (void) {
   a_dead_plugin_fails_its_calls_as_transport();
   the_rest_plugin_refuses_what_it_should();
   the_rest_plugin_fetches_the_host_s_own_listener();
+  discovery_reports_the_menu_not_the_grant();
+  visibility_narrows_what_is_listed_without_hiding_the_rest();
+  discovery_is_itself_gated_and_visibility_is_typed();
   printf("\n%d checks, %d failed\n", checks, failures);
   return (failures == 0) ? 0 : 1;
 }

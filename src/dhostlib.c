@@ -246,6 +246,12 @@ static const char HOSTLIB_SRC[] =
   "  -- accident is a bug the call site cannot see.\n"
   "  call = function(name, args, waitms) return ask(name, args, waitms) end,\n"
   "  try = function(name, args, waitms) return try(name, args, waitms) end,\n"
+  "  -- What this host can do, and what of it is yours. The two are\n"
+  "  -- different questions and the answer keeps them apart: an entry the\n"
+  "  -- program may not call is still an entry, with granted = false. That\n"
+  "  -- is what lets a program tell 'this host cannot' from 'I may not',\n"
+  "  -- which are different problems with different fixes.\n"
+  "  capabilities = function() return ask(\"capabilities/list\") end,\n"
   "}\n"
 ;
 

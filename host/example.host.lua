@@ -21,8 +21,15 @@ return {
   -- The root's ceiling. Everything any descendant will ever hold is a
   -- subset of this list, and the host:* names gate hostcalls the same way
   -- queue:* names gate queues.
-  caps = { "lifecycle", "queue:*", "host:time", "host:sql/query",
-           "host:crypto/*", "host:fs/*", "host:rest/*" },
+  caps = { "lifecycle", "queue:*", "host:capabilities/list", "host:time",
+           "host:sql/query", "host:crypto/*", "host:fs/*", "host:rest/*" },
+
+  -- What `host.capabilities()` tells a caller EXISTS. Not what it may DO --
+  -- those are different questions, and the listing answers both by marking
+  -- each entry granted or not. Public by default on purpose: a host that
+  -- conceals its menu because a caller lacks a grant is a host that lies
+  -- about what it is, and it makes an auditing agent impossible.
+  visibility = "public",
 
   budget = { instructions = 5000000, memory_kb = 512 },
 
