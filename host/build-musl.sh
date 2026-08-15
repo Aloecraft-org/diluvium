@@ -34,10 +34,15 @@ $ENGINE build -f host/Dockerfile.musl --target build -t "$TAG" .
 CID=$($ENGINE create "$TAG")
 trap '$ENGINE rm "$CID" >/dev/null 2>&1 || true' EXIT
 $ENGINE cp "$CID:/src/dist/diluvium-host-musl" dist/diluvium-host-musl
+# The rest plugin rides along: it is built in the same image, by the same
+# musl toolchain, and a host without a plugin to run through its plugin
+# channel is half of what build 8 shipped.
+$ENGINE cp "$CID:/src/dist/diluvium-rest-plugin-musl" dist/diluvium-rest-plugin-musl || true
 
 echo
 echo "=== dist/diluvium-host-musl ==="
 ls -la dist/diluvium-host-musl
+[ -f dist/diluvium-rest-plugin-musl ] && ls -la dist/diluvium-rest-plugin-musl
 # Prove it is static and identify the arch, without needing 'file'. On Alpine
 # 'ldd' is ld-musl, which answers "Not a valid dynamic program" for a static
 # binary -- that is the success signal, not an error, so interpret it rather

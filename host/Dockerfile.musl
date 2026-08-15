@@ -16,14 +16,23 @@ FROM alpine:3.20 AS build
 
 # gcc here is musl-gcc; sqlite-static carries libsqlite3.a for the fully
 # static link; make + the Makefile drive the amalgamation staging.
-RUN apk add --no-cache gcc musl-dev make sqlite-dev sqlite-static
+RUN apk add --no-cache gcc musl-dev make sqlite-dev sqlite-static \
+    openssl-dev openssl-libs-static
 
 WORKDIR /src
 COPY . .
 
 RUN make build_host_musl
 
+# The rest plugin, beside the host. It is a SEPARATE program -- that is the
+# whole point of the plugin channel, and it is why the openssl packages above
+# are here and the host still links none of it. A plugin channel that ships
+# nothing runnable is half a feature, which is the same gap shipping no host
+# was.
+RUN make build_plugin_rest_musl
+
 # A scratch stage holding only the artifact, so `docker build --output` or a
 # create/cp lands one file and nothing else.
 FROM scratch AS artifact
 COPY --from=build /src/dist/diluvium-host-musl /out/diluvium-host-musl
+COPY --from=build /src/dist/diluvium-rest-plugin-musl /out/diluvium-rest-plugin-musl
