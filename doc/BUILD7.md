@@ -210,8 +210,11 @@ Recorded on the roadmap, built later, never pretended:
   real work.
 - **Listener routing to a non-root instance** (cap5 gap): `http_in` lands on the
   root; an API can't be served by a spawned child yet.
-- **`net`** — outbound HTTP/TCP connector; among other things, what a guest-side
-  endpoint tester (cap5) needs.
+- ~~**`net`** — outbound HTTP/TCP connector; among other things, what a
+  guest-side endpoint tester (cap5) needs.~~ **Closed by build 8**, and not
+  as a connector: `plugins/rest` is a separate program the host execs, so
+  `diluvium-host` still links no TLS and opens no outbound socket. See
+  `doc/BUILD8.md` §5.
 - **Installer ships the host** (`--host`/`--full`) + publishes `diluvium-host` as
   a release asset — the distribution gap that makes `curl … | sh` yield a runtime
   that can't do half of what the docs describe.

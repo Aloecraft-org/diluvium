@@ -280,9 +280,23 @@ stop and say why. A program that *expects* one keeps it expressible without
 instead, and `host.try(name, args)` is the same escape for any call. Two shapes
 to know: `host.crypto.jwt_verify` never raises on a bad token, because
 `{valid = false, reason = "signature"}` is an *answer*, and `host.crypto.random`
-comes back as hex, two characters per byte. `host.call(name, args)` reaches any
+comes back as hex, two characters per byte. `host.call(name, args, waitms?)` reaches any
 connector by name — the typed wrappers are exactly it, spelled out — so a
-deployment that wires a connector this runtime predates is not out of reach.
+deployment that wires a connector this runtime predates is not out of reach,
+and a capability that lives in another program (a *plugin*, `doc/BUILD8.md`)
+arrives through the same call with no new surface at all. The optional third
+argument is how long to wait; the library's own default is tuned for a
+connector answering out of local state, and a call that leaves the machine is
+not that.
+
+`host.capabilities()` answers what this host can do **and** what of it is
+yours, keeping the two apart: every entry carries `granted`, so a capability
+this deployment wires and this program may not call is still listed, marked
+`granted = false`. That is the difference between *"this host cannot do
+that"* and *"this host can, and I may not"* — different problems with
+different fixes. `doc/Capabilities.md` §1 is why they are separate axes, and
+a deployment's `visibility` setting decides what a caller is told exists.
+Discovery is itself a capability: grant `host:capabilities/list`.
 
 Files and subprocesses follow the same grammar. `host.fs.read(path)` /
 `host.fs.write(path, data, {append=true}?)` work files inside a directory the

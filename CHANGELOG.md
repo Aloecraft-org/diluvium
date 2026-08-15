@@ -10,6 +10,143 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build8] - 2026-08-15
+
+`v5.5.1_build8` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**Nothing blocks the shared thread, and a capability can live in
+another program.** Until now a connector answered inline: the host
+called it and wrote the reply on the next line, so a connector that
+needed time simply did not return, and `exec` sitting in a `poll()`
+loop stalled every guest and the listener until its child exited. A
+connector can now say *later* -- take the call, return, and answer
+when the answer exists. Eight 200ms calls from one instance finish in
+about 208ms rather than 1600.
+
+**The plugin channel** is what that makes possible. A capability
+answered by a separate program the host execs from an absolute path,
+talking length-prefixed msgpack over a socketpair it inherits as fd 3,
+described by a self-contained `<name>.plugin.json` manifest and wired
+by a `plugins` table beside `connectors`. New capability without a new
+Diluvium release.
+
+**`plugins/rest` is the first one**, and closes the `net` gap build 7
+deferred -- in C against OpenSSL and in JavaScript against `fetch`,
+one manifest describing both, and a guest that cannot tell them apart.
+The point is what `diluvium-host` did *not* have to learn: it links no
+TLS, resolves no names, and opens no outbound socket.
+
+**`host.capabilities()`** answers what this host can do and what of it
+the caller may do, and keeps them apart. Every entry carries
+`granted`, so a capability a deployment wires and a program may not
+call is still listed rather than absent -- the difference between
+"this host cannot" and "I may not", which had produced identical
+silence. A `visibility` field (public, private, hidden, inherit;
+public by default) decides what a caller is told exists, which is a
+separate axis from what it may do.
+
+The guest side needed no new surface for any of it: `host.call` already
+reached any connector by name, and now forwards an optional timeout.
+
+### Added
+
+- **Deferred hostcall replies.** `DH_CALL_PENDING` is a fourth
+  connector status meaning *taken; exactly one reply is owed*. The
+  host keeps a ledger keyed by (instance, token), sweeps it when an
+  instance dies so a dead program's work is abandoned rather than
+  computed, and reclaims an entry whose deadline elapses so a wedged
+  connector cannot hang a guest.
+- **The plugin channel.** `plugins = { name = { manifest = ... } }` in
+  a deployment; `<name>.plugin.json` beside it. Manifests are parsed
+  with the runtime's own strict JSON decoder in a `lua_State` the host
+  owns, so nothing is vendored and no schema validator is embedded --
+  the runtime reads the flat metadata and reads past `args`/`result`.
+  Per-plugin `max_inflight` bounds what a serial plugin is handed;
+  `call_timeout_ms` is the host-side backstop. Errors carry one of
+  three classes -- `transport`, `plugin`, `capability` -- because the
+  caller's retry decision differs for each.
+- **`plugins/rest`**, outbound HTTP and HTTPS, in C (OpenSSL,
+  verifying the chain *and* the name) and in JavaScript (`fetch`, on
+  fd 3 under Node and over `postMessage` in a Worker). Plus
+  `plugins/dvplug.h`, a dependency-free single-header kit for writing
+  a plugin in C, and `plugins/README.md`.
+- **`host.capabilities()`** and the `visibility` field, on the
+  deployment and per plugin. Discovery is gated on
+  `host:capabilities/list`, which is what makes an auditing agent
+  expressible: one that can report everything a swarm can reach while
+  being able to reach none of it.
+- `doc/Extending.md`: adding a capability as a C connector, as a plugin, or as a Lab connector, side by side.
+- `doc/BUILD8.md`: the plan, and the honest list of what it did not build.
+
+### Changed
+
+- **The host sleeps in exactly one place.** `dh_host_sleep` folds the
+  listener's sockets, the plugin channels and a plain timeout into a
+  single `poll()`. Two sleeping polls in sequence would not deadlock,
+  but the first to sleep would delay the second by its whole timeout,
+  and "nothing blocks the shared thread" is only checkable if there is
+  one place the thread stops.
+- `host.call` and `host.try` take an optional `waitms`, which `roundtrip` had always accepted.
+- `dh_call_fn` carries the request's correlation token, so a connector that defers can name the call it is answering.
+- `DH_MAX_CONNECTORS` is 16, since every plugin claims a slot beside the built-ins.
+
+### Fixed
+
+- **The generic host builds on macOS.** `dhost_crypto.c` called
+  `getrandom(2)` unguarded; that is Linux's, and `<sys/random.h>` is
+  spelled the same on macOS but declares `getentropy` instead, so the
+  `/dev/urandom` fallback underneath it was unreachable -- the file
+  never compiled. Split at compile time. Pre-existing and invisible
+  because `host_check` did not run in CI until this build put it
+  there.
+- **A reply-queue accounting bug the deferral seam exposed.** The pump
+  refused to drain a request when the reply queue was full, but a
+  deferred call is drained and not yet answered, so the queue looked
+  emptier than it was. Pending calls now count against the headroom.
+- `realpath` was handed a 512-byte buffer in `host_check`; it writes up to `PATH_MAX`. Found by adding `host_check` to `sanitize_checks`, which `_FORTIFY_SOURCE` catches and ASan does not.
+
+### Security
+
+- **A plugin is exec'd with `execv` from an absolute path**, never
+  `execvp`: a plugin path comes from a manifest an operator wrote, and
+  resolving it through `PATH` is an injection surface with nothing on
+  the other side of the trade. A relative path is refused by name at
+  config load.
+- **There is no plugin authentication, deliberately.** Containment
+  comes from a plugin being a narrow program rather than from
+  certifying it, and an attacker who can swap the plugin binary can
+  equally swap `diluvium-host`. The channel has no filesystem path and
+  no port, so parentage is structural rather than negotiated. A
+  manifest checksum is recorded and logged at startup without being
+  enforced, which is forensics now and a one-line change later.
+- The rest plugin refuses credentials in a URL rather than laundering them into the host's log and the guest's message log, and refuses a header value carrying CR or LF rather than stripping it -- silently changing what was sent is worse than declining to send it.
+
+### Upgrading
+
+**Snapshots taken by 5.5.1_build7 restore on this build.** Unlike
+build7, which added a module table to the permanents set and moved the
+fingerprint, everything build8 adds on the guest side is a Lua closure
+inside the existing `host` table. `ds_perm_walk` names only C
+functions and the fingerprint hashes the sorted name list, so it is
+byte-identical. `DILUVIUM_SNAP_FORMAT`, `DS_THREAD_VERSION` and
+`LUAC_FORMAT` are unchanged.
+
+**A deployment that wants `host.capabilities()` must grant it.**
+Discovery is a capability like any other and is gated on
+`host:capabilities/list`; a program without it is denied by name. No
+existing deployment grants it, because none could until now.
+
+**`exec` still answers synchronously.** Build 8 made deferral possible
+and did not convert `exec`, which is a behaviour change to a shipped
+connector and belongs in its own build. A running child still stalls
+every guest and the listener, and `host/types/host.lua` still says so.
+
+**Plugin binaries are not release assets.** The plugin channel ships,
+and nothing to run through it does: `diluvium-host` itself is still
+not published either (build 7 §5's open item). Building both from
+source is the path today.
+
+
 ## [5.5.1_build7] - 2026-08-13
 
 `v5.5.1_build7` &middot; Lua 5.5.1 &middot; bytecode format `0x46`

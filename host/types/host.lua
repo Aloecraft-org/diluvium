@@ -146,10 +146,13 @@
 ---The exec connector answers host:exec/run: a subprocess, argv as a vector
 ---(no shell unless the program names one), stdin fed, stdout/stderr
 ---captured. GRANTING EXEC IS LEAVING THE SANDBOX -- the instruction budget
----cannot reach a child -- so the bounds here are the whole point. Note the
----host answers hostcalls synchronously: a running child stalls every guest
----and the listener until it exits or hits the deadline. `exec = true` wires
----it with the defaults.
+---cannot reach a child -- so the bounds here are the whole point. Note that
+---THIS connector still answers synchronously, so a running child stalls
+---every guest and the listener until it exits or hits the deadline. Build 8
+---made deferral possible (a connector may take a call and answer later, as
+---the plugin channel does) and deliberately did not convert `exec`, which
+---is a behaviour change to a shipped connector and belongs in its own
+---build. Bound it tight. `exec = true` wires it with the defaults.
 ---@class diluvium.HostExec
 ---@field max_timeout_ms integer?     # ceiling on a call's deadline; a child
 ---                                   # still running is killed
