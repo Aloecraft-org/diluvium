@@ -1812,7 +1812,7 @@ static void flow_control_holds_against_a_naive_plugin (void) {
 */
 static void a_manifest_refuses_its_mistakes_by_name (void) {
   dh_config cfg;
-  char err[512], path[512], cfgsrc[600];
+  char err[512], path[512], cfgsrc[1600];
   const char *exe = plugin_path();
   if (exe == NULL) {
     ok(0, "the plugin fixture is on the path");
@@ -1878,8 +1878,12 @@ static void a_manifest_refuses_its_mistakes_by_name (void) {
      example, because it is believed. The test runs from test/, so the
      example is one directory up. */
   {
-    char real[DH_PATH_MAX];
-    if (realpath("../host/rest.plugin.json", real) != NULL) {
+    /* realpath() writes up to PATH_MAX bytes and says so; handing it a
+       512-byte DH_PATH_MAX buffer is an overflow, which _FORTIFY_SOURCE
+       catches and ASan does not. Let glibc size it -- POSIX.1-2008 allows
+       NULL and returns an allocation. */
+    char *real = realpath("../host/rest.plugin.json", NULL);
+    if (real != NULL) {
       snprintf(cfgsrc, sizeof(cfgsrc),
                "return { supervisor = '%s/sup_noop.lua',\n"
                "  caps = { 'queue:*', 'host:rest/*' },\n"
@@ -1894,6 +1898,7 @@ static void a_manifest_refuses_its_mistakes_by_name (void) {
          "its wake policies and max_inflight arrive as written");
       if (cfg.nplugins != 1)
         printf("      (%s)\n", err);
+      free(real);
     }
     else
       ok(0, "the shipped example manifest is where the test expects it");

@@ -433,6 +433,24 @@ sanitize_checks: _build_step0
 	gcc $(SAN_CFLAGS) -I$(CURDIR)/.data -o $(CURDIR)/dist/dhash_check_asan \
 	  $(CURDIR)/test/dhash_check.c $(CURDIR)/.data/dhash.c; \
 	$(SAN_ENV) $(CURDIR)/dist/dhash_check_asan >/dev/null; \
+	echo "=== host_check (asan+ubsan)"; \
+	gcc -O2 -Wall -o $(CURDIR)/dist/plugin_echo $(CURDIR)/test/plugin_echo.c; \
+	if printf '#include <openssl/ssl.h>\nint main(void){return 0;}\n' \
+	    | gcc -x c - -o /dev/null -lssl -lcrypto >/dev/null 2>&1; then \
+	  gcc -O2 -Wall -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c -lssl -lcrypto; \
+	else \
+	  gcc -O2 -Wall -DREST_NO_TLS -o $(CURDIR)/dist/diluvium-rest-plugin \
+	    $(CURDIR)/plugins/rest/rest_plugin.c; \
+	fi; \
+	gcc $(SAN_CFLAGS) $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -I$(CURDIR)/host -o $(CURDIR)/dist/host_check_asan \
+	  $(CURDIR)/test/host_check.c $(HOST_SRCS) \
+	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl; \
+	cd $(CURDIR)/test && DILUVIUM_PLUGIN_ECHO=$(CURDIR)/dist/plugin_echo \
+	  DILUVIUM_PLUGIN_REST=$(CURDIR)/dist/diluvium-rest-plugin \
+	  DILUVIUM_PLUGIN_REST_JS=$(CURDIR)/plugins/rest/rest_plugin.mjs \
+	  $(SAN_ENV) $(CURDIR)/dist/host_check_asan >/dev/null; \
 	echo "all contract tests clean under asan+ubsan"
 
 # The token cursor on hostile input, under the sanitizers.

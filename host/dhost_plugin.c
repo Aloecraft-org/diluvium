@@ -617,7 +617,11 @@ static void plug_reply_frame (plug_rt *p, const unsigned char *body,
           code[t.len] = '\0';
         }
         if (code[0] != '\0' && msg[0] != '\0') {
-          char joined[256];
+          /* code is 64 and msg is 192, so the pair plus its separator can
+             just exceed 256. Sized to hold them rather than sized to look
+             round: a truncated diagnostic is the one case where losing the
+             end of the sentence loses the part that said what to do. */
+          char joined[sizeof(code) + sizeof(msg) + 4];
           snprintf(joined, sizeof(joined), "%s: %s", code, msg);
           fail_call(p, pc, cls, joined);
         }
