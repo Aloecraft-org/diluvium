@@ -127,7 +127,9 @@ jobs:
           set -eu
           sh host/build-musl.sh
           cp dist/diluvium-host-musl dist/diluvium_host_linux_static_x86_64
-          rm -f dist/diluvium-host-musl
+          cp dist/diluvium-rest-plugin-musl \
+             dist/diluvium_rest_plugin_linux_static_x86_64
+          rm -f dist/diluvium-host-musl dist/diluvium-rest-plugin-musl
 
       - name: Smoke test the x86_64 static binary
         run: |
@@ -138,6 +140,9 @@ jobs:
           # The host answers --version as of build 8, which is what lets a
           # consumer tell an old binary from a bad config.
           ./dist/diluvium_host_linux_static_x86_64 --version
+          # The plugin speaks a framed protocol on fd 3 and has no CLI, so
+          # the check that means anything is that it is static and executes.
+          test -x ./dist/diluvium_rest_plugin_linux_static_x86_64
 
       # aarch64 and armv7l were built here and shipped without ever being
       # run. QEMU and the container are already set up from building them,

@@ -10,6 +10,69 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build9] - 2026-08-15
+
+`v5.5.1_build9` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**The host ships.** Build 8 added a plugin channel and a generic host
+that could defer a call, and published neither binary -- so using any
+of it meant cloning the repository and building in a container. This
+release carries `diluvium_host_linux_static_x86_64` and
+`diluvium_rest_plugin_linux_static_x86_64` as release artifacts,
+checksummed alongside everything else.
+
+That gap was not academic. It cost three separate round trips
+downstream, and every one of them looked the same from the outside: a
+host older than the configuration it was handed refuses a key it does
+not know, correctly and by name, and the refusal reads like a bad
+config rather than an old binary.
+
+So the other half of this release is being able to tell those apart.
+`diluvium-host --version` answers which build it is, and the startup
+banner leads with it, so the line above any refusal already says which
+binary is doing the refusing.
+
+Nothing in the runtime changed. This is build 8's feature set, made
+obtainable.
+
+### Added
+
+- **`diluvium_host_linux_static_x86_64`** -- the generic host, fully
+  static musl, so it runs on an Alpine older than the builder with no
+  libc to match and no shared SQLite. This is the binary the capability
+  model lives in: connectors, the listener, the driven swarm. The
+  installer still ships only the CLI, which is a separate gap
+  (doc/BUILD7.md §5).
+- **`diluvium_rest_plugin_linux_static_x86_64`** -- outbound HTTP and
+  HTTPS as a plugin, so build 8's plugin channel has something runnable
+  to point at. It links OpenSSL and the host links none, which is the
+  arrangement the channel exists to make possible.
+- **`diluvium-host --version`**, and the build in the startup banner.
+  The build number now reaches a compiled artifact for the first time:
+  VERSION stays the single source of truth and the makefile passes it
+  in, so there is no second copy to drift.
+
+### Fixed
+
+- `host/build-musl.sh` and `host/Dockerfile.musl` build and export the rest plugin beside the host, rather than the host alone.
+
+### Upgrading
+
+**Snapshots taken by 5.5.1_build8 restore on this build**, and so do
+build7's: the permanents fingerprint has not moved since build 7, and
+no guest-visible surface changed here at all.
+
+**The host and the rest plugin are x86_64 Linux only.** The aarch64 and
+armv7l CLI builds go through QEMU, and the host additionally needs
+`sqlite-static` for those arches while the plugin needs
+`openssl-libs-static`. Other platforms still build from source.
+
+**A consumer should pin a version and verify the checksum.** Every
+artifact is listed in the release's `SHA256SUMS.txt`. Following
+`latest` means being unable to tell a Diluvium regression from your
+own.
+
+
 ## [5.5.1_build8] - 2026-08-15
 
 `v5.5.1_build8` &middot; Lua 5.5.1 &middot; bytecode format `0x46`

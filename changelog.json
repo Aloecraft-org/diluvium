@@ -1,8 +1,9 @@
 {
   "schema": 1,
   "repo": "Aloecraft-org/diluvium",
-  "latest": "v5.5.1_build8",
+  "latest": "v5.5.1_build9",
   "mirror_tags": [
+    "v5.5.1_build9",
     "v5.5.1_build8",
     "v5.5.1_build7",
     "v5.5.1_build6",
@@ -14,6 +15,30 @@
   ],
   "releases": [
     {
+      "version": "5.5.1_build9",
+      "tag": "v5.5.1_build9",
+      "date": "2026-08-15",
+      "status": "released",
+      "stable": true,
+      "mirror": true,
+      "lua_base": "5.5.1",
+      "bytecode_format": 70,
+      "summary": "**The host ships.** Build 8 added a plugin channel and a generic host\nthat could defer a call, and published neither binary -- so using any\nof it meant cloning the repository and building in a container. This\nrelease carries `diluvium_host_linux_static_x86_64` and\n`diluvium_rest_plugin_linux_static_x86_64` as release artifacts,\nchecksummed alongside everything else.\n\nThat gap was not academic. It cost three separate round trips\ndownstream, and every one of them looked the same from the outside: a\nhost older than the configuration it was handed refuses a key it does\nnot know, correctly and by name, and the refusal reads like a bad\nconfig rather than an old binary.\n\nSo the other half of this release is being able to tell those apart.\n`diluvium-host --version` answers which build it is, and the startup\nbanner leads with it, so the line above any refusal already says which\nbinary is doing the refusing.\n\nNothing in the runtime changed. This is build 8's feature set, made\nobtainable.\n",
+      "upgrading": "**Snapshots taken by 5.5.1_build8 restore on this build**, and so do\nbuild7's: the permanents fingerprint has not moved since build 7, and\nno guest-visible surface changed here at all.\n\n**The host and the rest plugin are x86_64 Linux only.** The aarch64 and\narmv7l CLI builds go through QEMU, and the host additionally needs\n`sqlite-static` for those arches while the plugin needs\n`openssl-libs-static`. Other platforms still build from source.\n\n**A consumer should pin a version and verify the checksum.** Every\nartifact is listed in the release's `SHA256SUMS.txt`. Following\n`latest` means being unable to tell a Diluvium regression from your\nown.\n",
+      "latest": true,
+      "sections": {
+        "added": [
+          "**`diluvium_host_linux_static_x86_64`** -- the generic host, fully\nstatic musl, so it runs on an Alpine older than the builder with no\nlibc to match and no shared SQLite. This is the binary the capability\nmodel lives in: connectors, the listener, the driven swarm. The\ninstaller still ships only the CLI, which is a separate gap\n(doc/BUILD7.md \u00a75).\n",
+          "**`diluvium_rest_plugin_linux_static_x86_64`** -- outbound HTTP and\nHTTPS as a plugin, so build 8's plugin channel has something runnable\nto point at. It links OpenSSL and the host links none, which is the\narrangement the channel exists to make possible.\n",
+          "**`diluvium-host --version`**, and the build in the startup banner.\nThe build number now reaches a compiled artifact for the first time:\nVERSION stays the single source of truth and the makefile passes it\nin, so there is no second copy to drift.\n"
+        ],
+        "fixed": [
+          "`host/build-musl.sh` and `host/Dockerfile.musl` build and export the rest plugin beside the host, rather than the host alone."
+        ]
+      },
+      "notes_md": "## [5.5.1_build9] - 2026-08-15\n\n`v5.5.1_build9` &middot; Lua 5.5.1 &middot; bytecode format `0x46`\n\n**The host ships.** Build 8 added a plugin channel and a generic host\nthat could defer a call, and published neither binary -- so using any\nof it meant cloning the repository and building in a container. This\nrelease carries `diluvium_host_linux_static_x86_64` and\n`diluvium_rest_plugin_linux_static_x86_64` as release artifacts,\nchecksummed alongside everything else.\n\nThat gap was not academic. It cost three separate round trips\ndownstream, and every one of them looked the same from the outside: a\nhost older than the configuration it was handed refuses a key it does\nnot know, correctly and by name, and the refusal reads like a bad\nconfig rather than an old binary.\n\nSo the other half of this release is being able to tell those apart.\n`diluvium-host --version` answers which build it is, and the startup\nbanner leads with it, so the line above any refusal already says which\nbinary is doing the refusing.\n\nNothing in the runtime changed. This is build 8's feature set, made\nobtainable.\n\n### Added\n\n- **`diluvium_host_linux_static_x86_64`** -- the generic host, fully\n  static musl, so it runs on an Alpine older than the builder with no\n  libc to match and no shared SQLite. This is the binary the capability\n  model lives in: connectors, the listener, the driven swarm. The\n  installer still ships only the CLI, which is a separate gap\n  (doc/BUILD7.md \u00a75).\n- **`diluvium_rest_plugin_linux_static_x86_64`** -- outbound HTTP and\n  HTTPS as a plugin, so build 8's plugin channel has something runnable\n  to point at. It links OpenSSL and the host links none, which is the\n  arrangement the channel exists to make possible.\n- **`diluvium-host --version`**, and the build in the startup banner.\n  The build number now reaches a compiled artifact for the first time:\n  VERSION stays the single source of truth and the makefile passes it\n  in, so there is no second copy to drift.\n\n### Fixed\n\n- `host/build-musl.sh` and `host/Dockerfile.musl` build and export the rest plugin beside the host, rather than the host alone.\n\n### Upgrading\n\n**Snapshots taken by 5.5.1_build8 restore on this build**, and so do\nbuild7's: the permanents fingerprint has not moved since build 7, and\nno guest-visible surface changed here at all.\n\n**The host and the rest plugin are x86_64 Linux only.** The aarch64 and\narmv7l CLI builds go through QEMU, and the host additionally needs\n`sqlite-static` for those arches while the plugin needs\n`openssl-libs-static`. Other platforms still build from source.\n\n**A consumer should pin a version and verify the checksum.** Every\nartifact is listed in the release's `SHA256SUMS.txt`. Following\n`latest` means being unable to tell a Diluvium regression from your\nown.\n"
+    },
+    {
       "version": "5.5.1_build8",
       "tag": "v5.5.1_build8",
       "date": "2026-08-15",
@@ -24,7 +49,7 @@
       "bytecode_format": 70,
       "summary": "**Nothing blocks the shared thread, and a capability can live in\nanother program.** Until now a connector answered inline: the host\ncalled it and wrote the reply on the next line, so a connector that\nneeded time simply did not return, and `exec` sitting in a `poll()`\nloop stalled every guest and the listener until its child exited. A\nconnector can now say *later* -- take the call, return, and answer\nwhen the answer exists. Eight 200ms calls from one instance finish in\nabout 208ms rather than 1600.\n\n**The plugin channel** is what that makes possible. A capability\nanswered by a separate program the host execs from an absolute path,\ntalking length-prefixed msgpack over a socketpair it inherits as fd 3,\ndescribed by a self-contained `<name>.plugin.json` manifest and wired\nby a `plugins` table beside `connectors`. New capability without a new\nDiluvium release.\n\n**`plugins/rest` is the first one**, and closes the `net` gap build 7\ndeferred -- in C against OpenSSL and in JavaScript against `fetch`,\none manifest describing both, and a guest that cannot tell them apart.\nThe point is what `diluvium-host` did *not* have to learn: it links no\nTLS, resolves no names, and opens no outbound socket.\n\n**`host.capabilities()`** answers what this host can do and what of it\nthe caller may do, and keeps them apart. Every entry carries\n`granted`, so a capability a deployment wires and a program may not\ncall is still listed rather than absent -- the difference between\n\"this host cannot\" and \"I may not\", which had produced identical\nsilence. A `visibility` field (public, private, hidden, inherit;\npublic by default) decides what a caller is told exists, which is a\nseparate axis from what it may do.\n\nThe guest side needed no new surface for any of it: `host.call` already\nreached any connector by name, and now forwards an optional timeout.\n",
       "upgrading": "**Snapshots taken by 5.5.1_build7 restore on this build.** Unlike\nbuild7, which added a module table to the permanents set and moved the\nfingerprint, everything build8 adds on the guest side is a Lua closure\ninside the existing `host` table. `ds_perm_walk` names only C\nfunctions and the fingerprint hashes the sorted name list, so it is\nbyte-identical. `DILUVIUM_SNAP_FORMAT`, `DS_THREAD_VERSION` and\n`LUAC_FORMAT` are unchanged.\n\n**A deployment that wants `host.capabilities()` must grant it.**\nDiscovery is a capability like any other and is gated on\n`host:capabilities/list`; a program without it is denied by name. No\nexisting deployment grants it, because none could until now.\n\n**`exec` still answers synchronously.** Build 8 made deferral possible\nand did not convert `exec`, which is a behaviour change to a shipped\nconnector and belongs in its own build. A running child still stalls\nevery guest and the listener, and `host/types/host.lua` still says so.\n\n**Plugin binaries are not release assets.** The plugin channel ships,\nand nothing to run through it does: `diluvium-host` itself is still\nnot published either (build 7 \u00a75's open item). Building both from\nsource is the path today.\n",
-      "latest": true,
+      "latest": false,
       "sections": {
         "added": [
           "**Deferred hostcall replies.** `DH_CALL_PENDING` is a fourth\nconnector status meaning *taken; exactly one reply is owed*. The\nhost keeps a ledger keyed by (instance, token), sweeps it when an\ninstance dies so a dead program's work is abandoned rather than\ncomputed, and reclaims an entry whose deadline elapses so a wedged\nconnector cannot hang a guest.\n",
