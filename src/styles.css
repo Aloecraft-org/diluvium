@@ -102,9 +102,12 @@ section > h2 {
   font-size: clamp(2rem, 5.2vw, 3.1rem);
   margin: 0 0 1rem; letter-spacing: -0.02em;
 }
-.lede { font-size: 1.1rem; color: var(--ink); max-width: 62ch; margin: 0 0 1.8rem; }
+.lede { font-size: 1.1rem; color: var(--ink); max-width: 62ch; margin: 0 0 .9rem; }
 .lede code { color: var(--accent); font-size: .95em; }
 .lede strong { color: var(--ink-bright); }
+.lede-note {
+  font-size: .92rem; color: var(--ink-dim); max-width: 62ch; margin: 0 0 1.8rem;
+}
 
 .oneliner {
   display: flex; align-items: center; gap: .75rem;

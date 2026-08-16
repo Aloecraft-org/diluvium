@@ -3,10 +3,10 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Diluvium — Lua for modern development</title>
-<meta name="description" content="Diluvium is a 100% backward-compatible extension of Lua with string interpolation, null coalescing, switch, defer, safe navigation and compound assignment. Under 1 MiB, runs everywhere, and in your browser right now.">
-<meta property="og:title" content="Diluvium — Lua for modern development">
-<meta property="og:description" content="A backward-compatible extension of Lua. Try it in the browser, no install.">
+<title>Diluvium — a small language that runs anywhere</title>
+<meta name="description" content="Diluvium is a small, sealed, portable language and runtime. Modern syntax, one portable bytecode, under 1 MiB, running everywhere from a browser tab to bare metal — and in your browser right now.">
+<meta property="og:title" content="Diluvium — a small language that runs anywhere">
+<meta property="og:description" content="A small, sealed, portable language and runtime. Try it in the browser, no install.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://diluvium.aloecraft.org/">
 </head>
@@ -34,12 +34,19 @@
 
   <section class="hero">
     <div class="hero-copy">
-      <h1>Lua, with the modern bits.</h1>
+      <h1>Small language. Sealed runtime. Runs anywhere.</h1>
       <p class="lede">
-        Diluvium is a <strong>100% backward-compatible</strong> extension of Lua 5.5.
-        String interpolation, null coalescing, <code>switch</code>, <code>defer</code>,
-        safe navigation and compound assignment — without breaking a line of
-        existing code. The whole runtime is under a megabyte.
+        Diluvium is a general-purpose language and the runtime underneath it.
+        Modern syntax — string interpolation, <code>switch</code>,
+        <code>defer</code>, safe navigation — compiled to
+        <strong>one portable bytecode</strong> that behaves the same in a browser
+        tab, on a server, or on hardware with a few hundred kilobytes to spare.
+        The whole runtime is under a megabyte, and a program can reach nothing
+        you did not hand it.
+      </p>
+      <p class="lede-note">
+        The syntax is a compatible superset of Lua 5.5, so existing Lua code runs
+        unmodified. If you have never written Lua, there is nothing to catch up on.
       </p>
       <div class="cta">
         <div class="oneliner">
@@ -73,11 +80,11 @@
   </section>
 
   <section class="features" id="features">
-    <h2>What Diluvium adds</h2>
+    <h2>The language</h2>
     <p class="section-lede">
-      Every construct below is a syntax error in stock Lua, and none of them
-      takes a reserved word — so existing code keeps working, and adoption is
-      as gradual as you want it.
+      Small, plain, and readable on sight. Everything below compiles straight to
+      bytecode and none of it takes a reserved word, so existing code keeps
+      working and adoption is as gradual as you want it.
     </p>
 
     <div class="grid">
@@ -170,6 +177,44 @@ end</code></pre>
     </div>
   </section>
 
+  <section class="features" id="runtime">
+    <h2>The runtime</h2>
+    <p class="section-lede">
+      The syntax is the part you see. Underneath it is a machine built to be
+      small, portable, and sealed — the same one running in the panel above.
+    </p>
+
+    <div class="grid">
+
+      <article class="feature">
+        <h3>One bytecode, every target</h3>
+        <p>Source compiles to a single portable bytecode with one set of
+        semantics behind it. The same file runs under WebAssembly in this page,
+        on x86_64 and ARM64 natively, and on hardware smaller than either.
+        Natively it is one static binary under a megabyte, with nothing to
+        install alongside it.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Sealed by default</h3>
+        <p>A program starts with no ambient authority. It cannot open a socket,
+        read a file, or reach the process it lives in, because there is nothing
+        in the runtime to call. Everything it can touch is handed in from
+        outside, nothing can pass on more than it was given, and the trusted
+        base enforcing that is small enough to read end to end.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Freeze and resume</h3>
+        <p>A running program can be snapshotted mid-execution into a flat string
+        of bytes and brought back later at the exact instruction it left — in
+        another process, or on another machine. A program does not have to be
+        running to exist.</p>
+      </article>
+
+    </div>
+  </section>
+
   <section class="install" id="install">
     <h2>Install</h2>
 
@@ -226,8 +271,8 @@ end</code></pre>
       </a>
       <a class="card" href="/docs/">
         <h3>Docs <span aria-hidden="true">→</span></h3>
-        <p>The language reference, the standard library, and what changed
-        from stock Lua.</p>
+        <p>The language reference, the standard library, the host API, and
+        what differs from stock Lua.</p>
       </a>
     </div>
   </section>
@@ -241,7 +286,7 @@ end</code></pre>
     · <span id="footer-version"></span>
   </p>
   <p class="muted">
-    Diluvium is an extension of <a href="https://www.lua.org/" rel="noopener">Lua</a>,
+    Diluvium's syntax builds on <a href="https://www.lua.org/" rel="noopener">Lua</a>,
     which is a trademark-free MIT-licensed language by PUC-Rio.
   </p>
 </footer>
