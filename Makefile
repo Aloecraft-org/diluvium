@@ -644,6 +644,50 @@ footprint: _build_step0
 	  $(CURDIR)/test/footprint.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/footprint
 
+# What a *swarm* costs: agents per gibibyte resident and hibernated, spawn and
+# wake rates, what a message across a queue is worth, and how a swarm behaves
+# when more agents exist than fit in memory at once.
+#
+# Same reasoning as footprint above, twice over. Built without ltests.h because
+# that build's allocator bookkeeping would be counted as the instances', at -O0
+# where no timing means anything. And it asserts no number: it asserts progress,
+# and fails when a scenario stops making any -- doc/Hibernate.md records that
+# this subsystem's worst defect presented as a livelock, and a hang must not read
+# as a slow run.
+#
+# Deliberately not in the CI suite and deliberately not under the sanitizers.
+# Timing under ASan measures ASan, and a check that has never passed anywhere
+# does not gate anything until it has passed once -- which is the lesson
+# 'make verify_wasm' taught by blocking a release on its first run. Run it by
+# hand, and see doc/Benchmarks.md for what the numbers mean.
+#
+# 'make swarm_bench ARGS="--json --scale 4"' passes options through.
+swarm_bench: _build_step0
+	gcc -Wall -Wextra -O2 -std=c99 $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -o $(CURDIR)/dist/swarm_bench \
+	  $(CURDIR)/test/swarm_bench.c $(CURDIR)/.data/dvs.c \
+	  $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/swarm_bench $(ARGS)
+
+# The same JWT workload through the generic host's crypto connector, which is a
+# different quantity: swarm_bench measures the interpreter doing HMAC-SHA256
+# because a sealed guest has no crypto to call, and this measures the hostcall
+# round trip with the HMAC in C at the far end. Both exist so that neither gets
+# quoted as the other.
+#
+# Links what host_check links, for the same reason: dhost_sql.c is part of
+# HOST_SRCS, so -lsqlite3 is needed even by a crypto-only deployment.
+# No -std here, and that is deliberate: the host sources use clock_gettime,
+# nanosleep, lstat and kill, which a strict -std=c99 hides. build_host compiles
+# them the same way, with the compiler's default dialect.
+host_bench: _build_step0
+	gcc -Wall -O2 $(PLATFORM_CFLAGS) -DMAKE_LIB \
+	  -I$(CURDIR)/.data -I$(CURDIR)/host \
+	  -o $(CURDIR)/dist/host_bench \
+	  $(CURDIR)/test/host_bench.c $(HOST_SRCS) \
+	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3 -ldl
+	@$(CURDIR)/dist/host_bench $(ARGS)
+
 # Run the suite. Keeps going after a failure and prints a summary, so one
 # broken test does not mask the state of the rest. The list of tests and the
 # skip reasons live in test/run_tests.sh -- add new tests there, not here.
@@ -664,7 +708,7 @@ test_one: test_build
         host_check build_plugin_rest build_plugin_rest_notls \
         build_plugin_rest_musl \
         snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib \
-        footprint
+        footprint swarm_bench host_bench
 
 # wasmtime --wasm exceptions .data/lua.wasm
 # wasmtime --wasm exceptions --dir=.::/workspace .data/lua.wasm /workspace/benchmark/benchmark.lua

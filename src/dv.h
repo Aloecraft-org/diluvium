@@ -438,6 +438,24 @@ dv_status dv_set_budget (dv_instance *inst, uint64_t instructions,
 dv_status dv_usage (dv_instance *inst, uint64_t *instructions,
                     uint64_t *memory_kb);
 
+/*
+** What the instance is holding *now*, in bytes, beside the same high-water mark
+** 'dv_usage' reports before it is divided. Either pointer may be NULL.
+**
+** 'dv_usage' answers a supervisor's question -- does this child need a larger
+** budget -- and a peak in kilobytes is the right answer to it. It is the wrong
+** answer to the question a host asks about a swarm, which is what the thing costs
+** at rest: an idle agent's peak is whatever it touched on its way to being idle,
+** and rounding to kilobytes throws away most of the difference between an agent
+** and an agent's inbox. Neither figure is derivable from the other, so this is a
+** second reader rather than a wider one.
+**
+** Both come from the counting allocator, so 'bytes_now' below 'bytes_peak' is the
+** collector having run and not a disagreement between two counters.
+*/
+dv_status dv_memory (dv_instance *inst, uint64_t *bytes_now,
+                     uint64_t *bytes_peak);
+
 /* Did this instance stop because it ran out of budget? */
 int dv_exceeded (dv_instance *inst);
 

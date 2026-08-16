@@ -159,18 +159,35 @@ static int dv_msghandler (lua_State *L) {
 ** The high-water mark is tracked as well as the current figure, because a
 ** supervisor deciding whether a child needs a larger budget wants the peak and not
 ** whatever happened to be live when it asked.
+**
+** **'osize' is only a size when 'ptr' is not NULL.** On a fresh allocation Lua
+** passes the *type tag* of the object being made in that argument -- 'luaM_malloc_'
+** in lmem.c calls 'firsttry(g, NULL, cast_sizet(tag), size)' -- and the tag is a
+** small integer, not a byte count. Subtracting it anyway cost a few bytes of
+** accounting per allocation, always in the same direction, so the counter drifted
+** downward against the truth and a long-running instance eventually read zero while
+** holding megabytes.
+**
+** That made 9.4's memory limit evadable rather than merely inaccurate: churn enough
+** allocations and the counter is back at zero, and the next 'mem_limit' bytes are
+** granted on top of everything already held. Repeating the churn repeats the grant.
+** 'a_memory_budget_survives_allocation_churn' in dv_check.c is the test, and it
+** fails on the previous line.
 */
 static void *dv_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
   dv_instance *inst = (dv_instance *)ud;
+  /* The old block's size, which is zero when there is no old block whatever the
+     tag in 'osize' says. */
+  uint64_t old = (ptr != NULL) ? (uint64_t)osize : 0u;
   if (nsize == 0) {
     free(ptr);
     if (inst != NULL) {
-      inst->mem_used -= (osize < inst->mem_used) ? osize : inst->mem_used;
+      inst->mem_used -= (old < inst->mem_used) ? old : inst->mem_used;
     }
     return NULL;
   }
   if (inst != NULL && inst->mem_limit != 0) {
-    uint64_t after = inst->mem_used - (uint64_t)osize + (uint64_t)nsize;
+    uint64_t after = inst->mem_used - old + (uint64_t)nsize;
     if (after > inst->mem_limit) {
       inst->exceeded = 1;
       return NULL;                /* Lua turns this into an out-of-memory error */
@@ -181,7 +198,7 @@ static void *dv_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
     if (p == NULL)
       return NULL;
     if (inst != NULL) {
-      inst->mem_used = inst->mem_used - (uint64_t)osize + (uint64_t)nsize;
+      inst->mem_used = inst->mem_used - old + (uint64_t)nsize;
       if (inst->mem_used > inst->mem_peak)
         inst->mem_peak = inst->mem_used;
     }
@@ -238,6 +255,22 @@ dv_status dv_usage (dv_instance *inst, uint64_t *instructions,
     return DV_ERROR;
   if (instructions != NULL) *instructions = inst->insn_used;
   if (memory_kb != NULL) *memory_kb = inst->mem_peak / 1024u;
+  return DV_OK;
+}
+
+
+/*
+** The resting figure, which 'dv_usage' deliberately does not report. See dv.h for
+** why both exist; the short version is that a peak in kilobytes answers "does this
+** child need more" and cannot answer "what does an idle agent cost", which is the
+** question a host sizing a swarm is actually asking.
+*/
+dv_status dv_memory (dv_instance *inst, uint64_t *bytes_now,
+                     uint64_t *bytes_peak) {
+  if (inst == NULL)
+    return DV_ERROR;
+  if (bytes_now != NULL) *bytes_now = inst->mem_used;
+  if (bytes_peak != NULL) *bytes_peak = inst->mem_peak;
   return DV_OK;
 }
 

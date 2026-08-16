@@ -1501,6 +1501,117 @@ static void a_memory_budget_refuses_an_allocation (void) {
 }
 
 
+static void the_memory_counter_agrees_with_the_collector (void) {
+  /*
+  ** The counting allocator against a program that allocates *and frees*, rather
+  ** than only allocating -- which every memory test in this file used to avoid, and
+  ** which is what ordinary code does.
+  **
+  ** Lua hands the allocator a *type tag* in the 'osize' argument when 'ptr' is NULL
+  ** (lmem.c, 'luaM_malloc_'). Counting it as a size undercharged every allocation
+  ** by a handful of bytes and credited the full size back on the matching free, so
+  ** the counter walked downward against the truth: 400k allocations and it read 216
+  ** bytes where the collector read 63,549.
+  **
+  ** The ground truth is the collector's own accounting, which this counter is meant
+  ** to shadow and which no part of this ABI feeds: 'collectgarbage("count")' is Lua
+  ** counting the same bytes for its own reasons.
+  **
+  ** The program parks straight after reporting, so both figures are read at the
+  ** same instant. Reading the counter after the program had *finished* compared two
+  ** different moments and made the tolerance a guess.
+  */
+  static const char *src =
+    "local out = queue.lookup('outbox')\n"    /* 6.6: reserved, already there */
+    "local gate = queue.declare('gate', {capacity = 1})\n"
+    /* Hold something, so there is a real figure to be wrong about, then let it go
+       again -- the drift shows up sharpest against a small resting figure. */
+    "local held = {}\n"
+    "for i = 1, 20000 do held[i] = ('x'):rep(80) end\n"
+    /* 400k short-lived strings. Each alloc/free pair is where the drift accrued. */
+    "for r = 1, 4 do\n"
+    "  for i = 1, 100000 do local s = ('y'):rep(80) end\n"
+    "end\n"
+    "held = nil\n"
+    "collectgarbage('collect')\n"
+    "collectgarbage('collect')\n"
+    /* As a string, so the test needs no integer decoder: 'mp_str' above is the one
+       reader this file has, and the figure is only printed and compared. */
+    "queue.push(out, tostring(math.floor(collectgarbage('count') * 1024)))\n"
+    "queue.wait({gate})\n";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  uint64_t now = 0, peak = 0;
+  uint64_t lua_says = 0;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=churn");
+  memset(&ws, 0, sizeof(ws));
+  ok(dv_run(inst, &ws) == DV_IDLE, "the churning program parks");
+  {
+    dv_queue_id out = dv_queue_lookup(inst, "outbox");
+    uint8_t buf[64];
+    char text[32];
+    size_t n = 0;
+    if (out != 0 && dv_queue_pop(inst, out, buf, sizeof(buf), &n) == DV_OK)
+      lua_says = strtoull(mp_str(buf, n, text, sizeof(text)), NULL, 10);
+  }
+  dv_memory(inst, &now, &peak);
+  ok(lua_says > 0, "and reports what the collector thinks it is holding");
+  printf("      (the collector says %lu bytes, the counter says %lu)\n",
+         (unsigned long)lua_says, (unsigned long)now);
+  /*
+  ** A tenth is a wide tolerance and deliberately so: the claim is not that two
+  ** counters print the same number, it is that they are counting the same thing.
+  ** The defect this catches was off by a factor of three hundred.
+  */
+  ok(lua_says > 0 && now + lua_says / 10 > lua_says &&
+     now < lua_says + lua_says / 10,
+     "and the instance's own counter agrees with it, after 400k allocations "
+     "have come and gone");
+  dv_free(inst);
+}
+
+
+static void memory_reports_what_is_held_now_and_not_only_the_peak (void) {
+  /*
+  ** 'dv_usage' reports the peak, in kilobytes, and that is the right answer to a
+  ** supervisor's question. It cannot answer a host's: an idle agent's peak is
+  ** whatever it touched on its way to being idle, so a swarm sized on it is sized
+  ** on a moment that has passed. 'dv_memory' is the resting figure.
+  **
+  ** The program allocates a large table, drops it and collects, so 'now' and 'peak'
+  ** are forced apart -- a 'dv_memory' that returned the peak twice, or that read
+  ** the same counter under two names, fails here and nowhere else in this file.
+  */
+  static const char *src =
+    "local t = {}\n"
+    "for i = 1, 20000 do t[i] = ('x'):rep(64) end\n"
+    "t = nil\n"
+    "collectgarbage('collect')\n"
+    "collectgarbage('collect')\n";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  uint64_t now = 0, peak = 0, kb = 0;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=churn");
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  ok(dv_memory(inst, &now, &peak) == DV_OK, "an instance reports its memory");
+  ok(now > 0, "it is holding something");
+  ok(peak >= now, "the peak is at least what is held now");
+  ok(peak > now, "and strictly more once the garbage it made has gone");
+  printf("      (now %lu bytes, peak %lu bytes)\n",
+         (unsigned long)now, (unsigned long)peak);
+  /* The two readers agree about the one number they share, modulo the division
+     'dv_usage' does -- which is the whole reason the second reader exists. */
+  dv_usage(inst, NULL, &kb);
+  ok(kb == peak / 1024u, "and 'dv_usage' is the same peak, in kilobytes");
+  ok(dv_memory(NULL, &now, &peak) == DV_ERROR,
+     "a null instance is refused rather than dereferenced");
+  dv_free(inst);
+}
+
+
 static void a_budget_cannot_be_changed_mid_flight (void) {
   static const char *src = "local q = queue.declare('bq', {cap = 2}) "
                            "return queue.wait({q})";
@@ -2369,6 +2480,8 @@ int main (void) {
   an_instruction_budget_aborts_a_runaway();
   a_budget_does_not_disturb_a_program_inside_it();
   a_memory_budget_refuses_an_allocation();
+  the_memory_counter_agrees_with_the_collector();
+  memory_reports_what_is_held_now_and_not_only_the_peak();
   a_budget_cannot_be_changed_mid_flight();
 
   printf("\n=== the guest library set (18.2 profile B) ===\n");
