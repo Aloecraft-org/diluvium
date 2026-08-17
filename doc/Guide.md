@@ -720,6 +720,16 @@ parent holds  queue:client/*     child may get  queue:*                ✗ denie
 `system/lifecycle` and write to it all it likes, and nothing will ever read it. There
 is no error to catch and work around.
 
+### What it costs
+
+`make swarm_bench` measures it: an idle agent is about 73 KB resident and about
+1.4 KB hibernated, a spawn is a few hundred microseconds, a message across a
+queue is a few, and `max_instances` costs 1632 bytes a slot whether the slot is
+used or not. `doc/Benchmarks.md` has the figures, what they do and do not
+include, and the two things worth knowing before designing around hibernation —
+that `query` does not wake an agent and a message does, and that the wake buffer
+holds sixteen.
+
 ### Running one without writing C
 
 The **generic host** (`host/`, `make build_host`) runs a swarm from a supervisor

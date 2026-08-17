@@ -36,7 +36,8 @@
 static uint64_t measure (const char *what, const char *src, int run) {
   dv_instance *inst = dv_new(NULL);
   dv_waitset ws;
-  uint64_t insns = 0, kb = 0;
+  dv_status st = DV_OK;
+  uint64_t insns = 0, kb = 0, held = 0;
   if (inst == NULL) { printf("  %-34s could not create\n", what); return 0; }
   if (src != NULL &&
       dv_load(inst, (const uint8_t *)src, strlen(src), "=agent") != DV_OK) {
@@ -46,11 +47,25 @@ static uint64_t measure (const char *what, const char *src, int run) {
   }
   if (run) {
     memset(&ws, 0, sizeof(ws));
-    dv_run(inst, &ws);
+    st = dv_run(inst, &ws);
   }
+  /*
+  ** Say what the program actually did, which this did not used to.
+  **
+  ** Every program below opened with 'queue.declare("inbox", ...)', and 'inbox'
+  ** is one of 6.6's two reserved queues -- it exists from the moment the library
+  ** opens, so declaring it raises. The run status was discarded, so an instance
+  ** that had died on its first line was measured and reported as one parked on a
+  ** wait, and the figure the density claim rests on was the cost of a raise.
+  ** Printing the status is what makes that impossible to repeat quietly.
+  */
   dv_usage(inst, &insns, &kb);
-  printf("  %-34s peak %4lu KB   %lu instructions\n", what,
-         (unsigned long)kb, (unsigned long)insns);
+  dv_memory(inst, &held, NULL);
+  printf("  %-34s peak %4lu KB   held %4lu KB   %lu instructions   %s\n", what,
+         (unsigned long)kb, (unsigned long)(held / 1024),
+         (unsigned long)insns, run ? dv_status_name(st) : "not run");
+  if (run && st == DV_ERROR)
+    printf("  %-34s   ^ raised: %s\n", "", dv_last_error(inst));
   dv_free(inst);
   return kb;
 }
@@ -61,7 +76,7 @@ int main (void) {
 
   printf("=== what one instance costs, by state ===\n");
   measure("dv_new only", NULL, 0);
-  measure("loaded, not started", "local q = queue.declare('inbox', {cap = 8}) "
+  measure("loaded, not started", "local q = queue.lookup('inbox') "
           "queue.wait({q})", 0);
   /*
   ** The one that matters. 10.2 calls idle-on-inbox "the overwhelmingly common state
@@ -69,15 +84,15 @@ int main (void) {
   ** so this is the figure a density claim rests on.
   */
   parked = measure("parked on queue.wait",
-          "local q = queue.declare('inbox', {cap = 8}) queue.wait({q})", 1);
+          "local q = queue.lookup('inbox') queue.wait({q})", 1);
   measure("parked, three queues declared",
-          "local a = queue.declare('inbox', {cap = 8}) "
-          "local b = queue.declare('outbox', {cap = 8}) "
-          "local c = queue.declare('log', {cap = 16}) "
+          "local a = queue.lookup('inbox') "
+          "local b = queue.lookup('outbox') "
+          "local c = queue.declare('log', {capacity = 16}) "
           "queue.wait({a})", 1);
   measure("parked, holding 4 KB of state",
           "local s = {} for i = 1, 128 do s[i] = string.rep('x', 32) end "
-          "local q = queue.declare('inbox', {cap = 8}) "
+          "local q = queue.lookup('inbox') "
           "queue.wait({q})", 1);
 
   /*
