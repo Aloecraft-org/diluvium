@@ -258,9 +258,9 @@ void dvs_free (dvs_swarm *sw) {
 ** Exact match, or a trailing '*' that covers a prefix -- 6.6 says names are
 ** namespaced with '/' and that "capability scoping over name patterns is future
 ** work and must not be designed away", so this implements the one pattern the
-** design already shows ("queue:work/*") and nothing more. A '*' in the middle is
-** not a pattern, it is a literal, because inventing a glob here would be designing
-** the future work rather than leaving room for it.
+** design already shows -- a trailing star on "queue:work/" -- and nothing more.
+** A '*' in the middle is not a pattern, it is a literal, because inventing a glob
+** here would be designing the future work rather than leaving room for it.
 */
 static int implies (const char *held, const char *want) {
   size_t n = strlen(held);

@@ -445,15 +445,37 @@ int main (int argc, char **argv) {
     else if (strcmp(argv[i], "--deadline") == 0 && i + 1 < argc)
       deadline_s = atof(argv[++i]);
     else {
-      printf("usage: host_bench [--json] [--scale F] [--deadline SEC]\n");
+      printf("usage: host_bench [--json] [--scale F] [--deadline SEC]\n\n"
+             "  --scale F   multiply the agent count by F (default 1 = 32).\n"
+             "              Tokens per agent are fixed at 1024, so the work\n"
+             "              scales linearly and the turn counts stay\n"
+             "              comparable across scales.\n");
       return strcmp(argv[i], "--help") == 0 ? 0 : 2;
     }
   }
   if (scale <= 0) scale = 1;
-  agents = (uint32_t)(16 * scale);
-  tokens = (uint32_t)(64 * scale);
+  /*
+  ** Sized so that one sweep runs for about a second, and so that '--scale' is
+  ** linear in the work done.
+  **
+  ** Both of those were wrong to begin with, and a run on a second machine is what
+  ** showed it. The defaults were 16 agents of 64 tokens -- 1,024 tokens, about
+  ** twenty milliseconds a sweep, because the HMAC at the far end is C and eats the
+  ** work almost as fast as it can be handed over. At that length the three batch
+  ** figures are noise: the two machines disagreed about batch 8 in one direction
+  ** and about batch 1 and batch 32 in the other, which is not a coherent statement
+  ** about either of them.
+  **
+  ** And scaling *both* terms made '--scale 4' sixteen times the work rather than
+  ** four. So the tokens each agent asks for is fixed and only the agent count
+  ** scales. That also leaves the turn count roughly invariant across scales --
+  ** turns follow the tokens one agent asks for, not how many agents ask -- so the
+  ** thing this benchmark exists to show, that batching collapses turns, stays
+  ** legible as the swarm grows.
+  */
+  agents = (uint32_t)(32 * scale);
+  tokens = 1024;
   if (agents < 1) agents = 1;
-  if (tokens < 1) tokens = 1;
 
   snprintf(tmpdir, sizeof(tmpdir), "/tmp/host_bench.XXXXXX");
   if (mkdtemp(tmpdir) == NULL) {

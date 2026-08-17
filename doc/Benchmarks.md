@@ -129,12 +129,12 @@ Reference machine: 4-vCPU Intel Xeon @ 2.80 GHz, 16 GiB, Linux, gcc 13.3 at
 | message round trip, 16 B | ~2.7 µs |
 | payload throughput, 4 KB messages | ~797 MiB/s |
 | HS256 in-language | ~2,000 tokens/s aggregate (~112,656 VM instructions each) |
-| HS256 via crypto connector | ~51,700 tokens/s at batch 32 |
+| HS256 via crypto connector | ~55,000 tokens/s at batch 8 |
 | churn, all agents resident | ~40 µs/op |
 | churn, half resident | ~489 µs/op (hit rate 0.49) |
 | churn, one-eighth resident | ~682 µs/op (hit rate 0.13) |
 | idle step, table sized to fit | ~188 µs (256 agents) |
-| idle step, 64× table headroom | ~417 µs — 2.4× for the unused room |
+| idle step, 64× table headroom | ~417 µs — but see below; this one does not travel |
 
 Aggregate throughput is flat as agent count doubles; the per-agent figure
 halves. That is the single-threaded host, not the workload.
@@ -187,15 +187,31 @@ through the connector. That is expected, and it is the design guidance: keep
 agents small and deterministic and hand anything heavy to a connector. The
 connector figure has its own lesson — the guest is driven once per host turn,
 so a program that asks for one token and waits spends a turn per call however
-cheap the call is. Batching 8 calls collapsed 129 turns into 17; batch 32
-bought almost nothing more, because the hostcall pump stops draining an
-instance when its reply queue fills. A worker that batches must size
+cheap the call is. Batching 8 calls collapsed 2,049 turns into 257; batch 32
+took it to 65 and bought no more throughput, because the hostcall pump stops
+draining an instance when its reply queue fills. A worker that batches must size
 `host/replies` to match — the `host` library declares it at capacity 16 on
 first use, which silently caps any larger batch.
 
-**Idle step cost.** `dvs_step` walks every slot whether or not it is in use,
-so overprovisioned tables cost per step even when nothing is happening. Size
-`max_instances` close to expected concurrency until this is optimized.
+**Idle step cost, and the one figure here that does not travel.** `dvs_step`
+walks every slot whether or not it is in use, so an overprovisioned table costs
+per step even when nothing is happening. Size `max_instances` close to expected
+concurrency until this is optimized.
+
+How *much* it costs is machine-specific, and running the same build on a second
+box is what established that. With 256 agents fixed, the penalty for 64×
+headroom was 2.22× on the reference machine and 1.56× on a Debian 12 VPS, while
+the tight-table and 8× rows agreed within 4% between them. The mechanism is that
+a 16,385-slot table is about 26.7 MB — far past any L3 — so that scenario is
+bound by memory bandwidth rather than by the CPU, and the two boxes differ
+there. The corroboration is in the queue scenario: 4 KB payloads, the other
+bandwidth-sensitive measurement in the set, were 12% faster on the same box that
+walked the big table faster.
+
+So the direction is a property of the code and the magnitude is a property of
+your hardware. Measure the ratio locally rather than quoting either number
+above; `--only step` takes a couple of seconds.
+
 Relatedly, resolving a handle is a linear scan of the same table — one lookup
 is 0.06 µs and irrelevant, but a host that walks its own roster of N agents is
 quadratic in N. Build the roster once, outside anything you are timing.
@@ -211,8 +227,14 @@ explicit kill.
 
 ## Known limitations of the bench
 
-- Single reference machine, single run. Expect variance, especially on shared
-  or budget vCPUs.
+- Single run per figure. Expect variance in the timings, especially on shared
+  or budget vCPUs; take medians of three before quoting any of them.
+- The timings are from one machine. The *deterministic* set is not: it has been
+  reproduced exactly on a second box (Debian 12 VPS, gcc 12) — every byte
+  figure, `insns_per_token` to two decimals, and the seed-driven churn counts
+  (520 and 894 wakes, 165/627/952 steps) all matched to the digit. The one byte
+  figure that differed was `rss_bytes_per_agent`, by 0.24%, which is the one
+  that includes the system allocator and is expected to.
 - Churn traffic is uniform random, which gives the LRU eviction policy nothing
   to exploit. A locality scenario (Zipf-distributed traffic) is the obvious
   next addition and should show hit rates well above the residency ratio.
@@ -221,6 +243,23 @@ explicit kill.
   host — the crypto connector — and nothing else of it.
 - Everything is one thread. A parallel host would change the throughput
   numbers and none of the byte figures.
+
+## Building on a fresh machine
+
+```
+apt install build-essential libsqlite3-dev      # Debian/Ubuntu
+```
+
+`swarm_bench` links nothing but libc and libm. `libsqlite3-dev` is needed only
+for `host_bench`, and only because `dhost_sql.c` is part of `HOST_SRCS` — the
+generic host builds as one piece even for a deployment that wires nothing but
+crypto. Without it the compile succeeds and the link fails at the very end,
+which reads like a code problem and is not.
+
+Two Makefile notes. `make` with no target does nothing useful: there is no
+`all`, and the first rule only repopulates the scratch directory. And every
+target depends on `_build_step0`, which does `rm -rf .data/*` — so do not
+`make -j` two of them, or they will delete each other's sources mid-compile.
 
 ## Estimating capacity on your hardware
 
