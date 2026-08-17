@@ -11,7 +11,7 @@
 [![Lua Version](https://img.shields.io/badge/lua-5.5.1-purple.svg)](https://www.lua.org/)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-Ready-orange.svg)](https://webassembly.org/)
 
-[Try it Online](https://diluvium.aloecraft.org) | [Documentation](https://www.lua.org/docs.html)
+[Try it Online](https://diluvium.aloecraft.org) | [Programmer's Guide](doc/Guide.md) | [Lua 5.5 manual](https://www.lua.org/manual/5.5/)
 
 </div>
 
@@ -179,6 +179,18 @@ The entire runtime is less than 1 MiB. Compiles to WebAssembly, x86_64, ARM64, a
 
 See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#terminal)
 
+🐝 **Thousands of Isolated Agents, In One Process**
+
+Every agent is a sealed instance with its own heap, its own capability set, and its
+own instruction and memory budget. An idle one costs about **73 KB awake and 1.4 KB
+hibernated** — roughly 14,600 per GiB resident, or 750,000 hibernated — and an agent
+parked on its inbox can be swapped out to a snapshot and woken by the next message
+addressed to it.
+
+Agents buy isolation and concurrency, not parallelism: the swarm layer is
+single-threaded and a host supplies its own. [`doc/Benchmarks.md`](doc/Benchmarks.md)
+has the measurements and `make swarm_bench` reproduces them.
+
 🔄 **Lua Ecosystem Compatible**
 
 - Works with existing Lua libraries and tools
@@ -199,6 +211,12 @@ To run programs without writing a host in C, the **generic host** (`host/`,
 program plus a typed `*.host.lua` configuration — with connectors for the wall clock,
 SQLite, crypto (including JWT-HS256) and an HTTP listener, each off until the config and
 a capability grant wire it. `doc/Host.md` is the contract it implements.
+
+**[`doc/Benchmarks.md`](doc/Benchmarks.md) is what a swarm costs** — agents per
+gibibyte awake and hibernated, spawn and wake rates, what a message across a queue is
+worth, what happens when more agents exist than fit in memory, and how to turn any of
+it into a capacity estimate on your own hardware. `make swarm_bench` and
+`make host_bench` reproduce it.
 
 The rest of `doc/` is about building Diluvium rather than using it:
 `doc/Messaging.md` is the messaging and swarm design (and §18 the known defects),
@@ -459,6 +477,11 @@ make failing_test_cases                # show what is skipped, and why
 
 The runner keeps going after a failure and prints a summary, so one broken
 test does not hide the state of the rest. It exits non-zero if anything failed.
+
+`make swarm_bench` and `make host_bench` are measurements rather than tests: they
+print, they assert no number, and they are deliberately outside CI and outside the
+sanitizers — timing under AddressSanitizer measures AddressSanitizer.
+[`doc/Benchmarks.md`](doc/Benchmarks.md) says what they do assert, which is progress.
 
 ## Continuous integration
 
