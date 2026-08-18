@@ -10,8 +10,15 @@
 **
 ** It answers two calls:
 **
-**   rest/get  {url, headers?, timeout_ms?}        -> {status, headers, body}
-**   rest/post {url, headers?, body, timeout_ms?}  -> {status, headers, body}
+**   rest/get  {url, headers?, timeout_ms?}
+**                       -> {status, content_type, headers, body}
+**   rest/post {url, headers?, body, timeout_ms?}
+**                       -> {status, content_type, headers, body}
+**
+** Result `headers` (build10): every response header, names lowercased,
+** repeats joined ", ", names and joined values bounded -- past a bound the
+** header is dropped whole, never truncated. `content_type` stays as the
+** convenience field it always was.
 **
 ** `body` is msgpack bin in both directions -- the wire has a real binary type,
 ** so nothing is base64 in flight. The manifest's JSON Schema documents the
@@ -325,6 +332,87 @@ static int resp_grow (resp *r, size_t need) {
   return 0;
 }
 
+/* Response headers handed back to the guest: lowercased names, repeats
+   joined ", " (RFC 7230's list rule), both bounded. Past a bound the header
+   is dropped WHOLE, never truncated -- a clipped Location or cookie is a
+   lie the guest would act on. Static because dv_serve dispatches one frame
+   at a time (its own frame buffer is static for the same reason). */
+#define REST_RESP_HDRS      32
+#define REST_RESP_NAME_MAX  64
+#define REST_RESP_VAL_MAX   4096
+
+typedef struct resp_hdrs {
+  char name[REST_RESP_HDRS][REST_RESP_NAME_MAX + 1];
+  char val[REST_RESP_HDRS][REST_RESP_VAL_MAX];
+  size_t vlen[REST_RESP_HDRS];
+  int dropped[REST_RESP_HDRS];
+  size_t n;
+} resp_hdrs;
+
+static resp_hdrs RH;
+
+/* Collect every header line of the response head into RH. A name past its
+   bound, or a 33rd distinct name, is skipped; a joined value past its bound
+   marks that entry dropped. Returns how many entries will be emitted. */
+static size_t hdrs_collect (const char *head, size_t headlen) {
+  const char *p = memchr(head, '\n', headlen);
+  size_t kept = 0, i;
+  RH.n = 0;
+  if (p == NULL) return 0;
+  p++;
+  while (p < head + headlen) {
+    const char *eol = memchr(p, '\n', (size_t)(head + headlen - p));
+    size_t linelen = (eol != NULL) ? (size_t)(eol - p)
+                                   : (size_t)(head + headlen - p);
+    const char *colon = memchr(p, ':', linelen);
+    if (colon != NULL && colon > p) {
+      size_t nlen = (size_t)(colon - p);
+      const char *v = colon + 1;
+      const char *e = p + linelen;
+      while (v < e && (*v == ' ' || *v == '\t')) v++;
+      while (e > v && (e[-1] == '\r' || e[-1] == ' ' || e[-1] == '\t')) e--;
+      if (nlen <= REST_RESP_NAME_MAX) {
+        char lname[REST_RESP_NAME_MAX + 1];
+        size_t j, slot;
+        for (j = 0; j < nlen; j++) {
+          char ch = p[j];
+          lname[j] = (ch >= 'A' && ch <= 'Z') ? (char)(ch - 'A' + 'a') : ch;
+        }
+        lname[nlen] = '\0';
+        for (slot = 0; slot < RH.n; slot++) {
+          if (strcmp(RH.name[slot], lname) == 0) break;
+        }
+        if (slot == RH.n && RH.n < REST_RESP_HDRS) {
+          memcpy(RH.name[RH.n], lname, nlen + 1);
+          RH.vlen[RH.n] = 0;
+          RH.dropped[RH.n] = 0;
+          RH.n++;
+        }
+        if (slot < RH.n && !RH.dropped[slot]) {
+          size_t need = (size_t)(e - v) + ((RH.vlen[slot] > 0) ? 2 : 0);
+          if (RH.vlen[slot] + need > REST_RESP_VAL_MAX) {
+            RH.dropped[slot] = 1;
+          }
+          else {
+            if (RH.vlen[slot] > 0) {
+              RH.val[slot][RH.vlen[slot]++] = ',';
+              RH.val[slot][RH.vlen[slot]++] = ' ';
+            }
+            memcpy(RH.val[slot] + RH.vlen[slot], v, (size_t)(e - v));
+            RH.vlen[slot] += (size_t)(e - v);
+          }
+        }
+      }
+    }
+    if (eol == NULL) break;
+    p = eol + 1;
+  }
+  for (i = 0; i < RH.n; i++) {
+    if (!RH.dropped[i]) kept++;
+  }
+  return kept;
+}
+
 /* Case-insensitive header lookup within the response head. */
 static const char *hdr_find (const char *head, size_t headlen, const char *name,
                              size_t *vlen) {
@@ -505,6 +593,7 @@ static void handle (dv_req *q) {
     size_t ctlen = 0;
     const char *ct = hdr_find(r.buf, r.hdr_end, "content-type", &ctlen);
     size_t blen = r.len - r.hdr_end;
+    size_t kept, hi;
     if (blen > REST_MAX_BODY) {
       free(r.buf);
       dv_error(q, DV_ERR_CAPABILITY, "too_large",
@@ -514,10 +603,18 @@ static void handle (dv_req *q) {
     /* A non-2xx is an ANSWER, not an error: the guest asked what the service
        said, and 404 is what it said. 'status' as an error class is reserved
        for a response this program could not read at all. */
-    dv_ok_begin(q, 3);
+    kept = hdrs_collect(r.buf, r.hdr_end);
+    dv_ok_begin(q, 4);
     dv_key(q, "status");       dv_int(q, r.status);
     dv_key(q, "content_type");
     if (ct != NULL) dv_lstr(q, ct, ctlen); else dv_nil(q);
+    dv_key(q, "headers");
+    dv_map(q, (unsigned)kept);
+    for (hi = 0; hi < RH.n; hi++) {
+      if (RH.dropped[hi]) continue;
+      dv_str(q, RH.name[hi]);
+      dv_lstr(q, RH.val[hi], RH.vlen[hi]);
+    }
     dv_key(q, "body");         dv_bin(q, r.buf + r.hdr_end, blen);
     dv_send(q);
   }

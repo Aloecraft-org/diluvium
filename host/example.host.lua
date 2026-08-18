@@ -38,10 +38,15 @@ return {
     listen = {
       port = 8080,               -- the LB terminates TLS and speaks here
       queue = "http_in",         -- {conn, method, path, body} arrives here
-      reply_queue = "http_out",  -- {conn, status, body, content_type?} leaves
+      reply_queue = "http_out",  -- {conn, status, body, content_type?,
+                                 --  headers?} leaves
       deadline_ms = 10000,       -- the host's own timeout, per connection
       headers = { "authorization" },  -- lowercase allowlist; matches arrive
                                  -- as a `headers` map on each request
+      response_headers = { "location", "cache-control" },
+                                 -- lowercase allowlist a reply's `headers`
+                                 -- map may set; the host keeps the framing
+                                 -- (content-length, connection) its own
     },
     sql = {
       scope = "data",            -- a directory; the program names its

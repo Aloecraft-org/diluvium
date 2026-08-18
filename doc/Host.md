@@ -162,8 +162,14 @@ written against: a completed request arrives on the configured queue
 when the deployment allowlists request headers (build7; lowercase names,
 always present once configured, so the shape is config's decision) — and a
 response leaves on the reply queue (default `http_out`) as `{conn, status,
-body, content_type?}` — `conn` echoed verbatim, the hostcall token
-discipline applied to traffic. The port is topology and comes from this file, never
+body, content_type?, headers?}` — `conn` echoed verbatim, the hostcall
+token discipline applied to traffic. The reply's `headers` map (build10)
+is gated by the listen block's `response_headers` allowlist the same way
+the request side is gated by `headers`: lowercase names in config, the
+host's own framing names refused at load, and a reply header that is not
+allowlisted, carries a control byte, or exceeds the value bound is dropped
+whole — never truncated — while the response still answers, since on this
+path it is the client that must be protected from a lying guest. The port is topology and comes from this file, never
 from a guest: a guest cannot read a socket, and a listener that hibernated
 with its program would be host state pretending otherwise.
 

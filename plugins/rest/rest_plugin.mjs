@@ -191,9 +191,21 @@ async function handle (target, args) {
     if (target === 'post') init.body = a.body instanceof Uint8Array ? a.body : new TextEncoder().encode(String(a.body ?? ''));
     const res = await fetch(u.toString(), init);
     const body = new Uint8Array(await res.arrayBuffer());
+    /* Result headers, matching the C plugin's bounds: names are lowercase
+       (fetch's Headers already are, repeats already joined ", "), at most
+       32 entries, and a name or joined value past its bound drops the
+       header whole -- never truncated, a clipped Location is a lie. */
+    const rh = {};
+    let nrh = 0;
+    for (const [k, v] of res.headers) {
+      if (nrh >= 32) break;
+      if (k.length > 64 || v.length > 4096) continue;
+      rh[k] = v;
+      nrh++;
+    }
     /* A non-2xx is an ANSWER, not an error: the guest asked what the service
        said, and 404 is what it said. */
-    return { value: { status: res.status, content_type: res.headers.get('content-type'), body } };
+    return { value: { status: res.status, content_type: res.headers.get('content-type'), headers: rh, body } };
   }
   catch (e) {
     if (e && e.name === 'AbortError')

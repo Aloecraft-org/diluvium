@@ -89,6 +89,10 @@ typedef struct dh_listener_cfg {
                                            request headers forwarded to the
                                            guest; empty = none (default) */
   size_t nheaders;
+  char resp_headers[DH_MAX_HDRS][DH_HDR_NAME_MAX];  /* lowercased allowlist
+                                           of response headers a guest reply
+                                           may set; empty = none (default) */
+  size_t nresp_headers;
 } dh_listener_cfg;
 
 typedef struct dh_sql_cfg {

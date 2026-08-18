@@ -13,11 +13,13 @@
 ** pushed to the configured queue on the root instance, and a response is one
 ** message popped from the configured reply queue,
 **
-**   {conn = <token>, status = 200, body = "...", content_type = "..."} --
+**   {conn = <token>, status = 200, body = "...", content_type = "...",
+**    headers = { location = "/done" }} --
 **
 ** 'conn' echoed verbatim, the same correlation discipline Hostcall.md fixes
-** for hostcalls, applied to traffic. The host never interprets what happened
-** between the two.
+** for hostcalls, applied to traffic; 'headers' optional and gated by the
+** listen block's response_headers allowlist. The host never interprets what
+** happened between the two.
 **
 ** A deployment may pre-bind a block of ports (config gives an array of
 ** listener blocks), because a v1 host binds at startup and never at runtime
@@ -83,6 +85,8 @@ typedef struct dh_listener_rt {
   char reply_queue[DH_NAME_MAX];
   char hdr_allow[DH_MAX_HDRS][DH_HDR_NAME_MAX];  /* lowercased allowlist */
   size_t nhdr_allow;
+  char resp_allow[DH_MAX_HDRS][DH_HDR_NAME_MAX]; /* response-side allowlist */
+  size_t nresp_allow;
 } dh_listener_rt;
 
 typedef struct dh_http {
@@ -104,35 +108,65 @@ static void conn_close (dh_conn *c) {
   c->fd = -1;
 }
 
-static void respond_raw (dh_conn *c, int status, const char *reason,
-                         const char *ctype, const char *body, size_t blen) {
-  char head[256];
-  int n = snprintf(head, sizeof(head),
-                   "HTTP/1.1 %d %s\r\n"
-                   "Content-Type: %s\r\n"
-                   "Content-Length: %zu\r\n"
-                   "Connection: close\r\n\r\n",
-                   status, reason, ctype, blen);
+/* One response header the guest chose, already validated by the reply pump:
+   the name points into the listener's allowlist -- guest bytes never name a
+   header on the wire -- and the value into the reply message, scanned clean
+   of control bytes. */
+typedef struct dh_resp_hdr {
+  const char *name;
+  const char *val;
+  size_t val_len;
+} dh_resp_hdr;
+
+static void respond_hdrs (dh_conn *c, int status, const char *reason,
+                          const char *ctype, const dh_resp_hdr *xh,
+                          size_t nxh, const char *body, size_t blen) {
+  char line[256];
+  int n, rc = 0;
+  size_t i;
   dh_buf_free(&c->out);
-  /* Clamp defensively. Today the pieces sum to ~238 bytes -- the ctype is
-     bounded to 127 by its copy and the reason is a short constant -- so this
-     cannot fire; it is here so a later change to either cannot turn a
-     truncated (n < 0 or n >= sizeof) header into an out-of-bounds dh_raw.
-     A header that would not fit becomes a bare 500, which is honest. */
-  if (n < 0 || (size_t)n >= sizeof(head)) {
+  /* Clamp defensively. Today each formatted line is well under the buffer --
+     the ctype is bounded to 127 by its copy and the reason is a short
+     constant -- so the clamp cannot fire; it is here so a later change to
+     either cannot turn a truncated snprintf into an out-of-bounds dh_raw.
+     The same fallback answers a dh_raw that ran out of memory: a bare 500
+     is honest, a half-written head is a protocol lie. */
+  n = snprintf(line, sizeof(line), "HTTP/1.1 %d %s\r\nContent-Type: %s\r\n",
+               status, reason, ctype);
+  if (n < 0 || (size_t)n >= sizeof(line))
+    rc = -1;
+  else
+    rc |= dh_raw(&c->out, line, (size_t)n);
+  for (i = 0; rc == 0 && i < nxh; i++) {
+    rc |= dh_raw(&c->out, xh[i].name, strlen(xh[i].name));
+    rc |= dh_raw(&c->out, ": ", 2);
+    rc |= dh_raw(&c->out, xh[i].val, xh[i].val_len);
+    rc |= dh_raw(&c->out, "\r\n", 2);
+  }
+  if (rc == 0) {
+    n = snprintf(line, sizeof(line),
+                 "Content-Length: %zu\r\nConnection: close\r\n\r\n", blen);
+    if (n < 0 || (size_t)n >= sizeof(line))
+      rc = -1;
+    else
+      rc |= dh_raw(&c->out, line, (size_t)n);
+  }
+  if (rc == 0 && blen > 0)
+    rc |= dh_raw(&c->out, body, blen);
+  if (rc != 0) {
     static const char fallback[] =
         "HTTP/1.1 500 Internal Server Error\r\n"
         "Content-Length: 0\r\nConnection: close\r\n\r\n";
+    dh_buf_free(&c->out);
     dh_raw(&c->out, fallback, sizeof(fallback) - 1);
-    c->wrote = 0;
-    c->state = CONN_WRITING;
-    return;
   }
-  dh_raw(&c->out, head, (size_t)n);
-  if (blen > 0)
-    dh_raw(&c->out, body, blen);
   c->wrote = 0;
   c->state = CONN_WRITING;
+}
+
+static void respond_raw (dh_conn *c, int status, const char *reason,
+                         const char *ctype, const char *body, size_t blen) {
+  respond_hdrs(c, status, reason, ctype, NULL, 0, body, blen);
 }
 
 static void respond_text (dh_conn *c, int status, const char *reason,
@@ -329,17 +363,129 @@ static void try_parse (dh_host *h, dh_listener_rt *lr, dh_conn *c) {
 }
 
 /* Find the waiting connection a reply names, across every listener -- tokens
-   are host-wide unique, so at most one matches. */
-static dh_conn *find_waiting (dh_http *x, uint32_t token) {
+   are host-wide unique, so at most one matches. The owning listener comes
+   back too, because the response-header allowlist is per-listener while the
+   token space is not. */
+static dh_conn *find_waiting (dh_http *x, uint32_t token,
+                              dh_listener_rt **owner) {
   int li, i;
   for (li = 0; li < x->n; li++) {
     dh_listener_rt *lr = &x->l[li];
     for (i = 0; i < lr->max_conns; i++) {
-      if (lr->conns[i].state == CONN_WAITING && lr->conns[i].token == token)
+      if (lr->conns[i].state == CONN_WAITING && lr->conns[i].token == token) {
+        *owner = lr;
         return &lr->conns[i];
+      }
     }
   }
+  *owner = NULL;
   return NULL;
+}
+
+/* 'diluvium_mp_read' consumes only a container's header; consume its
+   contents too, so the cursor stands at the next sibling. Nested containers
+   are one skip each, and a length the bytes cannot honor makes a skip fail,
+   which ends the walk rather than looping on a lie. */
+static int mp_finish (diluvium_mp_cursor *c, const diluvium_mp_token *t) {
+  size_t n = 0, i;
+  if (t->kind == DILUVIUM_MP_ARRAY)
+    n = t->len;
+  else if (t->kind == DILUVIUM_MP_MAP)
+    n = t->len * 2;
+  for (i = 0; i < n; i++) {
+    if (!diluvium_mp_skip(c))
+      return 0;
+  }
+  return 1;
+}
+
+/* The reply's optional 'headers' map, validated against the owning
+   listener's allowlist. The rules, and why they drop rather than refuse:
+   the client is on the far side of the LB and must be protected from a
+   lying guest, so a name not on the allowlist, a value carrying a control
+   byte (CR and LF above all -- header injection), or a value past the bound
+   loses that header whole -- never truncated, never "cleaned" -- and the
+   response is otherwise answered. Refusing the whole response would hand a
+   misbehaving guest a way to turn its own bug into an outage; this is the
+   content_type discipline, where the safe default is absence. Names match
+   case-insensitively and the wire gets the allowlist's spelling, so guest
+   bytes never name a header. Repeats in the map: the last one wins, as in
+   a Lua table. Output order is the allowlist's, so it is config's. */
+static size_t resp_headers_of (const dh_listener_rt *lr,
+                               const uint8_t *msg, size_t msglen,
+                               dh_resp_hdr *out) {
+  diluvium_mp_cursor c;
+  diluvium_mp_token t;
+  const char *val[DH_MAX_HDRS] = { NULL };
+  size_t vlen[DH_MAX_HDRS] = { 0 };
+  size_t pairs, k, i, n = 0;
+  if (lr->nresp_allow == 0)
+    return 0;
+  diluvium_mp_open(&c, msg, msglen);
+  if (!diluvium_mp_field(&c, "headers") || !diluvium_mp_read(&c, &t) ||
+      t.kind != DILUVIUM_MP_MAP)
+    return 0;
+  pairs = t.len;
+  for (k = 0; k < pairs; k++) {
+    diluvium_mp_token key, v;
+    int match = -1;
+    if (!diluvium_mp_read(&c, &key))
+      break;
+    if (key.kind != DILUVIUM_MP_STR) {
+      /* A non-string key. If it was a container this read left the cursor
+         inside it; finish it, then skip the value, and keep walking. */
+      if (!mp_finish(&c, &key) || !diluvium_mp_skip(&c))
+        break;
+      continue;
+    }
+    if (!diluvium_mp_read(&c, &v))
+      break;
+    if (!mp_finish(&c, &v))
+      break;
+    for (i = 0; i < lr->nresp_allow; i++) {
+      size_t namelen = strlen(lr->resp_allow[i]);
+      size_t j;
+      if (key.len != namelen)
+        continue;
+      for (j = 0; j < namelen; j++) {
+        char ch = key.p[j];
+        if (ch >= 'A' && ch <= 'Z')
+          ch = (char)(ch - 'A' + 'a');
+        if (ch != lr->resp_allow[i][j])
+          break;
+      }
+      if (j == namelen) {
+        match = (int)i;
+        break;
+      }
+    }
+    if (match < 0 || v.kind != DILUVIUM_MP_STR ||
+        v.len > HTTP_HDR_VALUE_MAX)
+      continue;
+    {
+      size_t j;
+      int clean = 1;
+      for (j = 0; j < v.len; j++) {
+        if ((unsigned char)v.p[j] < 0x20 || (unsigned char)v.p[j] == 0x7f) {
+          clean = 0;
+          break;
+        }
+      }
+      if (!clean)
+        continue;
+    }
+    val[match] = v.p;
+    vlen[match] = v.len;
+  }
+  for (i = 0; i < lr->nresp_allow; i++) {
+    if (val[i] != NULL) {
+      out[n].name = lr->resp_allow[i];
+      out[n].val = val[i];
+      out[n].val_len = vlen[i];
+      n++;
+    }
+  }
+  return n;
 }
 
 /* Drain one reply queue and finish the connections its messages name. */
@@ -355,6 +501,7 @@ static void pump_one_queue (dh_http *x, dv_instance *root, dv_queue_id q) {
     size_t body_len = 0;
     char ctype[128];
     dh_conn *found;
+    dh_listener_rt *owner = NULL;
     if (dv_queue_peek(root, q, &msg, &msglen) != DV_OK)
       break;
     strcpy(ctype, "application/octet-stream");
@@ -394,9 +541,13 @@ static void pump_one_queue (dh_http *x, dv_instance *root, dv_queue_id q) {
         ctype[t.len] = '\0';
       }
     }
-    found = find_waiting(x, token);
-    if (found != NULL)
-      respond_raw(found, status, reason_for(status), ctype, body, body_len);
+    found = find_waiting(x, token, &owner);
+    if (found != NULL) {
+      dh_resp_hdr xh[DH_MAX_HDRS];
+      size_t nxh = resp_headers_of(owner, msg, msglen, xh);
+      respond_hdrs(found, status, reason_for(status), ctype, xh, nxh,
+                   body, body_len);
+    }
     /* A reply naming no waiting connection is consumed all the same: the
        connection may have hit its deadline first, and a wedged reply queue
        would take every later response with it. */
@@ -646,6 +797,8 @@ static int open_one (dh_listener_rt *lr, const dh_listener_cfg *cfg,
   memcpy(lr->reply_queue, cfg->reply_queue, sizeof(lr->reply_queue));
   memcpy(lr->hdr_allow, cfg->headers, sizeof(lr->hdr_allow));
   lr->nhdr_allow = cfg->nheaders;
+  memcpy(lr->resp_allow, cfg->resp_headers, sizeof(lr->resp_allow));
+  lr->nresp_allow = cfg->nresp_headers;
   lr->conns = (dh_conn *)calloc((size_t)lr->max_conns, sizeof(dh_conn));
   if (lr->conns == NULL) {
     snprintf(err, errcap, "no memory for the connection table");
