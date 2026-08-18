@@ -47,6 +47,11 @@
         "properties": {
           "status": { "type": "integer" },
           "content_type": { "type": ["string", "null"] },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "$comment": "build10: every response header, names lowercased, repeats joined ', ', at most 32 entries with names <= 64 and joined values <= 4096 bytes -- past a bound the header is dropped whole, never truncated. content_type stays as the convenience field."
+          },
           "body": {
             "type": "string",
             "contentEncoding": "base64",
@@ -75,6 +80,11 @@
         "properties": {
           "status": { "type": "integer" },
           "content_type": { "type": ["string", "null"] },
+          "headers": {
+            "type": "object",
+            "additionalProperties": { "type": "string" },
+            "$comment": "Same bounds and discipline as rest/get's."
+          },
           "body": { "type": "string", "contentEncoding": "base64" }
         }
       },

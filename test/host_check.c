@@ -2132,7 +2132,8 @@ static void rest_self_fetch (const char *label, const char *exe, int port) {
       "  else\n"
       "    queue.push(outq, {conn = m.conn, status = 200,\n"
       "                      body = 'served-by-diluvium:' .. tostring(m.path),\n"
-      "                      content_type = 'text/plain'})\n"
+      "                      content_type = 'text/plain',\n"
+      "                      headers = {['x-diluvium'] = 'loop'}})\n"
       "  end\n"
       "end\n"
       "if answer then\n"
@@ -2140,8 +2141,10 @@ static void rest_self_fetch (const char *label, const char *exe, int port) {
       "    queue.push(log, 'err:' .. tostring(answer.status) .. ':' ..\n"
       "               tostring(answer.detail))\n"
       "  else\n"
+      "    local hdrs = answer.value.headers or {}\n"
       "    queue.push(log, tostring(answer.value.status) .. ':' ..\n"
-      "               tostring(answer.value.body))\n"
+      "               tostring(answer.value.body) .. ':' ..\n"
+      "               tostring(hdrs['x-diluvium']))\n"
       "  end\n"
       "end\n"
       "queue.wait({park})\n", port);
@@ -2152,7 +2155,9 @@ static void rest_self_fetch (const char *label, const char *exe, int port) {
            "  max_instances = 8,\n"
            "  caps = { 'queue:*', 'host:rest/*' },\n"
            "  connectors = { listen = { port = %d, queue = 'http_in',\n"
-           "                            reply_queue = 'http_out' } },\n"
+           "                            reply_queue = 'http_out',\n"
+           "                            response_headers = {'x-diluvium'}\n"
+           "                          } },\n"
            "  plugins = { rest = { manifest = 'rest.plugin.json',\n"
            "                       call_timeout_ms = 20000 } } }\n",
            tmpdir, port);
@@ -2176,9 +2181,9 @@ static void rest_self_fetch (const char *label, const char *exe, int port) {
   snprintf(what, sizeof(what),
            "%s: a guest fetches its own host's listener through the rest "
            "plugin -- server, client and runtime in one thread, nothing "
-           "blocked", label);
-  ok(strcmp(log, "200:served-by-diluvium:/hello") == 0, what);
-  if (strcmp(log, "200:served-by-diluvium:/hello") != 0)
+           "blocked, and a response header survives the whole loop", label);
+  ok(strcmp(log, "200:served-by-diluvium:/hello:loop") == 0, what);
+  if (strcmp(log, "200:served-by-diluvium:/hello:loop") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
 }
