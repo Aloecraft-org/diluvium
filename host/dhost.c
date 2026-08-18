@@ -284,6 +284,61 @@ static void cfg_defaults (dh_config *c) {
   c->exec.max_output_bytes = 1024 * 1024;
 }
 
+/* Parse the array of lowercase header names at field 'key' of the table at
+   'idx'. Shared by the request and response allowlists, because the rules
+   are identical and should stay so: up to DH_MAX_HDRS short names, spelled
+   lowercase in the config since that is how the wire side treats them. */
+static int cfg_hdr_names (lua_State *L, int idx, const char *key,
+                          char names[DH_MAX_HDRS][DH_HDR_NAME_MAX],
+                          size_t *count, const char *where,
+                          char *err, size_t errcap) {
+  char at[160];
+  snprintf(at, sizeof(at), "%s.%s", where, key);
+  lua_getfield(L, idx, key);
+  if (!lua_isnil(L, -1)) {
+    size_t i;
+    if (!lua_istable(L, -1)) {
+      lua_pop(L, 1);
+      return cfg_fail(err, errcap, "%s must be an array of header names%s",
+                      at, "");
+    }
+    for (i = 0; ; i++) {
+      const char *s;
+      size_t slen, j;
+      lua_rawgeti(L, -1, (lua_Integer)i + 1);
+      if (lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        break;
+      }
+      if (i >= DH_MAX_HDRS) {
+        lua_pop(L, 2);
+        return cfg_fail(err, errcap, "%s lists more than 8 names%s", at, "");
+      }
+      s = lua_tolstring(L, -1, &slen);
+      if (s == NULL || slen == 0 || slen >= DH_HDR_NAME_MAX) {
+        lua_pop(L, 2);
+        return cfg_fail(err, errcap, "%s entries must be short header "
+                                     "names%s", at, "");
+      }
+      for (j = 0; j < slen; j++) {
+        if (s[j] >= 'A' && s[j] <= 'Z') {
+          lua_pop(L, 2);
+          return cfg_fail(err, errcap, "%s names are lowercase ('%s' is "
+                                       "not): the wire side treats them "
+                                       "lowercased, so the config spells "
+                                       "them that way", at, s);
+        }
+      }
+      memcpy(names[*count], s, slen);
+      names[*count][slen] = '\0';
+      (*count)++;
+      lua_pop(L, 1);
+    }
+  }
+  lua_pop(L, 1);
+  return 0;
+}
+
 /* Parse one listener block at 'idx' into 'l' (defaults already applied). The
    keys have already been vetted against listen_keys. 'where' names the block
    for refusals -- "config.connectors.listen" for the single form, or
@@ -316,52 +371,34 @@ static int cfg_listener (lua_State *L, int idx, dh_listener_cfg *l,
   if (cfg_num(L, idx, "max_conns", &n, 1, 4096, where, err, errcap) != 0)
     return -1;
   l->max_conns = (int)n;
-  /* The request-header allowlist: an array of LOWERCASE names, empty by
-     default -- forwarding nothing is the safe default, and requiring the
-     canonical spelling here beats normalizing it quietly. */
-  lua_getfield(L, idx, "headers");
-  if (!lua_isnil(L, -1)) {
+  /* The header allowlists: arrays of LOWERCASE names, empty by default --
+     forwarding nothing and emitting nothing are the safe defaults, and
+     requiring the canonical spelling here beats normalizing it quietly. */
+  if (cfg_hdr_names(L, idx, "headers", l->headers, &l->nheaders,
+                    where, err, errcap) != 0 ||
+      cfg_hdr_names(L, idx, "response_headers", l->resp_headers,
+                    &l->nresp_headers, where, err, errcap) != 0)
+    return -1;
+  /* The response framing is the host's: allowing a guest to name these
+     would be a fight over the wire format at traffic time, so the conflict
+     is refused here, where it is a typo. content-type is refused too,
+     because the reply already has a field for it. */
+  {
+    static const char *const owned[] = { "content-length", "connection",
+                                         "transfer-encoding", "content-type",
+                                         NULL };
     size_t i;
-    if (!lua_istable(L, -1)) {
-      lua_pop(L, 1);
-      return cfg_fail(err, errcap, "%s.headers must be an array of header "
-                                   "names%s", where, "");
-    }
-    for (i = 0; ; i++) {
-      const char *s;
-      size_t slen, j;
-      lua_rawgeti(L, -1, (lua_Integer)i + 1);
-      if (lua_isnil(L, -1)) {
-        lua_pop(L, 1);
-        break;
+    int k;
+    for (i = 0; i < l->nresp_headers; i++) {
+      for (k = 0; owned[k] != NULL; k++) {
+        if (strcmp(l->resp_headers[i], owned[k]) == 0)
+          return cfg_fail(err, errcap, "%s.response_headers may not name "
+                          "'%s': the host owns the response framing, and "
+                          "the media type is the reply's content_type "
+                          "field", where, owned[k]);
       }
-      if (i >= DH_MAX_HDRS) {
-        lua_pop(L, 2);
-        return cfg_fail(err, errcap, "%s.headers lists more than 8 names%s",
-                        where, "");
-      }
-      s = lua_tolstring(L, -1, &slen);
-      if (s == NULL || slen == 0 || slen >= DH_HDR_NAME_MAX) {
-        lua_pop(L, 2);
-        return cfg_fail(err, errcap, "%s.headers entries must be short "
-                                     "header names%s", where, "");
-      }
-      for (j = 0; j < slen; j++) {
-        if (s[j] >= 'A' && s[j] <= 'Z') {
-          lua_pop(L, 2);
-          return cfg_fail(err, errcap, "%s.headers names are lowercase "
-                                       "('%s' is not): the guest sees them "
-                                       "lowercased, so the config spells "
-                                       "them that way", where, s);
-        }
-      }
-      memcpy(l->headers[l->nheaders], s, slen);
-      l->headers[l->nheaders][slen] = '\0';
-      l->nheaders++;
-      lua_pop(L, 1);
     }
   }
-  lua_pop(L, 1);
   return 0;
 }
 
@@ -386,7 +423,7 @@ int dh_config_load (const char *path, dh_config *out, char *err,
                                              "default_ttl", NULL };
   static const char *const listen_keys[] = {
     "port", "bind", "queue", "reply_queue", "max_body", "deadline_ms",
-    "max_conns", "headers", NULL
+    "max_conns", "headers", "response_headers", NULL
   };
   /* 'path', 'mode' and 'max_rows' are build6's spellings, kept in the known
      list so a migrating deployment gets a sentence about what replaced them

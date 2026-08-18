@@ -248,6 +248,34 @@ static void a_config_is_typed_data_and_typos_are_refused (void) {
   ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
      strstr(err, "more than") != NULL,
      "more listeners than the host can hold are refused, not clipped");
+
+  /* The response-header allowlist: a host-owned name is a config error by
+     name, because the same conflict at traffic time would be a fight over
+     the wire format. */
+  p = fixture("respown.host.lua",
+    "return { supervisor = 's.lua', connectors = { listen = {\n"
+    "  port = 8080, response_headers = { 'location', 'content-length' }\n"
+    "} } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "content-length") != NULL,
+     "a host-owned name in response_headers is refused at load, by name");
+
+  p = fixture("respcase.host.lua",
+    "return { supervisor = 's.lua', connectors = { listen = {\n"
+    "  port = 8080, response_headers = { 'Location' } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "lowercase") != NULL,
+     "response_headers names are lowercase, same rule as the request side");
+
+  p = fixture("respok.host.lua",
+    "return { supervisor = 's.lua', connectors = { listen = {\n"
+    "  port = 8080, response_headers = { 'location', 'cache-control' }\n"
+    "} } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) == 0 &&
+     cfg.listeners[0].nresp_headers == 2 &&
+     strcmp(cfg.listeners[0].resp_headers[0], "location") == 0 &&
+     strcmp(cfg.listeners[0].resp_headers[1], "cache-control") == 0,
+     "a clean response_headers allowlist parses into the listener");
 }
 
 
@@ -1185,6 +1213,95 @@ static void the_listener_forwards_allowlisted_headers (void) {
                                sizeof(resp));
     ok(got > 0 && strstr(resp, "nil|nil|nil") != NULL,
        "with none sent the headers map is present and empty, same shape");
+  }
+  dh_host_close(&h);
+}
+
+/*
+** Build10 Part 1: a reply's 'headers' map, gated by the listener's
+** response_headers allowlist. The guest is untrusted on this path -- its
+** bytes are interpolated into the response head -- so the wire must show:
+** an allowlisted header present under the allowlist's spelling whatever
+** case the guest used; an unlisted name absent; a host-owned name absent
+** (it cannot even be allowlisted -- the config test holds that door);
+** exactly the host's own Content-Length; and a value carrying CRLF dropped
+** whole rather than splitting the response.
+*/
+static void the_listener_sets_allowlisted_response_headers (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512];
+  fixture("sup_rhdrs.lua",
+    "local inq = queue.declare('http_in', {capacity = 8})\n"
+    "local outq = queue.declare('http_out', {capacity = 8, exported = true})\n"
+    "while true do\n"
+    "  local _, m, why = queue.wait({inq})\n"
+    "  if why == 'ok' then\n"
+    "    if m.path == '/inj' then\n"
+    "      queue.push(outq, {conn = m.conn, status = 200, body = 'ok',\n"
+    "        content_type = 'text/plain',\n"
+    "        headers = { location = '/a\\r\\nEvil-Injected: 1' }})\n"
+    "    else\n"
+    "      queue.push(outq, {conn = m.conn, status = 303, body = 'ok',\n"
+    "        content_type = 'text/plain',\n"
+    "        headers = { Location = '/next', ['x-thing'] = 'v1',\n"
+    "                    ['x-evil'] = 'nope',\n"
+    "                    ['content-length'] = '999' }})\n"
+    "    end\n"
+    "  end\n"
+    "end\n");
+  {
+    char cfgsrc[512];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_rhdrs.lua',\n"
+             "  connectors = { listen = { port = 18479, deadline_ms = 3000,\n"
+             "    response_headers = { 'location', 'x-thing' } } } }\n",
+             tmpdir);
+    fixture("rhdrs.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/rhdrs.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the response-headers deployment opens (is port 18479 free?)");
+      return;
+    }
+  }
+  {
+    static const char req[] = "GET /good HTTP/1.1\r\nHost: c\r\n\r\n";
+    char resp[2048];
+    size_t got = http_exchange(&h, 18479, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "HTTP/1.1 303") != NULL &&
+       strstr(resp, "location: /next\r\n") != NULL,
+       "an allowlisted response header reaches the wire, under the "
+       "allowlist's spelling whatever case the guest used");
+    ok(got > 0 && strstr(resp, "x-thing: v1\r\n") != NULL,
+       "and so does a second one, in the allowlist's order");
+    ok(got > 0 && strstr(resp, "x-evil") == NULL,
+       "a name the config did not allowlist never reaches the wire");
+    ok(got > 0 && strstr(resp, "Content-Length: 2\r\n") != NULL &&
+       strstr(resp, "999") == NULL,
+       "Content-Length is the host's own, not the guest's claim");
+    if (got > 0 && (strstr(resp, "location: /next\r\n") == NULL ||
+                    strstr(resp, "999") != NULL))
+      printf("      (response was: %.200s)\n", resp);
+  }
+  {
+    static const char req[] = "GET /inj HTTP/1.1\r\nHost: c\r\n\r\n";
+    char resp[2048];
+    size_t got = http_exchange(&h, 18479, req, sizeof(req) - 1, resp,
+                               sizeof(resp));
+    ok(got > 0 && strstr(resp, "HTTP/1.1 200") != NULL &&
+       strstr(resp, "Evil-Injected") == NULL &&
+       strstr(resp, "location:") == NULL,
+       "a CRLF in an allowlisted value drops the header whole -- no "
+       "injection, no truncated 'cleaned' value, and the response still "
+       "answers");
+    if (got > 0 && strstr(resp, "Evil-Injected") != NULL)
+      printf("      (INJECTED: %.200s)\n", resp);
   }
   dh_host_close(&h);
 }
@@ -2347,6 +2464,7 @@ int main (void) {
   the_listener_refuses_injection_and_smuggling();
   two_ports_pre_bound_route_by_token();
   the_listener_forwards_allowlisted_headers();
+  the_listener_sets_allowlisted_response_headers();
   deferral_puts_many_calls_in_flight_at_once();
   a_parked_instance_does_not_stall_another();
   a_dead_instance_leaves_no_pending_entry();

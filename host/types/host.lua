@@ -97,7 +97,7 @@
 ---                                   # path, body}
 ---@field reply_queue string?         # responses drain from here (default
 ---                                   # "http_out"): {conn, status, body,
----                                   # content_type?}
+---                                   # content_type?, headers?}
 ---@field max_body integer?           # refuse bigger bodies (default 65536)
 ---@field deadline_ms integer?        # per-connection; the host's own timeout
 ---                                   # logic (default 10000)
@@ -108,6 +108,17 @@
 ---                                   # none (default). Up to 8; repeats in a
 ---                                   # request join ", "; a value past the
 ---                                   # host's bound answers 431
+---@field response_headers string[]?  # LOWERCASE allowlist of response
+---                                   # headers a reply's `headers` map may
+---                                   # set; empty/omitted = none (default).
+---                                   # Up to 8. content-length, connection,
+---                                   # transfer-encoding and content-type
+---                                   # are the host's and refused here. A
+---                                   # reply header not listed, carrying a
+---                                   # control byte, or past the host's
+---                                   # value bound is dropped whole, never
+---                                   # truncated -- the response still
+---                                   # answers without it
 
 ---The sql connector grants a *scope*: a directory the deployment's programs
 ---open databases within (`host.sql.open("name")` guest-side; `args.db` on
