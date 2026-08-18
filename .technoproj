@@ -3,7 +3,7 @@
     "major": 5,
     "minor": 5,
     "patch": 1,
-    "build": "9"
+    "build": "10"
   },
   "TECHNO_INIT_DIRS": [
     ".nogit",

@@ -56,6 +56,79 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "5.5.1_build10"
+    tag: v5.5.1_build10
+    date: null
+    status: unreleased
+    stable: false
+    mirror: false
+    latest: false
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **Assistant enablement, the additive half.** The workload this build
+      serves is an AI assistant deployed as a swarm: inbound webhooks,
+      outbound LLM and API calls, a few credentials, bounded workers.
+      Everything here is additive -- new config keys, new result fields, new
+      library surface, new tooling -- and a deployment that configures none
+      of it behaves as it did on build9. The behaviour-changing half (rest
+      egress hardening, consuming the plugin wake policy, exec on the
+      deferred seam) is deliberately not here; `doc/BUILD10.md` §6 records
+      each with its reason.
+    upgrading: |
+      **Snapshots taken by 5.5.1_build9 restore on this build.** The host
+      library grew members inside its module table, which is a named
+      permanent resolved to the runtime's own copy on restore; no permanent
+      name was added or moved, and no wire shape changed -- the reply
+      message's `headers` and the rest results' `headers` are new optional
+      fields old programs never send or read.
+
+      **Nothing activates by itself.** Response headers need a
+      `response_headers` allowlist in the listen block; `host.spawn` needs
+      the `lifecycle` capability the raw idiom already needed; the vault is
+      a tool you run, not a connector.
+    added:
+      - |
+        **Listener response headers.** A reply may carry `headers = { ... }`,
+        gated per listener by `response_headers` -- a lowercase allowlist
+        mirroring build7's request side. The host-owned framing names
+        (content-length, connection, transfer-encoding, content-type) are
+        refused in the allowlist at config load. On the wire the header
+        name always comes from the allowlist, never from guest bytes, and a
+        value carrying a control byte, a name not listed, or a value past
+        the bound drops that header whole -- never truncated -- while the
+        response still answers.
+      - |
+        **Rest plugin response headers.** `rest/get` and `rest/post` results
+        carry a `headers` map: names lowercased, repeats joined ", ", at
+        most 32 entries with names <= 64 and joined values <= 4096 bytes,
+        past a bound dropped whole. Both bindings, one manifest; the C
+        plugin's header comment had promised this shape since the file was
+        written, and now tells the truth.
+      - |
+        **`host.spawn`, `host.children`, `host.events`** -- the swarm half
+        of the build7 guest library. A spawn returns a handle when the
+        swarm's `spawned` event lands; a denial raises with the refused
+        capability in the message; `handle.kill()` awaits its outcome;
+        `host.events` drains child exits, faults and budget overruns,
+        buffered through any outcome wait. No `child.push`: the swarm does
+        not yet deliver endpoint references between instances (build7's
+        recorded cap4 gap), and the library does not pretend otherwise.
+      - |
+        **`script/mint_vault.lua`** -- mint a secrets vault as a compiled
+        secure function. Names arrive as environment-variable names (values
+        never ride argv); the output loads in a sealed guest via `load`.
+        The claim is the secure-function claim and no more: obfuscation,
+        not encryption. The tool refuses to write a vault whose values
+        survive a plaintext or single-byte-xor search, and
+        `test/test_vault.lua` proves the checks can fail on a non-secure
+        build of the same table.
+      - |
+        **An assistant-shaped example** -- `host/assistant.host.lua` and
+        `host/assistant.lua`: listener + rest + vault + spawn wired with
+        honest bounds, including the raised `call_timeout_ms` an LLM round
+        trip needs and the caveats (fetch-per-use, snapshots) the vault
+        docs insist on.
   - version: "5.5.1_build9"
     tag: v5.5.1_build9
     date: 2026-08-15
