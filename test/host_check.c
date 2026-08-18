@@ -1794,6 +1794,67 @@ static const char *echo_manifest (const char *exec, const char *wake) {
 }
 
 /*
+** Build10 Part 3: the swarm half of the host library. The same lifecycle
+** the raw-idiom tests above drive, reached with no magic queue name, no op
+** table and no hand-rolled correlation: host.spawn returns a handle when
+** 'spawned' arrives, handle.kill() rides the same events queue, a denial
+** raises with the swarm's own sentence in it, and a child's exit reaches
+** host.events(). Deliberately, no fixture here contains the string
+** 'system/lifecycle' -- doc/BUILD10.md gate 4.
+*/
+static void the_host_library_spawns_without_the_raw_idiom (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], log[512], path[512], cfgsrc[512];
+  fixture("sup_spawnlib.lua",
+    "local log = queue.declare('log', {capacity = 8, exported = true})\n"
+    "local park = queue.declare('park', {capacity = 1})\n"
+    "local kid = host.spawn{ code = 'local a = 1', caps = {'queue:*'} }\n"
+    "local has_id = type(kid.id) == 'number' and kid.id > 0\n"
+    "local seen = false\n"
+    "for _ = 1, 100 do\n"
+    "  local ev = host.events(200)\n"
+    "  if ev and ev.event == 'exited' and ev.id == kid.id then\n"
+    "    seen = true\n"
+    "    break\n"
+    "  end\n"
+    "end\n"
+    "local parker = host.spawn{\n"
+    "  code = \"local q = queue.declare('kq', {capacity = 1})\\n\"\n"
+    "      .. \"queue.wait({q})\",\n"
+    "  caps = {'queue:*'} }\n"
+    "local killed = parker.kill() == true\n"
+    "local okd, why = pcall(host.spawn,\n"
+    "                       { code = 'local b = 2', caps = {'host:nope/*'} })\n"
+    "local denied = (not okd) and tostring(why):find('denied') ~= nil\n"
+    "queue.push(log, (has_id and 'id' or 'NOID') .. ':'\n"
+    "             .. (seen and 'exited' or 'NOEXIT') .. ':'\n"
+    "             .. (killed and 'killed' or 'NOKILL') .. ':'\n"
+    "             .. (denied and 'denied' or 'NODENY'))\n"
+    "queue.wait({park})\n");
+  snprintf(cfgsrc, sizeof(cfgsrc),
+           "return { supervisor = '%s/sup_spawnlib.lua',\n"
+           "  max_instances = 8,\n"
+           "  caps = { 'lifecycle', 'queue:*' } }\n", tmpdir);
+  fixture("spawnlib.host.lua", cfgsrc);
+  snprintf(path, sizeof(path), "%s/spawnlib.host.lua", tmpdir);
+  if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+      dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+    printf("      (%s)\n", err);
+    ok(0, "the spawn-library deployment opens");
+    return;
+  }
+  log[0] = '\0';
+  run_until_log(&h, log, sizeof(log), 3000);
+  ok(strcmp(log, "id:exited:killed:denied") == 0,
+     "host.spawn, handle.kill, host.events and a raised denial all work, "
+     "with no raw lifecycle push anywhere in the fixture");
+  if (strcmp(log, "id:exited:killed:denied") != 0)
+    printf("      (guest said: %s)\n", log);
+  dh_host_close(&h);
+}
+
+/*
 ** The round trip. A guest calls through the ordinary 'host.call' -- no
 ** generated wrapper, no new guest surface -- and the plugin's answer comes
 ** back as an ordinary reply. That the guest side needed no change at all is
@@ -2473,6 +2534,7 @@ int main (void) {
   deferral_puts_many_calls_in_flight_at_once();
   a_parked_instance_does_not_stall_another();
   a_dead_instance_leaves_no_pending_entry();
+  the_host_library_spawns_without_the_raw_idiom();
   a_manifest_refuses_its_mistakes_by_name();
   a_plugin_answers_an_ordinary_hostcall();
   a_plugin_error_arrives_with_its_class();

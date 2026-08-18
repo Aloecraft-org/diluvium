@@ -98,14 +98,26 @@ v1 is deliberately small:
 
 ```lua
 local child = host.spawn{ code = src, caps = {...}, budget = {...} }
-child:push(msg)          -- convenience for queue.push to the child's inbox
+child.kill()             -- subtree kill, outcome awaited
 host.children()          -- the handles this instance has spawned
+host.events(waitms)      -- the next {event, id, detail?} about a child
 ```
 
-plus one convention: a spawned child's exit is announced on a
-well-known queue the library declares, so a supervisor stops inventing
-its own heartbeat. The library owns the lifecycle queue name, the op
-shape, and the correlation; the queues stay the substrate.
+The exit convention costs nothing to invent because the swarm already
+has it: `system/events` (Messaging.md 9.2) is the well-known queue, the
+library declares it, and `host.events` drains it -- buffered through any
+outcome wait, so waiting on a spawn cannot eat a death notice. The
+library owns the lifecycle queue name, the op shapes, and the
+outcome correlation (order -- lifecycle requests are sequential through
+the library, the hostcall pair's discipline); the queues stay the
+substrate.
+
+**Corrected during the build:** the plan sketched `child:push(msg)`. It
+is not here, and could not honestly be: the swarm does not deliver
+endpoint references between instances (build7's recorded cap4 gap), so a
+parent cannot reach a child's queue and a wrapper pretending otherwise
+would fake a capability the runtime lacks. When endpoint delivery lands,
+it lands on these handles without changing a call site.
 
 Not in v1, and shaped so they slot in without changing call sites:
 restart/backoff helpers (`host.supervise`), spawn by **code ref** —

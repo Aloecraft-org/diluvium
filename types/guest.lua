@@ -247,6 +247,62 @@ function host.call(name, args) end
 ---@return string? detail # the connector's sentence, on non-ok
 function host.try(name, args) end
 
+---Spawn a child instance (build10). The library owns the lifecycle queue,
+---the op shape, and the outcome wait; the caller holds a handle. Needs the
+---`lifecycle` capability, and the child's `caps` must attenuate -- a name
+---this instance does not hold is a raised denial, with the swarm's own
+---sentence (the refused capability) in it. Requests are sequential through
+---this library: one spawn or kill outcome in flight at a time.
+---
+---A handle is NOT a channel: the swarm does not yet deliver endpoint
+---references between instances, so there is no `child.push`. Parent and
+---child coordinate through whatever the deployment wires (a shared
+---connector), or the child works autonomously and its exit reaches
+---`host.events`.
+---@param spec diluvium.SpawnSpec
+---@return diluvium.hostchild child
+function host.spawn(spec) end
+
+---@class diluvium.SpawnSpec
+---@field code string             # the child's chunk; source, or a compiled
+---                               # dump (a secure function travels intact)
+---@field caps string[]?          # the child's grants; subset of this
+---                               # instance's or the spawn is denied
+---@field budget {instructions: integer?, memory_kb: integer?}?
+---@field wake_on_message boolean?  # hibernated child wakes on delivery
+---@field sealed boolean?         # drop UNSAFE_STDLIB from the child even
+---                               # if this instance holds it
+---@field waitms integer?         # outcome wait bound (default 10000)
+
+---@class diluvium.hostchild
+---@field id integer              # the swarm id, unique host-wide
+local hostchild = {}
+
+---Kill the child and its whole subtree. Ancestor-only, enforced by the
+---swarm; returns true once the swarm's `exited` lands, raises on a denial
+---("no such instance" once it already died).
+---@param waitms integer?
+---@return boolean
+function hostchild.kill(waitms) end
+
+---The children spawned through this library and not yet seen die, id ->
+---handle, a fresh table each call. This ledger resets with the library's
+---other upvalues on a snapshot restore: the authoritative record of a
+---supervision tree is the supervisor program's own state, which does ride
+---the snapshot.
+---@return table<integer, diluvium.hostchild>
+function host.children() end
+
+---The next lifecycle event about this instance's children: `exited`,
+---`faulted`, `exceeded`, `denied`, `status` -- `{event, id, detail?}`, the
+---shape Messaging.md 9.2 fixes. Buffered events first (an outcome wait
+---never eats a death notice), then the events queue. `waitms` nil or 0
+---polls, which is what a supervisor already parked on its own wait-set
+---wants; positive parks here.
+---@param waitms integer?
+---@return {event: string, id: integer, detail: string?}? ev
+function host.events(waitms) end
+
 ---@class diluvium.hostsql
 local hostsql = {}
 
