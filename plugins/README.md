@@ -154,3 +154,37 @@ path and never searches `PATH`, it logs the manifest's checksum at startup
 without enforcing it, and the channel has no filesystem name and no port, so
 nothing else can connect to it. Parentage is structural rather than negotiated,
 which is why there is nobody to authenticate.
+
+## Deferred: an `imap` plugin
+
+Cut from the assistant-enablement planning round on scope, not on merit.
+Recorded here — where the next plugin author will look — so the sketch does
+not have to be rediscovered.
+
+The cut is a small verb surface, not a wrapping of the protocol: IMAP is
+stateful and crufty, and none of that crust belongs in a manifest. The v1
+verbs: `imap/list_folders`, `imap/search` (since-UID / unseen),
+`imap/fetch` (headers, a bounded body, a bounded attachment),
+`imap/mark_seen`, perhaps `imap/move`. Wake policies follow the rest
+plugin's reasoning exactly: `search` and `fetch` are `reissue` because
+asking twice is safe; `mark_seen` and `move` are `error` because the host
+cannot know whether the first one landed.
+
+Push needs no protocol change, and that is the part worth not losing: a
+plugin call is deferred, so a long-lived `imap/wait_new {timeout_ms}` —
+IMAP IDLE under the hood, answered when mail arrives or the timeout lapses
+— gives a guest push semantics with one call kept in flight. Polling works
+today too: `queue.wait`'s timeout wakes a parked guest, so "check every
+60s" needs nothing new. Server and credentials come from the environment,
+as the crypto connector's `key_env` does — the guest says which message,
+never which account.
+
+The bounds discipline is the house one: attachments and bodies refuse past
+their bound rather than truncate, bytes ride as msgpack bin per BUILD8
+§6.1, and UIDVALIDITY changes are surfaced as an error, never papered
+over. Python's stdlib `imaplib` makes that implementation the cheap one;
+nothing about the channel prefers any language.
+
+Before building it, check the deployment's mail server for JMAP. A JMAP
+server is plain HTTPS/JSON, which the `rest` plugin already speaks, and
+the biggest line item on this page disappears.
