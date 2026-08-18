@@ -58,11 +58,11 @@ repo: Aloecraft-org/diluvium
 releases:
   - version: "5.5.1_build10"
     tag: v5.5.1_build10
-    date: null
-    status: unreleased
-    stable: false
-    mirror: false
-    latest: false
+    date: 2026-08-18
+    status: released
+    stable: true
+    mirror: true
+    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
@@ -135,7 +135,7 @@ releases:
     status: released
     stable: true
     mirror: true
-    latest: true
+    latest: false
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
