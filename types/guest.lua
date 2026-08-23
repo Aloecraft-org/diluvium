@@ -436,3 +436,13 @@ function hostcrypto.jwt_sign(claims, ttl) end
 ---@param token string
 ---@return {valid: boolean, claims: table?, reason: string?}
 function hostcrypto.jwt_verify(token) end
+
+---A TURN REST credential (coturn's use-auth-secret): `username` is
+---"<expiry>:<user>", `password` is base64 of HMAC-SHA1 over it under the
+---deployment's shared secret. The host owns the expiry: `ttl` (seconds,
+---default the deployment's turn.ttl) sets it, a guest never names a
+---timestamp. Denied unless the deployment configures `crypto.turn`.
+---@param user string  # 1..256 bytes, no NUL
+---@param ttl integer?
+---@return {username: string, password: string, expires: integer}
+function hostcrypto.turn_credential(user, ttl) end

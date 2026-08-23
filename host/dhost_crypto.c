@@ -12,6 +12,7 @@
 **   crypto/hmac     {data=str}                -> hex of HMAC-SHA256(key, data)
 **   crypto/jwt_sign {claims=map, ttl=seconds} -> a JWT-HS256 string
 **   crypto/jwt_verify {token=str}             -> {valid, claims?, reason?}
+**   crypto/turn_credential {user=str, ttl=s}  -> {username, password, expires}
 **
 ** Randomness through the hostcall log is the canonical replay win: the bytes
 ** arrive as a reply, so they are in the log, so a replay reproduces the run
@@ -35,6 +36,23 @@
 **    keys, and neither subkey discloses the other or the master. Without this,
 **    a program holding only host:crypto/hmac could HMAC a JWT signing-input
 **    itself and assemble a token, bypassing host:crypto/jwt_sign entirely.
+**
+** TURN REST credentials (crypto/turn_credential), and the one exception to
+** the derived-subkeys rule:
+**  - The scheme is coturn's use-auth-secret (the "REST API For Access To
+**    TURN Services" draft): username is "<expiry-unix>:<user>", password is
+**    standard base64 of HMAC-SHA1(shared_secret, username). The TURN server
+**    holds the SAME secret and recomputes the MAC, which is why this one is
+**    kept raw rather than derived: a derived subkey would produce MACs
+**    coturn cannot check. The secret still never reaches a guest -- that
+**    part of the connector's contract is unchanged.
+**  - The host owns the expiry, exactly as jwt_sign owns exp: the call takes
+**    a ttl, never a timestamp, so a guest cannot mint a credential that
+**    outlives its grant. The expiry is in the username in cleartext; if the
+**    guest chose it, a far-future credential would be one field away.
+**  - HMAC-SHA1 because the scheme fixes it. SHA-1's collision breaks do not
+**    apply to HMAC as used here, and interop leaves no choice anyway; see
+**    the warning in dhash.h before reusing the primitive for anything else.
 */
 
 #include <errno.h>
@@ -66,7 +84,46 @@ typedef struct dh_crypto {
   unsigned char k_hmac[DILUVIUM_SHA256_SIZE];   /* keys crypto/hmac */
   unsigned char k_jwt[DILUVIUM_SHA256_SIZE];    /* keys the JWT MAC */
   long default_ttl;
+  /* The TURN shared secret, raw: coturn recomputes the MAC with the same
+     bytes, so there is nothing to derive (see the header note). Length 0
+     means the deployment configured no turn block and the call refuses. */
+  unsigned char turn_secret[CRYPTO_KEY_MAX];
+  size_t turn_secretlen;
+  long turn_ttl;
 } dh_crypto;
+
+
+/* ---- HMAC-SHA1, for TURN only -- same skeleton, SHA-1's block is also
+        64 bytes so only the digest changes ------------------------------ */
+
+static void hmac_sha1 (const unsigned char *key, size_t keylen,
+                       const unsigned char *msg, size_t msglen,
+                       unsigned char out[DILUVIUM_SHA1_SIZE]) {
+  unsigned char k[64], ipad[64], opad[64];
+  unsigned char inner[DILUVIUM_SHA1_SIZE];
+  diluvium_sha1_ctx c;
+  size_t i;
+  memset(k, 0, sizeof(k));
+  if (keylen > 64)
+    diluvium_sha1(key, keylen, k);      /* a long key is its own hash */
+  else
+    memcpy(k, key, keylen);
+  for (i = 0; i < 64; i++) {
+    ipad[i] = k[i] ^ 0x36;
+    opad[i] = k[i] ^ 0x5c;
+  }
+  diluvium_sha1_init(&c);
+  diluvium_sha1_update(&c, ipad, 64);
+  diluvium_sha1_update(&c, msg, msglen);
+  diluvium_sha1_final(&c, inner);
+  diluvium_sha1_init(&c);
+  diluvium_sha1_update(&c, opad, 64);
+  diluvium_sha1_update(&c, inner, DILUVIUM_SHA1_SIZE);
+  diluvium_sha1_final(&c, out);
+  memset(k, 0, sizeof(k));
+  memset(ipad, 0, sizeof(ipad));
+  memset(opad, 0, sizeof(opad));
+}
 
 
 /* ---- CSPRNG ---------------------------------------------------------- */
@@ -200,6 +257,37 @@ static void b64url_encode (const unsigned char *in, size_t n, dh_buf *out) {
     dh_raw(out, q, 3);
   }
 }
+
+/* Standard base64 WITH padding, into a caller buffer: what the TURN scheme
+   transmits (RFC 4648 proper, not the url-safe JWT alphabet above). Only
+   ever fed a 20-byte MAC; the cap check keeps that honest. */
+static const char B64STD[] =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+static int b64std_encode (const unsigned char *in, size_t n,
+                          char *out, size_t cap) {
+  size_t i, o = 0;
+  if (cap < ((n + 2) / 3) * 4 + 1)
+    return -1;
+  for (i = 0; i + 3 <= n; i += 3) {
+    unsigned v = (in[i] << 16) | (in[i + 1] << 8) | in[i + 2];
+    out[o++] = B64STD[(v >> 18) & 63]; out[o++] = B64STD[(v >> 12) & 63];
+    out[o++] = B64STD[(v >> 6) & 63];  out[o++] = B64STD[v & 63];
+  }
+  if (n - i == 1) {
+    unsigned v = in[i] << 16;
+    out[o++] = B64STD[(v >> 18) & 63]; out[o++] = B64STD[(v >> 12) & 63];
+    out[o++] = '='; out[o++] = '=';
+  }
+  else if (n - i == 2) {
+    unsigned v = (in[i] << 16) | (in[i + 1] << 8);
+    out[o++] = B64STD[(v >> 18) & 63]; out[o++] = B64STD[(v >> 12) & 63];
+    out[o++] = B64STD[(v >> 6) & 63];  out[o++] = '=';
+  }
+  out[o] = '\0';
+  return 0;
+}
+
 
 static int b64_val (int c) {
   if (c >= 'A' && c <= 'Z') return c - 'A';
@@ -682,6 +770,67 @@ static dh_call_status do_hmac (dh_crypto *k, dh_buf *value,
   return DH_CALL_OK;
 }
 
+/* TURN username bound: RFC 8489 caps USERNAME at 513 bytes; 256 for the
+   user part leaves room for any expiry and the colon with margin. */
+#define TURN_USER_MAX 256
+
+static dh_call_status do_turn_credential (dh_crypto *k, dh_buf *value,
+                                          const unsigned char *args,
+                                          size_t argslen, char *detail,
+                                          size_t dcap) {
+  diluvium_mp_cursor c;
+  diluvium_mp_token t;
+  long ttl = k->turn_ttl;
+  int64_t expires;
+  char username[TURN_USER_MAX + 32];    /* "<int64>:" heads it */
+  int ulen;
+  unsigned char mac[DILUVIUM_SHA1_SIZE];
+  char password[((DILUVIUM_SHA1_SIZE + 2) / 3) * 4 + 1];
+  if (k->turn_secretlen == 0) {
+    snprintf(detail, dcap, "this deployment configures no TURN shared secret "
+                           "(config.connectors.crypto.turn), so "
+                           "'crypto/turn_credential' is not wired");
+    return DH_CALL_DENIED;
+  }
+  if (!arg_map(args, argslen, "user", &c) || !diluvium_mp_read(&c, &t) ||
+      t.kind != DILUVIUM_MP_STR) {
+    snprintf(detail, dcap, "crypto/turn_credential: args.user must be a "
+                           "string");
+    return DH_CALL_ERROR;
+  }
+  if (t.len < 1 || t.len > TURN_USER_MAX ||
+      memchr(t.p, '\0', t.len) != NULL) {
+    snprintf(detail, dcap, "crypto/turn_credential: args.user must be 1..%d "
+                           "bytes with no NUL", TURN_USER_MAX);
+    return DH_CALL_ERROR;
+  }
+  {
+    diluvium_mp_cursor tc;
+    diluvium_mp_token tt;
+    diluvium_mp_open(&tc, args, argslen);
+    if (diluvium_mp_field(&tc, "ttl") && diluvium_mp_read(&tc, &tt) &&
+        tt.kind == DILUVIUM_MP_INT && tt.i > 0 && tt.i <= 315360000)
+      ttl = (long)tt.i;
+  }
+  expires = now_secs() + ttl;
+  ulen = snprintf(username, sizeof(username), "%lld:%.*s",
+                  (long long)expires, (int)t.len, (const char *)t.p);
+  hmac_sha1(k->turn_secret, k->turn_secretlen,
+            (const unsigned char *)username, (size_t)ulen, mac);
+  if (b64std_encode(mac, DILUVIUM_SHA1_SIZE, password,
+                    sizeof(password)) != 0) {
+    snprintf(detail, dcap, "crypto/turn_credential: internal encode error");
+    return DH_CALL_ERROR;
+  }
+  dh_map(value, 3);
+  dh_str(value, "username"); dh_str(value, username);
+  dh_str(value, "password"); dh_str(value, password);
+  dh_str(value, "expires");  dh_int(value, expires);
+  memset(mac, 0, sizeof(mac));
+  return DH_CALL_OK;
+}
+
+
 static dh_call_status do_jwt_sign (dh_crypto *k, dh_buf *value,
                                    const unsigned char *args, size_t argslen,
                                    char *detail, size_t dcap) {
@@ -907,12 +1056,58 @@ static dh_call_status conn_crypto (void *ud, dvs_id id, int64_t tok,
     return do_jwt_sign(k, value, args, argslen, detail, detailcap);
   if (strcmp(call, "crypto/jwt_verify") == 0)
     return do_jwt_verify(k, value, args, argslen, detail, detailcap);
+  if (strcmp(call, "crypto/turn_credential") == 0)
+    return do_turn_credential(k, value, args, argslen, detail, detailcap);
   snprintf(detail, detailcap, "the crypto connector has no call '%s'", call);
   return DH_CALL_DENIED;
 }
 
 
 /* ---- open / close --------------------------------------------------- */
+
+/* One secret, from whichever of the three sources the config named. The
+   labels are the config field names, so a refusal tells the operator which
+   knob to turn. 0 on success with *outlen set; -1 with 'err' filled. */
+static int load_secret (const char *file, const char *env_name,
+                        const char *inline_bytes, size_t inline_len,
+                        const char *file_label, const char *env_label,
+                        unsigned char *out, size_t cap, size_t *outlen,
+                        char *err, size_t errcap) {
+  *outlen = 0;
+  if (file[0] != '\0') {
+    FILE *f = fopen(file, "rb");
+    size_t n;
+    if (f == NULL) {
+      snprintf(err, errcap, "crypto: cannot read %s '%s'", file_label, file);
+      return -1;
+    }
+    n = fread(out, 1, cap, f);
+    fclose(f);
+    /* Trim one trailing newline, the common shape of a key file. */
+    if (n > 0 && out[n - 1] == '\n') n--;
+    *outlen = n;
+  }
+  else if (env_name[0] != '\0') {
+    const char *v = getenv(env_name);
+    size_t n;
+    if (v == NULL) {
+      snprintf(err, errcap, "crypto: env var '%s' (%s) is not set",
+               env_name, env_label);
+      return -1;
+    }
+    n = strlen(v);
+    if (n > cap) n = cap;
+    memcpy(out, v, n);
+    *outlen = n;
+  }
+  else if (inline_len > 0) {
+    size_t n = inline_len;
+    if (n > cap) n = cap;
+    memcpy(out, inline_bytes, n);
+    *outlen = n;
+  }
+  return 0;
+}
 
 int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
   dh_crypto *k = (dh_crypto *)calloc(1, sizeof(dh_crypto));
@@ -924,36 +1119,11 @@ int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
     return -1;
   }
   k->default_ttl = cfg->default_ttl;
-  if (cfg->key_file[0] != '\0') {
-    FILE *f = fopen(cfg->key_file, "rb");
-    size_t n;
-    if (f == NULL) {
-      snprintf(err, errcap, "crypto: cannot read key_file '%s'", cfg->key_file);
-      free(k);
-      return -1;
-    }
-    n = fread(master, 1, sizeof(master), f);
-    fclose(f);
-    /* Trim one trailing newline, the common shape of a key file. */
-    if (n > 0 && master[n - 1] == '\n') n--;
-    masterlen = n;
-  }
-  else if (cfg->key_env[0] != '\0') {
-    const char *v = getenv(cfg->key_env);
-    if (v == NULL) {
-      snprintf(err, errcap, "crypto: env var '%s' (key_env) is not set",
-               cfg->key_env);
-      free(k);
-      return -1;
-    }
-    masterlen = strlen(v);
-    if (masterlen > sizeof(master)) masterlen = sizeof(master);
-    memcpy(master, v, masterlen);
-  }
-  else if (cfg->keylen > 0) {
-    masterlen = cfg->keylen;
-    if (masterlen > sizeof(master)) masterlen = sizeof(master);
-    memcpy(master, cfg->key, masterlen);
+  if (load_secret(cfg->key_file, cfg->key_env, cfg->key, cfg->keylen,
+                  "key_file", "key_env", master, sizeof(master), &masterlen,
+                  err, errcap) != 0) {
+    free(k);
+    return -1;
   }
   if (masterlen < 16) {
     snprintf(err, errcap, "crypto: the signing key is missing or shorter than "
@@ -970,6 +1140,27 @@ int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
   hmac_sha256(master, masterlen, (const unsigned char *)KDF_LABEL_JWT,
               sizeof(KDF_LABEL_JWT) - 1, k->k_jwt);
   memset(master, 0, sizeof(master));
+  if (cfg->turn_enabled) {
+    if (load_secret(cfg->turn_secret_file, cfg->turn_secret_env,
+                    cfg->turn_secret, cfg->turn_secretlen,
+                    "turn.secret_file", "turn.secret_env",
+                    k->turn_secret, sizeof(k->turn_secret),
+                    &k->turn_secretlen, err, errcap) != 0) {
+      memset(k, 0, sizeof(*k));
+      free(k);
+      return -1;
+    }
+    if (k->turn_secretlen < 16) {
+      snprintf(err, errcap, "crypto: the TURN shared secret is missing or "
+                            "shorter than 16 bytes (set one of "
+                            "turn.secret_file, turn.secret_env, "
+                            "turn.secret)");
+      memset(k, 0, sizeof(*k));
+      free(k);
+      return -1;
+    }
+    k->turn_ttl = cfg->turn_ttl;
+  }
   if (dh_register(h, "crypto", conn_crypto, k) != 0) {
     snprintf(err, errcap, "could not register the crypto connector");
     memset(k, 0, sizeof(*k));
@@ -987,6 +1178,8 @@ void dh_crypto_close (dh_host *h) {
      wipe it here too, so close is the last place any of it lives. */
   memset(h->cfg.crypto.key, 0, sizeof(h->cfg.crypto.key));
   h->cfg.crypto.keylen = 0;
+  memset(h->cfg.crypto.turn_secret, 0, sizeof(h->cfg.crypto.turn_secret));
+  h->cfg.crypto.turn_secretlen = 0;
   if (k == NULL)
     return;
   memset(k, 0, sizeof(*k));

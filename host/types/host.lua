@@ -172,15 +172,29 @@
 ---                                   # child is killed and the call refuses
 ---                                   # (default 1048576)
 
----The crypto connector answers host:crypto/random, /hash, /hmac, /jwt_sign
----and /jwt_verify. The signing key never leaves the host: exactly one of
----key_file (the deployment shape), key_env, or key (inline, for dev) names
----it, and it must be at least 16 bytes. jwt_sign owns iat and exp -- a guest
----cannot forge a longer expiry -- and jwt_verify fixes the algorithm to
----HS256, so an "alg":"none" token is just an invalid one.
+---The crypto connector answers host:crypto/random, /hash, /hmac, /jwt_sign,
+---/jwt_verify and /turn_credential. The signing key never leaves the host:
+---exactly one of key_file (the deployment shape), key_env, or key (inline,
+---for dev) names it, and it must be at least 16 bytes. jwt_sign owns iat and
+---exp -- a guest cannot forge a longer expiry -- and jwt_verify fixes the
+---algorithm to HS256, so an "alg":"none" token is just an invalid one.
 ---@class diluvium.HostCrypto
 ---@field key string?                 # inline key (dev only); >= 16 bytes
 ---@field key_env string?             # name of an env var holding the key
 ---@field key_file string?            # path to a file holding the key
 ---@field default_ttl integer?        # jwt_sign ttl when a call omits it
 ---                                   # (seconds; default 3600)
+---@field turn diluvium.HostCryptoTurn?  # TURN REST credentials; without it
+---                                   # crypto/turn_credential is refused
+
+---The TURN REST shared secret (coturn's use-auth-secret). Kept raw rather
+---than derived -- the TURN server holds the same bytes and recomputes the
+---MAC -- but it still never leaves the host: crypto/turn_credential hands a
+---guest a finished credential, never the secret. The host owns the expiry
+---the way jwt_sign owns exp.
+---@class diluvium.HostCryptoTurn
+---@field secret string?              # inline secret (dev only); >= 16 bytes
+---@field secret_env string?          # name of an env var holding the secret
+---@field secret_file string?         # path to a file holding the secret
+---@field ttl integer?                # credential ttl when a call omits it
+---                                   # (seconds; default 86400)

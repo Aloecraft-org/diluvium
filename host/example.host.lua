@@ -59,6 +59,8 @@ return {
       key_file = "signing.key",  -- the deployment shape; the key never
                                  -- enters a guest
       default_ttl = 3600,
+      -- turn = { secret_env = "TURN_SECRET" },  -- coturn's use-auth-secret;
+      --                            wires crypto/turn_credential
     },
     fs = {
       scope = "data",            -- files, under the same discipline as sql

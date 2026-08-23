@@ -1,6 +1,7 @@
 /*
 ** dhash.c
-** SHA-256 (FIPS 180-4). See dhash.h for why this is here.
+** SHA-256, and SHA-1 for interop (both FIPS 180-4). See dhash.h for why
+** each is here -- they are here for opposite reasons.
 **
 ** Written against the standard rather than adapted from a reference
 ** implementation, so it has no licence to carry and no upstream to track. It is
@@ -170,4 +171,115 @@ void diluvium_sha256_hex (const unsigned char *digest, char *out) {
     out[i * 2 + 1] = hex[digest[i] & 0xF];
   }
   out[DILUVIUM_SHA256_SIZE * 2] = '\0';
+}
+
+
+/* ======================================================================
+** SHA-1. Interop only -- see the warning in dhash.h. Same construction,
+** same masking discipline; ROL because SHA-1 rotates left where SHA-256
+** rotates right.
+** ====================================================================== */
+
+#define ROL(x,n)	M32(M32(x) << (n) | M32(x) >> (32 - (n)))
+
+
+static void sha1_block (diluvium_sha1_ctx *s, const unsigned char *p) {
+  unsigned long w[80];
+  unsigned long a, b, c, d, e;
+  int t;
+  for (t = 0; t < 16; t++) {
+    w[t] = M32((unsigned long)p[t * 4] << 24 |
+               (unsigned long)p[t * 4 + 1] << 16 |
+               (unsigned long)p[t * 4 + 2] << 8 |
+               (unsigned long)p[t * 4 + 3]);
+  }
+  for (t = 16; t < 80; t++)
+    w[t] = ROL(w[t - 3] ^ w[t - 8] ^ w[t - 14] ^ w[t - 16], 1);
+  a = s->h[0]; b = s->h[1]; c = s->h[2]; d = s->h[3]; e = s->h[4];
+  for (t = 0; t < 80; t++) {
+    unsigned long f, kt;
+    if (t < 20)      { f = CH(b, c, d);            kt = 0x5a827999UL; }
+    else if (t < 40) { f = b ^ c ^ d;              kt = 0x6ed9eba1UL; }
+    else if (t < 60) { f = MAJ(b, c, d);           kt = 0x8f1bbcdcUL; }
+    else             { f = b ^ c ^ d;              kt = 0xca62c1d6UL; }
+    f = M32(ROL(a, 5) + f + e + kt + w[t]);
+    e = d; d = c;
+    c = ROL(b, 30);
+    b = a; a = f;
+  }
+  s->h[0] = M32(s->h[0] + a); s->h[1] = M32(s->h[1] + b);
+  s->h[2] = M32(s->h[2] + c); s->h[3] = M32(s->h[3] + d);
+  s->h[4] = M32(s->h[4] + e);
+}
+
+
+void diluvium_sha1_init (diluvium_sha1_ctx *s) {
+  s->h[0] = 0x67452301UL; s->h[1] = 0xefcdab89UL;
+  s->h[2] = 0x98badcfeUL; s->h[3] = 0x10325476UL;
+  s->h[4] = 0xc3d2e1f0UL;
+  s->nblock = 0;
+  s->total = 0;
+  memset(s->block, 0, sizeof(s->block));
+}
+
+
+/* Same contract as 'diluvium_sha256_update', including the (NULL, 0)
+   no-op -- see the note there for why that is stated rather than assumed. */
+void diluvium_sha1_update (diluvium_sha1_ctx *s, const void *data,
+                           size_t len) {
+  const unsigned char *p = (const unsigned char *)data;
+  if (len == 0)
+    return;
+  s->total += (unsigned long long)len;
+  if (s->nblock > 0) {  /* finish the partial block first */
+    size_t want = 64 - s->nblock;
+    size_t take = (len < want) ? len : want;
+    memcpy(s->block + s->nblock, p, take);
+    s->nblock += take;
+    p += take;
+    len -= take;
+    if (s->nblock < 64)
+      return;
+    sha1_block(s, s->block);
+    s->nblock = 0;
+  }
+  while (len >= 64) {
+    sha1_block(s, p);
+    p += 64;
+    len -= 64;
+  }
+  if (len > 0) {
+    memcpy(s->block, p, len);
+    s->nblock = len;
+  }
+}
+
+
+void diluvium_sha1_final (diluvium_sha1_ctx *s, unsigned char *out) {
+  unsigned long long bits = s->total * 8;
+  int i;
+  s->block[s->nblock++] = 0x80;
+  if (s->nblock > 56) {  /* no room for the length: pad this block out */
+    memset(s->block + s->nblock, 0, 64 - s->nblock);
+    sha1_block(s, s->block);
+    s->nblock = 0;
+  }
+  memset(s->block + s->nblock, 0, 56 - s->nblock);
+  for (i = 0; i < 8; i++)
+    s->block[56 + i] = (unsigned char)((bits >> (56 - i * 8)) & 0xFF);
+  sha1_block(s, s->block);
+  for (i = 0; i < 5; i++) {
+    out[i * 4]     = (unsigned char)((s->h[i] >> 24) & 0xFF);
+    out[i * 4 + 1] = (unsigned char)((s->h[i] >> 16) & 0xFF);
+    out[i * 4 + 2] = (unsigned char)((s->h[i] >> 8) & 0xFF);
+    out[i * 4 + 3] = (unsigned char)(s->h[i] & 0xFF);
+  }
+}
+
+
+void diluvium_sha1 (const void *data, size_t len, unsigned char *out) {
+  diluvium_sha1_ctx s;
+  diluvium_sha1_init(&s);
+  diluvium_sha1_update(&s, data, len);
+  diluvium_sha1_final(&s, out);
 }

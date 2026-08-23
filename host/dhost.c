@@ -420,7 +420,9 @@ int dh_config_load (const char *path, dh_config *out, char *err,
   static const char *const exec_keys[] = { "max_timeout_ms",
                                            "max_output_bytes", NULL };
   static const char *const crypto_keys[] = { "key", "key_env", "key_file",
-                                             "default_ttl", NULL };
+                                             "default_ttl", "turn", NULL };
+  static const char *const turn_keys[] = { "secret", "secret_env",
+                                           "secret_file", "ttl", NULL };
   static const char *const listen_keys[] = {
     "port", "bind", "queue", "reply_queue", "max_body", "deadline_ms",
     "max_conns", "headers", "response_headers", NULL
@@ -786,6 +788,64 @@ int dh_config_load (const char *path, dh_config *out, char *err,
         lua_pop(L, 2); goto done;
       }
       out->crypto.default_ttl = (long)n;
+      /* turn = { secret | secret_env | secret_file, ttl }: the TURN REST
+         shared secret, the same three-source shape as the signing key. */
+      lua_getfield(L, -1, "turn");
+      if (!lua_isnil(L, -1)) {
+        int tsources = 0;
+        if (!lua_istable(L, -1) ||
+            cfg_known_keys(L, -1, turn_keys, "config.connectors.crypto.turn",
+                           err, errcap) != 0) {
+          if (!lua_istable(L, -1))
+            cfg_fail(err, errcap, "config.connectors.crypto.turn must be a "
+                                  "table%s%s", "", "");
+          lua_pop(L, 3);
+          goto done;
+        }
+        out->crypto.turn_enabled = 1;
+        out->crypto.turn_ttl = 86400;
+        lua_getfield(L, -1, "secret");
+        if (lua_type(L, -1) == LUA_TSTRING) {
+          size_t kn;
+          const char *ks = lua_tolstring(L, -1, &kn);
+          if (kn > sizeof(out->crypto.turn_secret)) {
+            lua_pop(L, 4);
+            cfg_fail(err, errcap, "config.connectors.crypto.turn.secret is "
+                                  "too long%s%s", "", "");
+            goto done;
+          }
+          memcpy(out->crypto.turn_secret, ks, kn);
+          out->crypto.turn_secretlen = kn;
+          tsources++;
+        }
+        lua_pop(L, 1);
+        if (cfg_str(L, -1, "secret_env", out->crypto.turn_secret_env,
+                    sizeof(out->crypto.turn_secret_env), 0,
+                    "config.connectors.crypto.turn", err, errcap) != 0) {
+          lua_pop(L, 3); goto done;
+        }
+        if (out->crypto.turn_secret_env[0] != '\0') tsources++;
+        if (cfg_str(L, -1, "secret_file", out->crypto.turn_secret_file,
+                    sizeof(out->crypto.turn_secret_file), 0,
+                    "config.connectors.crypto.turn", err, errcap) != 0) {
+          lua_pop(L, 3); goto done;
+        }
+        if (out->crypto.turn_secret_file[0] != '\0') tsources++;
+        if (tsources != 1) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.crypto.turn needs exactly "
+                                "one of secret_file, secret_env or "
+                                "secret%s%s", "", "");
+          goto done;
+        }
+        n = out->crypto.turn_ttl;
+        if (cfg_num(L, -1, "ttl", &n, 1, 315360000,
+                    "config.connectors.crypto.turn", err, errcap) != 0) {
+          lua_pop(L, 3); goto done;
+        }
+        out->crypto.turn_ttl = (long)n;
+      }
+      lua_pop(L, 1);
     }
     lua_pop(L, 1);
     lua_getfield(L, -1, "fs");
@@ -1752,7 +1812,7 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
     static const char *const CALLS_EXEC[] = { "exec/run", NULL };
     static const char *const CALLS_CRYPTO[] = {
       "crypto/random", "crypto/hash", "crypto/hmac",
-      "crypto/jwt_sign", "crypto/jwt_verify", NULL
+      "crypto/jwt_sign", "crypto/jwt_verify", "crypto/turn_credential", NULL
     };
     static const struct { const char *prefix; const char *const *calls; }
       KNOWN[] = {

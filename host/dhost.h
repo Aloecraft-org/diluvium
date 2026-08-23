@@ -112,6 +112,14 @@ typedef struct dh_crypto_cfg {
   char key_env[DH_NAME_MAX];            /* env var holding the key */
   char key_file[DH_PATH_MAX];           /* file holding the key */
   long default_ttl;                     /* jwt_sign ttl when the call omits it */
+  /* connectors.crypto.turn: the TURN REST shared secret (coturn's
+     use-auth-secret). Held raw, not derived -- see dhost_crypto.c. */
+  int turn_enabled;
+  char turn_secret[CRYPTO_KEY_INLINE];  /* inline secret (dev); "" if unset */
+  size_t turn_secretlen;
+  char turn_secret_env[DH_NAME_MAX];    /* env var holding the secret */
+  char turn_secret_file[DH_PATH_MAX];   /* file holding the secret */
+  long turn_ttl;                        /* credential ttl when a call omits it */
 } dh_crypto_cfg;
 
 typedef struct dh_fs_cfg {

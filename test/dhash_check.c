@@ -1,6 +1,6 @@
 /*
 ** dhash_check.c
-** SHA-256 conformance for src/dhash.c.
+** SHA-256 and SHA-1 conformance for src/dhash.c.
 **
 ** doc/Messaging.md 10.5 makes this a security boundary, not a lookup
 ** convenience: a Proto is referenced by the hash of its stripped dump and
@@ -27,6 +27,10 @@
 ** disagreement between the three even where the digest itself is not published.
 ** The expected digests came from Python's hashlib, i.e. from OpenSSL, not from
 ** this implementation.
+**
+** SHA-1 gets the same two kinds of case. It is in the tree for wire-format
+** interop only (see dhash.h), but a wrong interop digest is still a wrong
+** answer on the wire, so it is held to the same vectors-and-boundaries bar.
 */
 
 #include <stdio.h>
@@ -233,6 +237,202 @@ static void padding_and_streaming (void) {
 }
 
 
+/* ================================================================ SHA-1 */
+
+/* Local hex: 'diluvium_sha256_hex' is digest-size-specific and SHA-1 ships
+   no hex helper of its own (nothing in the tree wants one). */
+static void expect1 (const char *what, const unsigned char *digest,
+                     const char *want) {
+  static const char HEX[] = "0123456789abcdef";
+  char hex[DILUVIUM_SHA1_SIZE * 2 + 1];
+  int i;
+  checks++;
+  for (i = 0; i < DILUVIUM_SHA1_SIZE; i++) {
+    hex[i * 2] = HEX[(digest[i] >> 4) & 0xF];
+    hex[i * 2 + 1] = HEX[digest[i] & 0xF];
+  }
+  hex[DILUVIUM_SHA1_SIZE * 2] = '\0';
+  if (strcmp(hex, want) != 0) {
+    printf("[FAIL] %s\n  got  %s\n  want %s\n", what, hex, want);
+    failures++;
+  }
+}
+
+
+/* The published vectors (FIPS 180-4 / NIST CAVS). */
+static void sha1_nist_vectors (void) {
+  static const struct { const char *msg; size_t len; const char *hex; } v[] = {
+    { "", 0,
+      "da39a3ee5e6b4b0d3255bfef95601890afd80709" },
+    { "abc", 3,
+      "a9993e364706816aba3e25717850c26c9cd0d89d" },
+    { "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq", 56,
+      "84983e441c3bd26ebaae4aa1f95129e5e54670f1" },
+    { NULL, 0, NULL }
+  };
+  int i;
+  unsigned char d[DILUVIUM_SHA1_SIZE];
+  for (i = 0; v[i].hex != NULL; i++) {
+    char what[96];
+    snprintf(what, sizeof(what), "SHA-1 NIST vector, %lu bytes",
+             (unsigned long)v[i].len);
+    diluvium_sha1(v[i].msg, v[i].len, d);
+    expect1(what, d, v[i].hex);
+  }
+  {
+    char *big = (char *)malloc(1000000);
+    if (big == NULL) {
+      printf("[FAIL] out of memory for the SHA-1 1e6 vector\n");
+      failures++; checks++;
+      return;
+    }
+    memset(big, 'a', 1000000);
+    diluvium_sha1(big, 1000000, d);
+    expect1("SHA-1 NIST vector, one million 'a'", d,
+            "34aa973cd4c4daa4f61eeb2bdbad27316534016f");
+    free(big);
+  }
+}
+
+
+/* The same length set as the SHA-256 table: the padding boundaries are at
+   the same offsets (64-byte block, length field from byte 56), so the same
+   lengths exercise them. Digests from Python's hashlib. */
+static const struct { int n; const char *hex; } sha1_lengths[] = {
+  {0, "da39a3ee5e6b4b0d3255bfef95601890afd80709"},
+  {1, "11f6ad8ec52a2984abaafd7c3b516503785c2072"},
+  {2, "dd7b7b74ea160e049dd128478e074ce47254bde8"},
+  {3, "b60d121b438a380c343d5ec3c2037564b82ffef3"},
+  {4, "4ad583af22c2e7d40c1c916b2920299155a46464"},
+  {5, "9addbf544119efa4a64223b649750a510f0d463f"},
+  {6, "018f4d7f06cb8626e1756452581373e05ae41c56"},
+  {7, "2db6d21d365f544f7ca3bcfb443ac96898a7a069"},
+  {8, "bcf22dfc6fb76b7366b1f1675baf2332a0e6a7ce"},
+  {9, "70374248fd7129088fef42b8f568443f6dce3a48"},
+  {10, "ff9ee043d85595eb255c05dfe32ece02a53efbb2"},
+  {11, "c2b6ff6ac90ae4c7ba8118bf82133b587f6844d0"},
+  {12, "49901d945ad6da0f0af47691f305daf994d9d2c9"},
+  {13, "35bf59a8608e6056fee877d137c05081fc98eb11"},
+  {14, "33da8d0e8af2efc260f01d8e5edfcc5c5aba44ad"},
+  {15, "f29546c9b9b5056412af91317f83158a4f5f06d4"},
+  {16, "a7a7c2e911a47b967d34b5a8807c040e9d167815"},
+  {17, "3f0155e75563ab3adc0505000a86da5baa207d1f"},
+  {18, "38e57225a610ee2a597024ae2b31867844938b26"},
+  {19, "dce1f02ca7cc4b63ac43008b7a3ce96e702a0c24"},
+  {20, "d02e53411e8cb4cd709778f173f7bc9a3455f8ed"},
+  {21, "67f47aa04705d775ee067d6db7d3d1196802990f"},
+  {22, "22d980c81eb878c4a7731e77f2633831979d51f6"},
+  {23, "2acc6756e4aa393274ae109f91c4ecdf5153604d"},
+  {24, "f7228ea6b178df32077280927f544cf46831a5e7"},
+  {25, "05711f1306adf20998dbdddbf0962f7eef6325f1"},
+  {26, "d7b54da3c1ed6623cdaaa638fd7d7fb6099c65fb"},
+  {27, "6fc065b11399e0d9523527aa593107f9301ec1f5"},
+  {28, "a99d79c8a2946d7c89c67521a13a917928ca1b58"},
+  {29, "ede3079249cce9fa824a8bb1d95447c6ebcea620"},
+  {30, "5da451e73b2773e53c1d46d6e45fd897838621d1"},
+  {31, "a700b9df6265e0e1a44fef607bf7319f702ed7e9"},
+  {32, "680cb4c5ec5d1bbfa592081dcc915e15b3cd9d3e"},
+  {33, "60bbb3c88636ba22efaea7c521d6f4ca17c62342"},
+  {34, "94f5615ced9f0626ed6f7effcf12bb883632b147"},
+  {35, "a5804110fb8af48579cb1ddc951b802c5dfd82ce"},
+  {36, "b43c42666504175b55714a8404ab1c30b1ab88c8"},
+  {37, "de9fb0ece0aaa283ed2d48399152a1329898848b"},
+  {38, "4dcc4124122dc4a033fbdf28ca174fecb8dc8210"},
+  {39, "931293b3347b83ce52911c47277a612d7d92f99a"},
+  {40, "47372a7b27569d25063df5cbbf7606f615a8ec2a"},
+  {41, "9dc0da3613af850c5a018b0a88a5626fb8888e4e"},
+  {42, "30edcc340339d64cf63263a983283272c5cfc6d2"},
+  {43, "1fb1c5bf6f209b731cab1656dc2c1901ac3ddca1"},
+  {44, "0b8bb2499ed501bb7fd61ffc4192c829242209d1"},
+  {45, "fbddf2383576fd1e5a416f44852fb66b26771e09"},
+  {46, "65b044cc017d6d9499628d20bde3d6f2b30aff3d"},
+  {47, "f89d4936f190d205f17b588e0d61dc9e085fade6"},
+  {48, "9ba3571eafaf6619487a5b53a2e98096669dbfc9"},
+  {49, "79bede281ed797b1b8ec4ddd20ca5456d6e59b3a"},
+  {50, "c3f0ee5d874bc080fa3b88bfb21d3cc888365bd0"},
+  {51, "c83a7fbb4caf846b22c9fcf132f0f16603f46de4"},
+  {52, "e79c680685886f80ab385a40ff182baf1c28c1a9"},
+  {53, "477598ced08c849d7d894afcf48e9c2ad2b3842d"},
+  {54, "31045e7bb077ff8d188a776b196b980388735dbb"},
+  {55, "cef734ba81a024479e09eb5a75b6ddae62e6abf1"},
+  {56, "901305367c259952f4e7af8323f480d59f81335b"},
+  {57, "025ecbd5d70f8fb3c5457cd96bab13fda305dc59"},
+  {58, "1fc8ec1c521db349501a72ad396e44bfade318c2"},
+  {59, "af3526de3ee728ffd84f7381df8c29b09e3a088d"},
+  {60, "06ced2e070e58c2c4ed9f2b8cb890f0c512ce60d"},
+  {61, "5482c87d17cc9f29b9f5580d168a712708b8ea98"},
+  {62, "ff5b5136336035a9f58c21d5da1e2a1d29c67943"},
+  {63, "0ddc4e0cccd9a12850deb5abb0853a4425559fec"},
+  {64, "bb2fa3ee7afb9f54c6dfb5d021f14b1ffe40c163"},
+  {65, "78c741ddc482e4cdf8c474a0876347a0905b6233"},
+  {66, "b6a70490805fc2410afe1e58313de63717fb5663"},
+  {67, "40a5698504d8c2dbf707911450f557a30aad7b4c"},
+  {68, "87ce4c6f0048c287dbfcf288c97f54b619480279"},
+  {69, "a1e3aea3264dee086dc89f1dc9be46c58a8e0f84"},
+  {111, "ebcb0b3e48c9ef45a6cea955e622bad8c29ff4e7"},
+  {112, "27fa638e78d8524dae129c782bb9042f0caed9f9"},
+  {113, "bcaa0a9b88b39daeaf734543336f73a36b2e20f7"},
+  {119, "4300320394f7ee239bcdce7d3b8bcee173a0cd5c"},
+  {120, "ceb2821639c4b6dcb10bce0e522ca2e608ce056d"},
+  {127, "e463484d274607e1897d4099497cbf2aedcf8206"},
+  {128, "150fa3fbdc899bd0b8f95a9fb6027f564d953762"},
+  {129, "2699b675922cc84a9b0dfd926eb7f8211c78693d"},
+  {255, "63aa1abaadbb5698f2527c5cfcce7becf0465f97"},
+  {256, "53dab551701657356ed8b75653865a2e7a9c2f42"},
+  {1000, "c3efa690fa3fdd2e2526853eed670538ea127638"},
+  {1024, "d5a3c9bd7e746c98b4aea0e9194fb9555b3c22ad"},
+  {-1, NULL}
+};
+
+
+static void sha1_padding_and_streaming (void) {
+  char buf[1200];
+  int i;
+  memset(buf, 'x', sizeof(buf));
+  for (i = 0; sha1_lengths[i].n >= 0; i++) {
+    int n = sha1_lengths[i].n;
+    unsigned char one[DILUVIUM_SHA1_SIZE];
+    char what[96];
+
+    snprintf(what, sizeof(what), "SHA-1 one shot, n=%d", n);
+    diluvium_sha1(buf, (size_t)n, one);
+    expect1(what, one, sha1_lengths[i].hex);
+
+    {
+      diluvium_sha1_ctx s;
+      unsigned char d[DILUVIUM_SHA1_SIZE];
+      int j;
+      diluvium_sha1_init(&s);
+      for (j = 0; j < n; j++)
+        diluvium_sha1_update(&s, buf + j, 1);
+      diluvium_sha1_final(&s, d);
+      snprintf(what, sizeof(what), "SHA-1 byte at a time, n=%d", n);
+      expect1(what, d, sha1_lengths[i].hex);
+    }
+
+    {
+      int split, bad = -1;
+      for (split = 0; split <= n && bad < 0; split++) {
+        diluvium_sha1_ctx s;
+        unsigned char d[DILUVIUM_SHA1_SIZE];
+        diluvium_sha1_init(&s);
+        diluvium_sha1_update(&s, buf, (size_t)split);
+        diluvium_sha1_update(&s, buf + split, (size_t)(n - split));
+        diluvium_sha1_final(&s, d);
+        if (memcmp(d, one, sizeof(d)) != 0)
+          bad = split;
+      }
+      checks++;
+      if (bad >= 0) {
+        printf("[FAIL] SHA-1 n=%d split at %d disagrees with the one-shot "
+               "digest\n", n, bad);
+        failures++;
+      }
+    }
+  }
+}
+
+
 static void hex_is_lowercase_and_terminated (void) {
   unsigned char d[DILUVIUM_SHA256_SIZE];
   char hex[DILUVIUM_SHA256_HEX];
@@ -264,6 +464,9 @@ int main (void) {
   nist_vectors();
   padding_and_streaming();
   hex_is_lowercase_and_terminated();
+  printf("=== SHA-1 ===\n");
+  sha1_nist_vectors();
+  sha1_padding_and_streaming();
   printf("\n%d checks, %d failed\n", checks, failures);
   return failures != 0;
 }

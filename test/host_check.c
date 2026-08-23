@@ -25,6 +25,7 @@
 
 #include <sqlite3.h>
 
+#include "dhash.h"
 #include "dmsgpack.h"
 #include "dhost.h"
 
@@ -871,7 +872,7 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
   dh_host h;
   char err[512], line[512];
   {
-    char src[3600];
+    char src[4200];
     snprintf(src, sizeof(src),
       "local calls = queue.declare('host/calls', {capacity=16, exported=true})\n"
       "local replies = queue.declare('host/replies', {capacity=16})\n"
@@ -912,6 +913,12 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
       "local vr = ask({tok=11, call='crypto/jwt_verify',\n"
       "  args={token='%s'}}).value\n"
       "v[#v+1] = (vr.valid==false and vr.reason=='signature')\n"
+      "-- no turn block in this deployment: the call is refused, and the\n"
+      "-- refusal names the config knob\n"
+      "local tc = ask({tok=12, call='crypto/turn_credential',\n"
+      "  args={user='alice'}})\n"
+      "v[#v+1] = (tc.status=='denied'\n"
+      "  and string.find(tc.detail, 'connectors.crypto.turn', 1, true) ~= nil)\n"
       "queue.push(log, 'TOKEN:' .. tok)\n"
       "local good = true\n"
       "for i=1,#v do if not v[i] then good=false end end\n"
@@ -957,9 +964,166 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
     ok(got && strcmp(line, "good") == 0,
        "hash and hmac match a reference impl, random is fresh hex, a signed "
        "token round-trips, tampering and a wrong key and an expired token "
-       "are each refused by reason, and a Python-minted token verifies");
+       "are each refused by reason, a Python-minted token verifies, and "
+       "turn_credential without a turn block is denied by config name");
     if (got && strcmp(line, "good") != 0)
       printf("      (guest said: %s)\n", line);
+  }
+  dh_host_close(&h);
+}
+
+
+
+
+/*
+** TURN REST credentials, cross-checked from outside the connector.
+**
+** The recompute below is this test's own HMAC-SHA1 + base64 composition
+** over the tree's SHA-1 core (itself held to NIST vectors in dhash_check),
+** deliberately not the connector's static helpers -- and it is validated
+** first against a constant minted by Python's hmac/base64 before it judges
+** anything live. So agreement here means the connector's credential is the
+** one coturn's use-auth-secret mode computes: HMAC under the RAW configured
+** secret (a derived-subkey regression breaks this loudly), standard base64
+** with padding (the JWT alphabet above would break it), over exactly
+** "<expiry>:<user>".
+*/
+#define TURN_SECRET "turn-shared-secret-0123456789"
+/* python: base64.b64encode(hmac.new(TURN_SECRET, b"4102444800:alice",
+   sha1).digest()) */
+#define TURN_REF_USERNAME "4102444800:alice"
+#define TURN_REF_PASSWORD "A+kJaqQ1oyMRQlOqMNJuylL4FXM="
+
+static void turn_b64_of_hmac_sha1 (const char *secret, const char *msg,
+                                   char out[32]) {
+  static const char B64[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  unsigned char k[64], pad[64], inner[DILUVIUM_SHA1_SIZE];
+  unsigned char mac[DILUVIUM_SHA1_SIZE + 1];   /* +1: pad to a 3-multiple */
+  diluvium_sha1_ctx c;
+  size_t klen = strlen(secret), i;
+  int o = 0;
+  memset(k, 0, sizeof(k));
+  if (klen > 64) diluvium_sha1(secret, klen, k);
+  else memcpy(k, secret, klen);
+  for (i = 0; i < 64; i++) pad[i] = k[i] ^ 0x36;
+  diluvium_sha1_init(&c);
+  diluvium_sha1_update(&c, pad, 64);
+  diluvium_sha1_update(&c, msg, strlen(msg));
+  diluvium_sha1_final(&c, inner);
+  for (i = 0; i < 64; i++) pad[i] = k[i] ^ 0x5c;
+  diluvium_sha1_init(&c);
+  diluvium_sha1_update(&c, pad, 64);
+  diluvium_sha1_update(&c, inner, DILUVIUM_SHA1_SIZE);
+  diluvium_sha1_final(&c, mac);
+  mac[DILUVIUM_SHA1_SIZE] = 0;
+  for (i = 0; i < DILUVIUM_SHA1_SIZE; i += 3) {
+    unsigned v = (mac[i] << 16) | (mac[i + 1] << 8) | mac[i + 2];
+    out[o++] = B64[(v >> 18) & 63];
+    out[o++] = B64[(v >> 12) & 63];
+    out[o++] = (i + 1 < DILUVIUM_SHA1_SIZE) ? B64[(v >> 6) & 63] : '=';
+    out[o++] = (i + 2 < DILUVIUM_SHA1_SIZE) ? B64[v & 63] : '=';
+  }
+  out[o] = '\0';
+}
+
+static void turn_credentials_match_coturn (void) {
+  dh_config cfg;
+  dh_host h;
+  char err[512], line[512];
+  time_t before, after;
+  {
+    /* Self-check the recompute against the Python constant before it
+       judges anything: a broken helper must not vouch for the host. */
+    char pw[32];
+    turn_b64_of_hmac_sha1(TURN_SECRET, TURN_REF_USERNAME, pw);
+    ok(strcmp(pw, TURN_REF_PASSWORD) == 0,
+       "the test's own HMAC-SHA1+base64 recompute matches Python's");
+  }
+  fixture("sup_turn.lua",
+    "local calls = queue.declare('host/calls', {capacity=16, exported=true})\n"
+    "local replies = queue.declare('host/replies', {capacity=16})\n"
+    "local log = queue.declare('log', {capacity=16, exported=true})\n"
+    "local park = queue.declare('park', {capacity=1})\n"
+    "local function ask(r) queue.push(calls, r)\n"
+    "  local _, m = queue.wait({replies}, 5000); return m end\n"
+    "local v = {}\n"
+    "-- args.user is required and bounded\n"
+    "v[#v+1] = (ask({tok=1, call='crypto/turn_credential', args={}})\n"
+    "  .status == 'error')\n"
+    "v[#v+1] = (ask({tok=2, call='crypto/turn_credential',\n"
+    "  args={user='a'..string.char(0)..'b'}}).status == 'error')\n"
+    "v[#v+1] = (ask({tok=3, call='crypto/turn_credential',\n"
+    "  args={user=string.rep('u', 300)}}).status == 'error')\n"
+    "local r = ask({tok=4, call='crypto/turn_credential',\n"
+    "  args={user='alice', ttl=600}}).value\n"
+    "v[#v+1] = (type(r)=='table' and type(r.username)=='string'\n"
+    "  and type(r.password)=='string' and type(r.expires)=='number')\n"
+    "local good = true\n"
+    "for i=1,#v do if not v[i] then good=false end end\n"
+    "if good then\n"
+    "  queue.push(log, 'TURN|'..r.username..'|'..r.password..'|'\n"
+    "    ..string.format('%d', r.expires))\n"
+    "else\n"
+    "  local t={} for i=1,#v do t[i]=tostring(v[i]) end\n"
+    "  queue.push(log, 'bad:'..table.concat(t,','))\n"
+    "end\n"
+    "queue.wait({park})\n");
+  {
+    char cfgsrc[640];
+    snprintf(cfgsrc, sizeof(cfgsrc),
+             "return { supervisor = '%s/sup_turn.lua',\n"
+             "  caps = { 'host:crypto/*' },\n"
+             "  connectors = { crypto = { key = '%s',\n"
+             "    turn = { secret = '%s', ttl = 86400 } } }\n"
+             "}\n", tmpdir, KEY_STR, TURN_SECRET);
+    fixture("turn.host.lua", cfgsrc);
+  }
+  {
+    char path[512];
+    snprintf(path, sizeof(path), "%s/turn.host.lua", tmpdir);
+    if (dh_config_load(path, &cfg, err, sizeof(err)) != 0 ||
+        dh_host_open(&h, &cfg, err, sizeof(err)) != 0) {
+      printf("      (%s)\n", err);
+      ok(0, "the turn deployment opens");
+      return;
+    }
+  }
+  before = time(NULL);
+  if (!run_until_log(&h, line, sizeof(line), 200) ||
+      strncmp(line, "TURN|", 5) != 0) {
+    printf("      (guest said: %s)\n", line);
+    ok(0, "the turn guest produced a credential (and its arg checks held)");
+    dh_host_close(&h);
+    return;
+  }
+  after = time(NULL);
+  {
+    char *username = line + 5;
+    char *password = strchr(username, '|');
+    char *expstr = password ? strchr(password + 1, '|') : NULL;
+    long long expires;
+    char want[32];
+    if (password == NULL || expstr == NULL) {
+      ok(0, "the TURN log line carries username|password|expires");
+      dh_host_close(&h);
+      return;
+    }
+    *password++ = '\0';
+    *expstr++ = '\0';
+    expires = atoll(expstr);
+    /* The username leads with the expiry the host chose from ttl=600: the
+       clock bracket proves a guest-named timestamp did not get through. */
+    ok(atoll(username) == expires && strchr(username, ':') != NULL &&
+       strcmp(strchr(username, ':') + 1, "alice") == 0,
+       "the TURN username is '<expires>:<user>'");
+    ok(expires >= (long long)before + 600 - 5 &&
+       expires <= (long long)after + 600 + 5,
+       "the expiry is the host's clock plus the call's ttl");
+    turn_b64_of_hmac_sha1(TURN_SECRET, username, want);
+    ok(strcmp(password, want) == 0,
+       "the TURN password is standard base64 of HMAC-SHA1 under the raw "
+       "configured secret");
   }
   dh_host_close(&h);
 }
@@ -2526,6 +2690,7 @@ int main (void) {
   fs_reads_and_writes_inside_its_scope();
   exec_is_bounded_and_shell_free();
   crypto_signs_and_verifies_standard_jwts();
+  turn_credentials_match_coturn();
   a_request_becomes_a_message_and_a_message_an_answer();
   the_listener_refuses_injection_and_smuggling();
   two_ports_pre_bound_route_by_token();
