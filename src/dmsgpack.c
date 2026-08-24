@@ -92,7 +92,7 @@ static const char MP_CURDEC = 0;        /* light userdata -> decode in progress 
 /* Wrapper kinds, stored at index 2 of a wrapper table. */
 #define MP_SHAPE_ARRAY	DILUVIUM_MP_SHAPE_ARRAY
 #define MP_SHAPE_MAP	DILUVIUM_MP_SHAPE_MAP
-#define MP_SHAPE_EXT	3
+#define MP_SHAPE_EXT	DILUVIUM_MP_SHAPE_EXT
 
 
 /*

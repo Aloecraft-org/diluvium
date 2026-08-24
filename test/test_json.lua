@@ -158,6 +158,14 @@ ok(pcall(json.encode, {"a", msgpack.as_map({1, 2})}) == false,
 ok(pcall(json.encode, msgpack.as_array(msgpack.as_map({}))) == false,
    "a wrapper wrapping a wrapper refuses")
 
+-- The third wrapper kind is not a shape tag: an ext's index 1 is a string
+-- payload, and unwrapping it as a table once walked a string as one (a
+-- crash, not an error). Refused by name, at any depth, as a Lua error.
+ok(pcall(json.encode, msgpack.ext(0x10, "hi")) == false,
+   "an ext wrapper refuses instead of unwrapping")
+ok(pcall(json.encode, { x = msgpack.ext(0x10, "hi") }) == false,
+   "an ext wrapper nested in an envelope refuses too")
+
 -- msgpack.null is the other half of the shared vocabulary: the value that
 -- means null in both codecs.
 eq(json.encode(msgpack.null), "null", "msgpack.null encodes as JSON null")

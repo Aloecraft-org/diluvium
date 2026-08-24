@@ -179,6 +179,16 @@ static int encode_table (lua_State *L, int idx, eb *b, int depth) {
      wherever it sits in the value. Unwrap, and hold the inner table to the
      declared shape rather than guessing it. */
   wrapped = diluvium_msgpack_shapeof(L, idx);
+  if (wrapped == DILUVIUM_MP_SHAPE_EXT) {
+    /* The third wrapper kind, and NOT a shape tag: its index 1 is the ext
+       payload string, so unwrapping it as a table would walk a string as
+       one. An ext has no JSON meaning at all -- refuse by name rather
+       than encode the wrapper's own internals, which is what falling
+       through would do. */
+    snprintf(b->err, sizeof(b->err),
+             "an msgpack.ext wrapper has no JSON form");
+    return -1;
+  }
   if (wrapped != 0) {
     lua_rawgeti(L, lua_absindex(L, idx), 1);
     idx = lua_gettop(L);
