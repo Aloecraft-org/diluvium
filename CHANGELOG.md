@@ -10,6 +10,88 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build11] - 2026-08-24
+
+`v5.5.1_build11` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**The interop build.** Everything here exists so a deployment can
+speak protocols whose other end is not Diluvium: TURN REST
+credentials for a WebRTC stack, webhook signature verification
+under a provider's own secret, TOTP from guest-held per-user
+secrets, JSON that can spell an empty array. One deliberate
+snapshot-compatibility break rides it (see upgrading); everything
+else is additive, and a deployment that configures none of it
+behaves as it did on build10.
+
+### Added
+
+- **Guest-side digests.** `bytes.sha256`, `bytes.sha1`,
+  `bytes.hmac_sha256`, `bytes.hmac_sha1` -- raw bytes in and out,
+  composing with the codecs already there (TOTP truncates the raw
+  MAC, a TURN password base64s it). Guest-side because their key,
+  when there is one, is the caller's own -- a per-user TOTP secret
+  out of the program's database gains nothing from a hostcall but a
+  copy of itself in the log. SHA-1 is wire-interop only and says so
+  where it lives; nothing identity-shaped may use it.
+- `bytes.consteq`: equal-or-not without a data-dependent branch once lengths agree, for comparing MACs, tokens and pins where `==` times its answer.
+- **TURN REST credentials.** `crypto/turn_credential {user, ttl?}`
+  -> `{username, password, expires, uris?}`: the use-auth-secret
+  scheme, HMAC-SHA1 under a shared secret configured as
+  `connectors.crypto.turn` (`secret`/`secret_env`/`secret_file`,
+  `ttl`, `uris`). The secret is held raw -- the TURN server holds
+  the same bytes -- and still never reaches a guest. The host owns
+  the expiry the way `jwt_sign` owns `exp`, and the deployment's
+  `uris` are echoed verbatim so the reply is a complete ICE server
+  entry: where the TURN server lives is deployment data, not
+  program code.
+- **Named raw secrets for webhook verification.**
+  `connectors.crypto.secrets = { <name> = { secret | secret_env |
+  secret_file } }` (at most 8), selected per call as
+  `crypto/hmac {data, key=<name>}`. The derived subkey cannot
+  verify what a provider signed -- the peer holds specific bytes --
+  so these are raw, like TURN's. `expect=<hex>` (either case) turns
+  the call into a constant-time verification answering
+  `{valid=bool}`, the jwt_verify convention, so no guest writes the
+  comparison that leaks. Without `key`, nothing changes.
+- **`msgpack.null`, the value that encodes as nil.** A table cannot
+  hold nil, so an intentional null among positional values -- a
+  bound SQL NULL in a params array -- was a hole that changes the
+  table's shape. The sentinel is a value on the Lua side, msgpack
+  nil on the wire, JSON null in `json.encode`, and a named
+  permanent in snapshots, so `x == msgpack.null` still holds after
+  a wake. Decode never produces it: null -> nil stays.
+  `host.sql.NULL` re-exports it where a statement binder will look;
+  a nil param stays refused, because an accidental nil is still a
+  bug worth catching.
+- **`json.encode` honours `msgpack.as_array`/`as_map`, at any
+  depth.** The empty table was the encoder's one honest ambiguity
+  (`{}` is a valid array and a valid object; it says object), and
+  the msgpack encoder already owned the answer: one wrapper tag,
+  now honoured by both codecs. `{entries = msgpack.as_array({}),
+  total = 0}` encodes as `{"entries":[],"total":0}`. A non-empty
+  tagged array encodes exactly as it would untagged; a tag
+  contradicting the keys is an error, not a coercion.
+- `host.monotonic()`: monotonic milliseconds -- deliberately the same unit as `host.time()`. The epoch is the host process's own: good for intervals within a run (rate buckets, throttles, deadline loops), reset by a restart or a restore, never comparable to a persisted wall timestamp. Intervals here, records on `host.time()`. Granted as `host:time/monotonic`.
+
+### Changed
+
+- The listener's `headers` and `response_headers` allowlists take up to 16 names each (was 8) -- room for a CORS preflight set without a runtime release in the critical path. The refusal message now derives its number from the bound.
+- `json.encode` of an `msgpack.ext` wrapper now refuses by name. It previously encoded the wrapper's own internals (payload, kind, code) as a plain table, which was an accident of representation, not a contract; an ext has no JSON form.
+
+### Upgrading
+
+**Snapshots hibernated by 5.5.1_build10 or earlier do not restore
+on this build.** The `bytes` library grew C functions (`sha256`,
+`sha1`, `hmac_sha256`, `hmac_sha1`, `consteq`) and `msgpack` grew
+the `null` sentinel; new permanent names move the permanents
+fingerprint, and restore requires an exact match. A resident swarm
+upgrades by draining and restarting; a deployment whose root never
+hibernates is unaffected. The break was taken once, deliberately,
+at a release boundary, and every name that wanted it rode the same
+crossing -- bytecode is untouched (`LUAC_FORMAT` stays 0x46), so
+compiled chunks still load.
+
+
 ## [5.5.1_build10] - 2026-08-18
 
 `v5.5.1_build10` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
