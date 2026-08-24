@@ -293,8 +293,17 @@ static void a_guest_calls_time_and_reads_the_reply (void) {
     "local park = queue.declare('park', {capacity = 1})\n"
     "queue.push(calls, {tok = 7, call = 'time'})\n"
     "local _, m, why = queue.wait({replies}, 5000)\n"
+    "-- monotonic: same connector, same unit (ms), and it never runs\n"
+    "-- backwards between two asks\n"
+    "queue.push(calls, {tok = 8, call = 'time/monotonic'})\n"
+    "local _, m1 = queue.wait({replies}, 5000)\n"
+    "queue.push(calls, {tok = 9, call = 'time/monotonic'})\n"
+    "local _, m2 = queue.wait({replies}, 5000)\n"
+    "local mono_ok = m1 and m2 and m1.status == 'ok' and m2.status == 'ok'\n"
+    "  and type(m1.value) == 'number' and type(m2.value) == 'number'\n"
+    "  and m2.value >= m1.value\n"
     "if why == 'ok' and m.tok == 7 and m.status == 'ok'\n"
-    "   and type(m.value) == 'number' and m.value > 0 then\n"
+    "   and type(m.value) == 'number' and m.value > 0 and mono_ok then\n"
     "  queue.push(log, 'good')\n"
     "else\n"
     "  queue.push(log, 'bad: ' .. tostring(why) .. '/' ..\n"
@@ -306,7 +315,7 @@ static void a_guest_calls_time_and_reads_the_reply (void) {
     char cfgsrc[512];
     snprintf(cfgsrc, sizeof(cfgsrc),
              "return { supervisor = '%s/sup_time.lua',\n"
-             "  caps = { 'host:time' },\n"
+             "  caps = { 'host:time', 'host:time/monotonic' },\n"
              "  connectors = { time = true } }\n", tmpdir);
     fixture("time.host.lua", cfgsrc);
   }
@@ -321,7 +330,9 @@ static void a_guest_calls_time_and_reads_the_reply (void) {
     }
   }
   ok(run_until_log(&h, log, sizeof(log), 50) && strcmp(log, "good") == 0,
-     "a guest pushes {tok, call='time'} and reads back {tok, 'ok', a moment}");
+     "a guest pushes {tok, call='time'} and reads back {tok, 'ok', a "
+     "moment}, and time/monotonic answers in the same unit without running "
+     "backwards");
   if (log[0] != '\0' && strcmp(log, "good") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
@@ -938,6 +949,11 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
       "  args={data='abc', key='github',\n"
       "        expect='0'..string.sub('%s', 2)}}).value\n"
       "v[#v+1] = (ve2.valid == false)\n"
+      "-- providers spell hex in either case; expect must not care\n"
+      "local ve3 = ask({tok=18, call='crypto/hmac',\n"
+      "  args={data='abc', key='github',\n"
+      "        expect=string.upper('%s')}}).value\n"
+      "v[#v+1] = (ve3.valid == true)\n"
       "local nk = ask({tok=16, call='crypto/hmac',\n"
       "  args={data='abc', key='nope'}})\n"
       "v[#v+1] = (nk.status=='denied'\n"
@@ -954,7 +970,7 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
       "  queue.push(log, 'bad:'..table.concat(t,',')) end\n"
       "queue.wait({park})\n",
       SHA_ABC, HMAC_ABC, JWT_VALID, JWT_EXPIRED, JWT_WRONGKEY, JWT_RAWKEY,
-      GH_HMAC_ABC, GH_HMAC_ABC, GH_HMAC_ABC, HMAC_ABC);
+      GH_HMAC_ABC, GH_HMAC_ABC, GH_HMAC_ABC, GH_HMAC_ABC, HMAC_ABC);
     fixture("sup_crypto.lua", src);
   }
   {

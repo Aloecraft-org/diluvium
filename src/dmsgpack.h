@@ -36,6 +36,18 @@ LUAMOD_API int luaopen_dmsgpack (lua_State *L);
 ** 'encode' pushes one string; 'decode' pushes one value.
 */
 LUA_API void diluvium_msgpack_encode (lua_State *L, int idx);
+
+/*
+** The shape a msgpack.as_array/as_map wrapper declares for the value at
+** 'idx': one of the DILUVIUM_MP_SHAPE_* values, or 0 for anything that is
+** not a wrapper. Checked by metatable identity, so a lookalike table is 0.
+** The wrapped table itself sits at index 1 of the wrapper. Exported for
+** djson, so that one tag answers the empty-container question for both
+** codecs instead of each inventing its own.
+*/
+#define DILUVIUM_MP_SHAPE_ARRAY	1
+#define DILUVIUM_MP_SHAPE_MAP	2
+LUA_API int diluvium_msgpack_shapeof (lua_State *L, int idx);
 LUA_API void diluvium_msgpack_decode (lua_State *L, const char *s, size_t len);
 
 /*

@@ -317,7 +317,8 @@ static int cfg_hdr_names (lua_State *L, int idx, const char *key,
       }
       if (i >= DH_MAX_HDRS) {
         lua_pop(L, 2);
-        return cfg_fail(err, errcap, "%s lists more than 8 names%s", at, "");
+        return cfg_fail(err, errcap, "%s lists more than "
+                        DH_CFG_STR(DH_MAX_HDRS) " names%s", at, "");
       }
       s = lua_tolstring(L, -1, &slen);
       if (s == NULL || slen == 0 || slen >= DH_HDR_NAME_MAX) {
@@ -1828,14 +1829,25 @@ static dh_call_status conn_time (void *ud, dvs_id id, int64_t tok,
                                  size_t detailcap) {
   struct timespec ts;
   (void)ud; (void)id; (void)tok; (void)args; (void)argslen;
-  if (strcmp(call, "time") != 0) {
-    snprintf(detail, detailcap, "the time connector answers 'time' and "
-                                "nothing else; '%s' is not it", call);
-    return DH_CALL_ERROR;
+  if (strcmp(call, "time") == 0) {
+    clock_gettime(CLOCK_REALTIME, &ts);
+    dh_uint(value,
+            (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000);
+    return DH_CALL_OK;
   }
-  clock_gettime(CLOCK_REALTIME, &ts);
-  dh_uint(value, (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000);
-  return DH_CALL_OK;
+  /* Milliseconds, deliberately the same unit as 'time': two clocks in one
+     connector answering in different units would be a bug factory. The
+     epoch is this host process's own -- good for intervals within a run,
+     reset by a host restart or a restore, never comparable to a persisted
+     wall timestamp. Which is the point: intervals belong here, records
+     belong on 'time'. */
+  if (strcmp(call, "time/monotonic") == 0) {
+    dh_uint(value, (uint64_t)dh_now_ms());
+    return DH_CALL_OK;
+  }
+  snprintf(detail, detailcap, "the time connector answers 'time' and "
+                              "'time/monotonic'; '%s' is neither", call);
+  return DH_CALL_ERROR;
 }
 
 
@@ -1944,7 +1956,8 @@ int dh_host_open (dh_host *h, const dh_config *cfg, char *err, size_t errcap) {
      discovery cost the four connector files nothing; a connector that wants
      to say for itself uses dh_register_full and is left alone. */
   {
-    static const char *const CALLS_TIME[] = { "time", NULL };
+    static const char *const CALLS_TIME[] = { "time", "time/monotonic",
+                                              NULL };
     static const char *const CALLS_SQL[]  = { "sql/query", "sql/exec", NULL };
     static const char *const CALLS_FS[]   = { "fs/read", "fs/write", NULL };
     static const char *const CALLS_EXEC[] = { "exec/run", NULL };

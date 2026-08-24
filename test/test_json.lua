@@ -114,5 +114,49 @@ do
     ok(#back == 5000 and back[5000] == 10000, "a 5000-element array round-trips")
 end
 
+-- ---- msgpack shape wrappers ------------------------------------------------
+
+-- The empty table is the encoder's one ambiguity, and msgpack.as_array is the
+-- stated answer -- one tag, both codecs. The cases below are envelope-shaped
+-- on purpose: an empty array is almost never the top-level value, so the
+-- unwrap must happen wherever a value is encoded, not at the entry point.
+
+eq(json.encode(msgpack.as_array({})), "[]", "as_array({}) at the top level")
+eq(json.encode(msgpack.as_map({})), "{}", "as_map({}) at the top level")
+
+do  -- the envelope shape: an empty list beside its count
+    local out = json.encode({ entries = msgpack.as_array({}), total = 0 })
+    ok(string.find(out, '"entries":[]', 1, true) ~= nil,
+       "an empty tagged array inside an envelope encodes as [] (got " ..
+       out .. ")")
+    ok(string.find(out, '"total":0', 1, true) ~= nil,
+       "and the field beside it is untouched")
+end
+
+do  -- two levels down
+    local out = json.encode({ a = { b = msgpack.as_array({}) } })
+    ok(string.find(out, '"b":[]', 1, true) ~= nil,
+       "a tagged empty array two levels deep encodes as [] (got " .. out ..
+       ")")
+end
+
+eq(json.encode({ msgpack.as_array({}) }), "[[]]",
+   "a tagged empty array as an array element")
+
+-- A non-empty tagged array is the same array it would be untagged: the tag
+-- answers the empty question and changes nothing else.
+eq(json.encode(msgpack.as_array({1, 2, 3})), json.encode({1, 2, 3}),
+   "a non-empty tagged array equals its untagged encoding")
+eq(json.encode(msgpack.as_array({1, 2, 3})), "[1,2,3]",
+   "and that encoding is the array")
+
+-- A tag that contradicts the keys is an error, not a coercion.
+ok(pcall(json.encode, msgpack.as_array({ x = 1 })) == false,
+   "as_array over string keys refuses")
+ok(pcall(json.encode, {"a", msgpack.as_map({1, 2})}) == false,
+   "as_map over 1..n keys refuses, nested")
+ok(pcall(json.encode, msgpack.as_array(msgpack.as_map({}))) == false,
+   "a wrapper wrapping a wrapper refuses")
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then os.exit(1) end

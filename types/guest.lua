@@ -180,6 +180,13 @@ function bytes.urldecode(escaped) end
 ---@class diluvium.jsonlib
 json = {}
 
+---The empty table encodes as `{}` (a valid object and a valid array; the
+---encoder says object). A program that means `[]` wraps the table in
+---`msgpack.as_array` -- the same tag the msgpack encoder honours -- and
+---the tag is honoured at any depth: `{entries = msgpack.as_array({})}`
+---encodes as `{"entries":[]}`. A non-empty tagged array encodes exactly
+---as it would untagged; a tag contradicting the keys is an error.
+
 ---@param value any
 ---@return string text
 function json.encode(value) end
@@ -230,6 +237,15 @@ host = {}
 ---on the result is the pure `time` library's job.)
 ---@return integer ms
 function host.time() end
+
+---Monotonic milliseconds -- the same unit as `host.time()`, deliberately.
+---The epoch is the host process's own: good for intervals within a run
+---(rate buckets, throttles, deadlines), reset by a host restart or a
+---snapshot restore, and never comparable to a persisted wall timestamp.
+---Intervals here, records on `host.time()`. Granted as
+---`host:time/monotonic`.
+---@return integer ms
+function host.monotonic() end
 
 ---Any connector call by name: `host.call("sql/exec", {sql = ...})`. The
 ---typed wrappers below are this, spelled out; this form exists for a
@@ -417,9 +433,9 @@ function hostcrypto.hash(data) end
 ---HMAC-SHA256, as lowercase hex. Without options, under the host's derived
 ---key. `opts.key` selects a named raw secret from the deployment's
 ---`crypto.secrets` (webhook interop -- the peer holds the same bytes);
----`opts.expect` (hex) turns the call into a constant-time verification and
----the return into `{valid = boolean}` -- an answer, never a raise, the
----jwt_verify convention.
+---`opts.expect` (hex, either case) turns the call into a constant-time
+---verification and the return into `{valid = boolean}` -- an answer, never
+---a raise, the jwt_verify convention.
 ---@param data string
 ---@param opts {key: string?, expect: string?}?
 ---@return string|{valid: boolean}

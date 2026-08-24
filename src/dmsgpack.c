@@ -89,8 +89,8 @@ static const char MP_CURRENT = 0;       /* light userdata -> encode in progress 
 static const char MP_CURDEC = 0;        /* light userdata -> decode in progress */
 
 /* Wrapper kinds, stored at index 2 of a wrapper table. */
-#define MP_SHAPE_ARRAY	1
-#define MP_SHAPE_MAP	2
+#define MP_SHAPE_ARRAY	DILUVIUM_MP_SHAPE_ARRAY
+#define MP_SHAPE_MAP	DILUVIUM_MP_SHAPE_MAP
 #define MP_SHAPE_EXT	3
 
 
@@ -509,6 +509,10 @@ static int mp_shape_of (lua_State *L, int idx) {
   }
   lua_pop(L, 2);
   return kind;
+}
+
+LUA_API int diluvium_msgpack_shapeof (lua_State *L, int idx) {
+  return mp_shape_of(L, idx);
 }
 
 

@@ -78,7 +78,7 @@ int dh_nil (dh_buf *b);
 #define DH_SECRET_NAME_MAX 32
 #define DH_MAX_LISTENERS 8
 
-#define DH_MAX_HDRS      8
+#define DH_MAX_HDRS      16
 #define DH_HDR_NAME_MAX  64
 
 typedef struct dh_listener_cfg {

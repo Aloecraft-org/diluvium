@@ -14,6 +14,16 @@
 ** when its keys are all strings, an object when it is empty, and an error
 ** otherwise -- see 'json.encode' below.
 **
+** The empty table is the one honest ambiguity in that rule: {} is a valid
+** array and a valid object, and this encoder says object. A program that
+** means [] wraps the table in 'msgpack.as_array' -- the same tag the
+** msgpack encoder honours, deliberately, so both codecs speak one shape
+** vocabulary -- and the wrapper is honoured at ANY depth, because an empty
+** array is almost never the top-level value: it is a field inside an
+** envelope. A non-empty tagged array encodes exactly as it would untagged;
+** a tag that contradicts the keys (as_array over string keys, as_map over
+** 1..n) is an error, not a coercion.
+**
 ** Decode side, the inverse, with two things worth stating:
 **   null -> nil. In an array this leaves a hole, the same way a nil does in
 **     any Lua sequence; a program that must keep JSON null distinct from
@@ -37,6 +47,7 @@
 
 #include "lauxlib.h"
 #include "djson.h"
+#include "dmsgpack.h"
 
 /* Deep enough for any real document, bounded so a hostile one cannot recurse
    the C stack out from under the process before a Lua-level limit is reached.
@@ -149,9 +160,12 @@ static int table_shape (lua_State *L, int idx, lua_Integer *len) {
   return -1;
 }
 
+static int encode_table_body (lua_State *L, int idx, eb *b, int depth,
+                              int shape, lua_Integer len);
+
 static int encode_table (lua_State *L, int idx, eb *b, int depth) {
   lua_Integer len = 0;
-  int shape;
+  int shape, wrapped, rc;
   if (depth > JSON_MAX_DEPTH) {
     snprintf(b->err, sizeof(b->err),
              "nesting past %d levels, or a cycle", JSON_MAX_DEPTH);
@@ -161,13 +175,67 @@ static int encode_table (lua_State *L, int idx, eb *b, int depth) {
     snprintf(b->err, sizeof(b->err), "the value is too deep to walk");
     return -1;
   }
+  /* A msgpack shape wrapper names the answer to the empty-table question,
+     wherever it sits in the value. Unwrap, and hold the inner table to the
+     declared shape rather than guessing it. */
+  wrapped = diluvium_msgpack_shapeof(L, idx);
+  if (wrapped != 0) {
+    lua_rawgeti(L, lua_absindex(L, idx), 1);
+    idx = lua_gettop(L);
+    if (diluvium_msgpack_shapeof(L, idx) != 0) {
+      snprintf(b->err, sizeof(b->err),
+               "a shape wrapper wrapping another has no meaning");
+      lua_pop(L, 1);
+      return -1;
+    }
+    shape = table_shape(L, idx, &len);
+    if (wrapped == DILUVIUM_MP_SHAPE_ARRAY) {
+      if (shape == 0) {
+        /* shape 0 is "all keys are strings", vacuously true of the empty
+           table -- the case the tag exists for. Non-empty string keys
+           contradict the tag. */
+        lua_pushnil(L);
+        if (lua_next(L, idx) != 0) {
+          lua_pop(L, 2);
+          shape = -1;
+        }
+        else {
+          shape = 1;
+          len = 0;
+        }
+      }
+      if (shape != 1) {
+        snprintf(b->err, sizeof(b->err),
+                 "tagged as_array, but the keys are not exactly 1..n");
+        lua_pop(L, 1);
+        return -1;
+      }
+    }
+    else {                              /* as_map */
+      if (shape != 0) {
+        snprintf(b->err, sizeof(b->err),
+                 "tagged as_map, but the keys are not all strings");
+        lua_pop(L, 1);
+        return -1;
+      }
+    }
+    rc = encode_table_body(L, idx, b, depth, shape, len);
+    lua_pop(L, 1);
+    return rc;
+  }
   shape = table_shape(L, idx, &len);
   if (shape < 0) {
     snprintf(b->err, sizeof(b->err),
              "a table with mixed or non-string keys has no JSON form (keys "
-             "are neither exactly 1..n nor all strings)");
+             "are neither exactly 1..n nor all strings; an empty array is "
+             "spelled msgpack.as_array)");
     return -1;
   }
+  return encode_table_body(L, idx, b, depth, shape, len);
+}
+
+static int encode_table_body (lua_State *L, int idx, eb *b, int depth,
+                              int shape, lua_Integer len) {
   if (shape == 1) {                     /* array */
     lua_Integer i;
     if (eb_char(b, '[') != 0) return enc_oom(b);
