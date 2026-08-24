@@ -174,6 +174,11 @@ int64_t dh_now_ms (void) {
 ** its refusals are worded accordingly.
 ** ====================================================================== */
 
+/* Paste a #define'd bound into a cfg_fail format string at compile time:
+   cfg_fail takes two string args and nothing numeric. */
+#define DH_CFG_STR_(x) #x
+#define DH_CFG_STR(x) DH_CFG_STR_(x)
+
 static int cfg_fail (char *err, size_t cap, const char *fmt, const char *a,
                      const char *b) {
   if (err != NULL && cap > 0)
@@ -420,9 +425,13 @@ int dh_config_load (const char *path, dh_config *out, char *err,
   static const char *const exec_keys[] = { "max_timeout_ms",
                                            "max_output_bytes", NULL };
   static const char *const crypto_keys[] = { "key", "key_env", "key_file",
-                                             "default_ttl", "turn", NULL };
+                                             "default_ttl", "turn", "secrets",
+                                             NULL };
   static const char *const turn_keys[] = { "secret", "secret_env",
-                                           "secret_file", "ttl", NULL };
+                                           "secret_file", "ttl", "uris",
+                                           NULL };
+  static const char *const secret_keys[] = { "secret", "secret_env",
+                                             "secret_file", NULL };
   static const char *const listen_keys[] = {
     "port", "bind", "queue", "reply_queue", "max_body", "deadline_ms",
     "max_conns", "headers", "response_headers", NULL
@@ -844,6 +853,135 @@ int dh_config_load (const char *path, dh_config *out, char *err,
           lua_pop(L, 3); goto done;
         }
         out->crypto.turn_ttl = (long)n;
+        /* uris: echoed verbatim in every credential, so a guest can hand a
+           client a complete ICE server entry without knowing where the TURN
+           server lives. Deployment data, same as the secret. */
+        lua_getfield(L, -1, "uris");
+        if (!lua_isnil(L, -1)) {
+          lua_Integer un, ui;
+          if (!lua_istable(L, -1)) {
+            lua_pop(L, 4);
+            cfg_fail(err, errcap, "config.connectors.crypto.turn.uris must "
+                                  "be an array of strings%s%s", "", "");
+            goto done;
+          }
+          un = (lua_Integer)lua_rawlen(L, -1);
+          if (un < 1 || un > DH_MAX_TURN_URIS) {
+            lua_pop(L, 4);
+            cfg_fail(err, errcap, "config.connectors.crypto.turn.uris takes "
+                                  "1.." DH_CFG_STR(DH_MAX_TURN_URIS)
+                                  " entries%s%s", "", "");
+            goto done;
+          }
+          for (ui = 1; ui <= un; ui++) {
+            size_t ul;
+            const char *u;
+            lua_rawgeti(L, -1, ui);
+            u = (lua_type(L, -1) == LUA_TSTRING) ? lua_tolstring(L, -1, &ul)
+                                                 : NULL;
+            if (u == NULL || ul < 1 || ul >= DH_TURN_URI_MAX) {
+              lua_pop(L, 5);
+              cfg_fail(err, errcap, "config.connectors.crypto.turn.uris "
+                                    "entries must be strings under "
+                                    DH_CFG_STR(DH_TURN_URI_MAX)
+                                    " bytes%s%s", "", "");
+              goto done;
+            }
+            memcpy(out->crypto.turn_uris[out->crypto.turn_nuris], u, ul + 1);
+            out->crypto.turn_nuris++;
+            lua_pop(L, 1);
+          }
+        }
+        lua_pop(L, 1);
+      }
+      lua_pop(L, 1);
+      /* secrets = { <name> = { secret | secret_env | secret_file } }: named
+         raw secrets crypto/hmac can select with args.key, for MACs a peer
+         (a webhook sender) computes with the same bytes. */
+      lua_getfield(L, -1, "secrets");
+      if (!lua_isnil(L, -1)) {
+        if (!lua_istable(L, -1)) {
+          lua_pop(L, 3);
+          cfg_fail(err, errcap, "config.connectors.crypto.secrets must be a "
+                                "table of named entries%s%s", "", "");
+          goto done;
+        }
+        lua_pushnil(L);
+        while (lua_next(L, -2) != 0) {
+          /* stack: conn, crypto, secrets, name, entry */
+          size_t nl;
+          const char *nm;
+          struct dh_named_secret_cfg *sc;
+          int ssources = 0;
+          if (lua_type(L, -2) != LUA_TSTRING) {
+            lua_pop(L, 5);
+            cfg_fail(err, errcap, "config.connectors.crypto.secrets keys "
+                                  "must be names (strings)%s%s", "", "");
+            goto done;
+          }
+          nm = lua_tolstring(L, -2, &nl);
+          if (nl < 1 || nl >= DH_SECRET_NAME_MAX) {
+            cfg_fail(err, errcap, "config.connectors.crypto.secrets: the "
+                                  "name '%s' must be 1.."
+                                  DH_CFG_STR(DH_SECRET_NAME_MAX)
+                                  " bytes%s", nm, "");
+            lua_pop(L, 5);
+            goto done;
+          }
+          if (out->crypto.nsecrets >= DH_MAX_SECRETS) {
+            lua_pop(L, 5);
+            cfg_fail(err, errcap, "config.connectors.crypto.secrets takes "
+                                  "at most " DH_CFG_STR(DH_MAX_SECRETS)
+                                  " entries%s%s", "", "");
+            goto done;
+          }
+          if (!lua_istable(L, -1) ||
+              cfg_known_keys(L, -1, secret_keys,
+                             "config.connectors.crypto.secrets entry",
+                             err, errcap) != 0) {
+            if (!lua_istable(L, -1))
+              cfg_fail(err, errcap, "config.connectors.crypto.secrets.%s "
+                                    "must be a table%s", nm, "");
+            lua_pop(L, 5);
+            goto done;
+          }
+          sc = &out->crypto.secrets[out->crypto.nsecrets];
+          memcpy(sc->name, nm, nl + 1);
+          lua_getfield(L, -1, "secret");
+          if (lua_type(L, -1) == LUA_TSTRING) {
+            size_t kn;
+            const char *ks = lua_tolstring(L, -1, &kn);
+            if (kn > sizeof(sc->secret)) {
+              cfg_fail(err, errcap, "config.connectors.crypto.secrets.%s"
+                                    ".secret is too long%s", nm, "");
+              lua_pop(L, 6);
+              goto done;
+            }
+            memcpy(sc->secret, ks, kn);
+            sc->secretlen = kn;
+            ssources++;
+          }
+          lua_pop(L, 1);
+          if (cfg_str(L, -1, "secret_env", sc->secret_env,
+                      sizeof(sc->secret_env), 0,
+                      "config.connectors.crypto.secrets entry",
+                      err, errcap) != 0) { lua_pop(L, 5); goto done; }
+          if (sc->secret_env[0] != '\0') ssources++;
+          if (cfg_str(L, -1, "secret_file", sc->secret_file,
+                      sizeof(sc->secret_file), 0,
+                      "config.connectors.crypto.secrets entry",
+                      err, errcap) != 0) { lua_pop(L, 5); goto done; }
+          if (sc->secret_file[0] != '\0') ssources++;
+          if (ssources != 1) {
+            cfg_fail(err, errcap, "config.connectors.crypto.secrets.%s "
+                                  "needs exactly one of secret_file, "
+                                  "secret_env or secret%s", nm, "");
+            lua_pop(L, 5);
+            goto done;
+          }
+          out->crypto.nsecrets++;
+          lua_pop(L, 1);              /* the entry; the name drives lua_next */
+        }
       }
       lua_pop(L, 1);
     }

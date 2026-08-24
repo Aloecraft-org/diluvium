@@ -59,8 +59,11 @@ return {
       key_file = "signing.key",  -- the deployment shape; the key never
                                  -- enters a guest
       default_ttl = 3600,
-      -- turn = { secret_env = "TURN_SECRET" },  -- coturn's use-auth-secret;
+      -- turn = { secret_env = "TURN_SECRET",    -- coturn's use-auth-secret;
+      --          uris = { "turn:turn.example.org:3478" } },
       --                            wires crypto/turn_credential
+      -- secrets = { github = { secret_env = "GH_WEBHOOK_SECRET" } },
+      --                            named keys for crypto/hmac verification
     },
     fs = {
       scope = "data",            -- files, under the same discipline as sql

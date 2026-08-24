@@ -72,6 +72,10 @@ int dh_nil (dh_buf *b);
 #define DH_NAME_MAX      128
 #define DH_PATH_MAX      512
 #define CRYPTO_KEY_INLINE 256
+#define DH_MAX_TURN_URIS   8
+#define DH_TURN_URI_MAX  160
+#define DH_MAX_SECRETS     8
+#define DH_SECRET_NAME_MAX 32
 #define DH_MAX_LISTENERS 8
 
 #define DH_MAX_HDRS      8
@@ -120,6 +124,21 @@ typedef struct dh_crypto_cfg {
   char turn_secret_env[DH_NAME_MAX];    /* env var holding the secret */
   char turn_secret_file[DH_PATH_MAX];   /* file holding the secret */
   long turn_ttl;                        /* credential ttl when a call omits it */
+  char turn_uris[DH_MAX_TURN_URIS][DH_TURN_URI_MAX];  /* echoed verbatim in
+                                           turn_credential replies: where the
+                                           TURN server lives is deployment
+                                           data, not program code */
+  int turn_nuris;
+  /* connectors.crypto.secrets: named raw secrets for crypto/hmac interop
+     (webhook verification), each the same three-source shape. */
+  struct dh_named_secret_cfg {
+    char name[DH_SECRET_NAME_MAX];
+    char secret[CRYPTO_KEY_INLINE];     /* inline (dev); "" if unset */
+    size_t secretlen;
+    char secret_env[DH_NAME_MAX];
+    char secret_file[DH_PATH_MAX];
+  } secrets[DH_MAX_SECRETS];
+  int nsecrets;
 } dh_crypto_cfg;
 
 typedef struct dh_fs_cfg {

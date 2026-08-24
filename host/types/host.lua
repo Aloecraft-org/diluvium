@@ -186,6 +186,16 @@
 ---                                   # (seconds; default 3600)
 ---@field turn diluvium.HostCryptoTurn?  # TURN REST credentials; without it
 ---                                   # crypto/turn_credential is refused
+---@field secrets table<string, diluvium.HostCryptoSecret>?  # named raw
+---                                   # secrets crypto/hmac selects with
+---                                   # args.key (webhook interop); at most 8
+
+---One named raw secret. Raw because the peer (a webhook sender) computes
+---the same MAC with the same bytes; still never handed to a guest.
+---@class diluvium.HostCryptoSecret
+---@field secret string?              # inline (dev only); >= 16 bytes
+---@field secret_env string?          # name of an env var holding it
+---@field secret_file string?         # path to a file holding it
 
 ---The TURN REST shared secret (coturn's use-auth-secret). Kept raw rather
 ---than derived -- the TURN server holds the same bytes and recomputes the
@@ -198,3 +208,6 @@
 ---@field secret_file string?         # path to a file holding the secret
 ---@field ttl integer?                # credential ttl when a call omits it
 ---                                   # (seconds; default 86400)
+---@field uris string[]?              # TURN server URIs echoed verbatim in
+---                                   # every credential (at most 8), e.g.
+---                                   # "turn:turn.example.org:3478?transport=udp"

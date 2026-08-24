@@ -130,5 +130,67 @@ eq(bytes.tohex(bytes.frombase64url(bytes.tobase64url(raw))),
    "00112233445566778899aabbccddeeff",
    "and back to the hex a guest would print")
 
+-- ---- digests -------------------------------------------------------------
+
+-- Known vectors again, same reasoning as the codecs: a digest wrong in a
+-- self-consistent way round-trips fine, so everything here is FIPS 180-4,
+-- RFC 2202/4231, or RFC 6238, not this implementation's own output.
+
+eq(bytes.tohex(bytes.sha256("abc")),
+   "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+   "sha256 of 'abc' (FIPS 180-4)")
+eq(bytes.tohex(bytes.sha256("")),
+   "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "sha256 of ''")
+eq(bytes.tohex(bytes.sha1("abc")),
+   "a9993e364706816aba3e25717850c26c9cd0d89d",
+   "sha1 of 'abc' (FIPS 180-4)")
+eq(bytes.tohex(bytes.sha1("")),
+   "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+   "sha1 of ''")
+
+-- RFC 2202 case 2 (short key) and case 3 (0xaa*20 key, 0xdd*50 data, which
+-- crosses the one-block boundary); RFC 4231 case 2 for the sha256 side.
+eq(bytes.tohex(bytes.hmac_sha1("Jefe", "what do ya want for nothing?")),
+   "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79",
+   "hmac_sha1 RFC 2202 case 2")
+eq(bytes.tohex(bytes.hmac_sha1(string.rep("\xaa", 20),
+                               string.rep("\xdd", 50))),
+   "125d7342b9ac11cd91a39af48aa17b4f63f175d3",
+   "hmac_sha1 RFC 2202 case 3")
+eq(bytes.tohex(bytes.hmac_sha256("Jefe", "what do ya want for nothing?")),
+   "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+   "hmac_sha256 RFC 4231 case 2")
+-- A key past the 64-byte block is hashed down first (RFC 4231 case 6).
+eq(bytes.tohex(bytes.hmac_sha256(string.rep("\xaa", 131),
+   "Test Using Larger Than Block-Size Key - Hash Key First")),
+   "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54",
+   "hmac_sha256 RFC 4231 case 6 (key longer than a block)")
+
+-- The composition these exist for: RFC 6238's own test vector, computed the
+-- way a guest program would. TOTP-SHA1, T=59s, 30s step, ASCII key
+-- '12345678901234567890' -> 94287082.
+do
+    local counter = string.pack(">I8", 59 // 30)
+    local mac = bytes.hmac_sha1("12345678901234567890", counter)
+    local off = (mac:byte(20) & 0x0f) + 1
+    local code = ((mac:byte(off) & 0x7f) << 24)
+               | (mac:byte(off + 1) << 16)
+               | (mac:byte(off + 2) << 8)
+               |  mac:byte(off + 3)
+    eq(string.format("%08d", code % 100000000), "94287082",
+       "TOTP over hmac_sha1 reproduces the RFC 6238 vector")
+end
+
+-- ---- consteq ---------------------------------------------------------------
+
+ok(bytes.consteq("", "") == true, "consteq: two empties are equal")
+ok(bytes.consteq("secret", "secret") == true, "consteq: equal strings")
+ok(bytes.consteq("secret", "secreT") == false, "consteq: one byte off")
+ok(bytes.consteq("secret", "secre") == false, "consteq: length mismatch")
+ok(bytes.consteq("\0\1\2", "\0\1\2") == true, "consteq: NUL-safe")
+ok(bytes.consteq(bytes.sha256("a"), bytes.sha256("a")) == true,
+   "consteq composes with a raw digest")
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then os.exit(1) end

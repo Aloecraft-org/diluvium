@@ -9,7 +9,10 @@
 **
 **   crypto/random   {bytes=N}                 -> N CSPRNG bytes, as hex
 **   crypto/hash     {data=str}                -> lowercase hex of SHA-256
-**   crypto/hmac     {data=str}                -> hex of HMAC-SHA256(key, data)
+**   crypto/hmac     {data=str, key=name?, expect=hex?}
+**                   -> hex of HMAC-SHA256; with 'key', under the raw secret
+**                      config names (crypto.secrets, webhook interop); with
+**                      'expect', a constant-time verdict {valid=bool} instead
 **   crypto/jwt_sign {claims=map, ttl=seconds} -> a JWT-HS256 string
 **   crypto/jwt_verify {token=str}             -> {valid, claims?, reason?}
 **   crypto/turn_credential {user=str, ttl=s}  -> {username, password, expires}
@@ -90,6 +93,16 @@ typedef struct dh_crypto {
   unsigned char turn_secret[CRYPTO_KEY_MAX];
   size_t turn_secretlen;
   long turn_ttl;
+  char turn_uris[DH_MAX_TURN_URIS][DH_TURN_URI_MAX];
+  int turn_nuris;
+  /* Named raw secrets for crypto/hmac interop: each is some peer's shared
+     secret (a webhook sender's), so raw for the same reason as TURN's. */
+  struct {
+    char name[DH_SECRET_NAME_MAX];
+    unsigned char secret[CRYPTO_KEY_MAX];
+    size_t len;
+  } secrets[DH_MAX_SECRETS];
+  int nsecrets;
 } dh_crypto;
 
 
@@ -225,6 +238,30 @@ static void to_hex (const unsigned char *in, size_t n, char *out) {
     out[2 * i + 1] = HEX[in[i] & 0xf];
   }
   out[2 * n] = '\0';
+}
+
+
+/* Decode lowercase-or-uppercase hex into 'out'. Returns the byte length,
+   or -1 on an odd length, a non-digit, or more than 'cap' bytes. */
+static int from_hex (const char *in, size_t inlen,
+                     unsigned char *out, size_t cap) {
+  size_t i;
+  if (inlen % 2 != 0 || inlen / 2 > cap)
+    return -1;
+  for (i = 0; i < inlen; i += 2) {
+    int hi, lo;
+    char a = in[i], b = in[i + 1];
+    hi = (a >= '0' && a <= '9') ? a - '0' :
+         (a >= 'a' && a <= 'f') ? a - 'a' + 10 :
+         (a >= 'A' && a <= 'F') ? a - 'A' + 10 : -1;
+    lo = (b >= '0' && b <= '9') ? b - '0' :
+         (b >= 'a' && b <= 'f') ? b - 'a' + 10 :
+         (b >= 'A' && b <= 'F') ? b - 'A' + 10 : -1;
+    if (hi < 0 || lo < 0)
+      return -1;
+    out[i / 2] = (unsigned char)(hi << 4 | lo);
+  }
+  return (int)(inlen / 2);
 }
 
 
@@ -758,13 +795,70 @@ static dh_call_status do_hmac (dh_crypto *k, dh_buf *value,
   diluvium_mp_token t;
   unsigned char mac[DILUVIUM_SHA256_SIZE];
   char hex[DILUVIUM_SHA256_HEX];
+  const unsigned char *key = k->k_hmac;
+  size_t keylen = sizeof(k->k_hmac);
   if (!arg_map(args, argslen, "data", &c) || !diluvium_mp_read(&c, &t) ||
       t.kind != DILUVIUM_MP_STR) {
     snprintf(detail, dcap, "crypto/hmac: args.data must be a string");
     return DH_CALL_ERROR;
   }
-  hmac_sha256(k->k_hmac, sizeof(k->k_hmac), (const unsigned char *)t.p, t.len,
-              mac);
+  /* args.key names a configured raw secret (crypto.secrets), for MACs a
+     peer computes with the same bytes -- a webhook signature. Absent, the
+     derived subkey signs, as it always has. */
+  {
+    diluvium_mp_cursor kc;
+    diluvium_mp_token kt;
+    if (arg_map(args, argslen, "key", &kc)) {
+      int i, found = 0;
+      if (!diluvium_mp_read(&kc, &kt) || kt.kind != DILUVIUM_MP_STR) {
+        snprintf(detail, dcap, "crypto/hmac: args.key must be a string "
+                               "naming a configured secret");
+        return DH_CALL_ERROR;
+      }
+      for (i = 0; i < k->nsecrets; i++) {
+        if (strlen(k->secrets[i].name) == kt.len &&
+            memcmp(k->secrets[i].name, kt.p, kt.len) == 0) {
+          key = k->secrets[i].secret;
+          keylen = k->secrets[i].len;
+          found = 1;
+          break;
+        }
+      }
+      if (!found) {
+        snprintf(detail, dcap, "this deployment configures no secret named "
+                               "'%.*s' (config.connectors.crypto.secrets)",
+                 (int)(kt.len > 64 ? 64 : kt.len), (const char *)kt.p);
+        return DH_CALL_DENIED;
+      }
+    }
+  }
+  hmac_sha256(key, keylen, (const unsigned char *)t.p, t.len, mac);
+  /* args.expect (hex) turns the call into a verification: the compare runs
+     here, constant-time, so no guest ever writes the '==' that leaks. The
+     answer is an answer -- {valid=false} arrives with status ok, the
+     jwt_verify convention. */
+  {
+    diluvium_mp_cursor ec;
+    diluvium_mp_token et;
+    if (arg_map(args, argslen, "expect", &ec)) {
+      unsigned char want[DILUVIUM_SHA256_SIZE];
+      if (!diluvium_mp_read(&ec, &et) || et.kind != DILUVIUM_MP_STR) {
+        snprintf(detail, dcap, "crypto/hmac: args.expect must be a hex "
+                               "string");
+        return DH_CALL_ERROR;
+      }
+      if (from_hex((const char *)et.p, et.len, want, sizeof(want)) !=
+          DILUVIUM_SHA256_SIZE) {
+        snprintf(detail, dcap, "crypto/hmac: args.expect must be %d hex "
+                               "digits", DILUVIUM_SHA256_SIZE * 2);
+        return DH_CALL_ERROR;
+      }
+      dh_map(value, 1);
+      dh_str(value, "valid");
+      dh_bool(value, ct_equal(mac, want, DILUVIUM_SHA256_SIZE));
+      return DH_CALL_OK;
+    }
+  }
   to_hex(mac, DILUVIUM_SHA256_SIZE, hex);
   dh_str(value, hex);
   return DH_CALL_OK;
@@ -822,10 +916,19 @@ static dh_call_status do_turn_credential (dh_crypto *k, dh_buf *value,
     snprintf(detail, dcap, "crypto/turn_credential: internal encode error");
     return DH_CALL_ERROR;
   }
-  dh_map(value, 3);
+  dh_map(value, (k->turn_nuris > 0) ? 4 : 3);
   dh_str(value, "username"); dh_str(value, username);
   dh_str(value, "password"); dh_str(value, password);
   dh_str(value, "expires");  dh_int(value, expires);
+  if (k->turn_nuris > 0) {
+    /* The deployment's own list, verbatim: with it the reply is a complete
+       ICE server entry, and no program hard-codes where coturn lives. */
+    int i;
+    dh_str(value, "uris");
+    dh_array(value, (unsigned)k->turn_nuris);
+    for (i = 0; i < k->turn_nuris; i++)
+      dh_str(value, k->turn_uris[i]);
+  }
   memset(mac, 0, sizeof(mac));
   return DH_CALL_OK;
 }
@@ -1160,6 +1263,32 @@ int dh_crypto_open (dh_host *h, char *err, size_t errcap) {
       return -1;
     }
     k->turn_ttl = cfg->turn_ttl;
+    memcpy(k->turn_uris, cfg->turn_uris, sizeof(k->turn_uris));
+    k->turn_nuris = cfg->turn_nuris;
+  }
+  {
+    int i;
+    for (i = 0; i < cfg->nsecrets; i++) {
+      const struct dh_named_secret_cfg *sc = &cfg->secrets[i];
+      memcpy(k->secrets[i].name, sc->name, sizeof(k->secrets[i].name));
+      if (load_secret(sc->secret_file, sc->secret_env,
+                      sc->secret, sc->secretlen,
+                      "secrets secret_file", "secrets secret_env",
+                      k->secrets[i].secret, sizeof(k->secrets[i].secret),
+                      &k->secrets[i].len, err, errcap) != 0) {
+        memset(k, 0, sizeof(*k));
+        free(k);
+        return -1;
+      }
+      if (k->secrets[i].len < 16) {
+        snprintf(err, errcap, "crypto: the secret named '%s' is missing or "
+                              "shorter than 16 bytes", sc->name);
+        memset(k, 0, sizeof(*k));
+        free(k);
+        return -1;
+      }
+    }
+    k->nsecrets = cfg->nsecrets;
   }
   if (dh_register(h, "crypto", conn_crypto, k) != 0) {
     snprintf(err, errcap, "could not register the crypto connector");
@@ -1180,6 +1309,14 @@ void dh_crypto_close (dh_host *h) {
   h->cfg.crypto.keylen = 0;
   memset(h->cfg.crypto.turn_secret, 0, sizeof(h->cfg.crypto.turn_secret));
   h->cfg.crypto.turn_secretlen = 0;
+  {
+    int i;
+    for (i = 0; i < h->cfg.crypto.nsecrets; i++) {
+      memset(h->cfg.crypto.secrets[i].secret, 0,
+             sizeof(h->cfg.crypto.secrets[i].secret));
+      h->cfg.crypto.secrets[i].secretlen = 0;
+    }
+  }
   if (k == NULL)
     return;
   memset(k, 0, sizeof(*k));

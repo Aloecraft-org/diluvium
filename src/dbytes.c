@@ -3,7 +3,7 @@
 ** The 'bytes' guest library. See dbytes.h for why it is a library and not a
 ** hostcall.
 **
-** Six functions, three pairs:
+** The codec pairs:
 **
 **   bytes.tohex(s)         -> lowercase hex
 **   bytes.fromhex(s)       -> the bytes, refusing an odd length or a non-digit
@@ -11,6 +11,24 @@
 **   bytes.frombase64(s)    -> the bytes
 **   bytes.tobase64url(s)   -> base64url, unpadded (the JWT/URL alphabet)
 **   bytes.frombase64url(s) -> the bytes
+**
+** The digests, raw bytes in and raw bytes out (compose with the codecs):
+**
+**   bytes.sha256(s)          -> 32 bytes
+**   bytes.sha1(s)            -> 20 bytes; interop only, see dhash.h
+**   bytes.hmac_sha256(k, s)  -> 32 bytes
+**   bytes.hmac_sha1(k, s)    -> 20 bytes
+**   bytes.consteq(a, b)      -> boolean, compared without a data-dependent
+**                               branch once lengths agree
+**
+** These are here and not in the crypto connector because their key -- when
+** they have one -- is the caller's: a per-user TOTP secret out of the
+** program's own database, a content hash with no key at all. The connector's
+** premise is a key the host holds and a guest must never see; a guest-held
+** key gains nothing from a round-trip, and costs the log a copy of it. Raw
+** bytes out, unlike the connector's hex, because composition is the point:
+** TOTP truncates the raw MAC, a TURN password base64s it, a webhook check
+** hexes it -- the program picks the codec it needs.
 **
 ** All operate on byte strings, because a Lua string already is one. The
 ** decoders are strict about the alphabet -- a character outside it is an error
@@ -30,11 +48,13 @@
 #include "lprefix.h"
 
 #include <stddef.h>
+#include <string.h>
 
 #include "lua.h"
 
 #include "lauxlib.h"
 #include "dbytes.h"
+#include "dhash.h"
 
 
 /* ---- hex ------------------------------------------------------------- */
@@ -252,6 +272,122 @@ static int b_urldecode (lua_State *L) {
 }
 
 
+/* ---- digests --------------------------------------------------------- */
+
+static int b_sha256 (lua_State *L) {
+  size_t n;
+  const char *s = luaL_checklstring(L, 1, &n);
+  unsigned char d[DILUVIUM_SHA256_SIZE];
+  diluvium_sha256(s, n, d);
+  lua_pushlstring(L, (const char *)d, sizeof(d));
+  return 1;
+}
+
+static int b_sha1 (lua_State *L) {
+  size_t n;
+  const char *s = luaL_checklstring(L, 1, &n);
+  unsigned char d[DILUVIUM_SHA1_SIZE];
+  diluvium_sha1(s, n, d);
+  lua_pushlstring(L, (const char *)d, sizeof(d));
+  return 1;
+}
+
+/*
+** HMAC (RFC 2104) over either digest; both have a 64-byte block, so one
+** skeleton parameterised by the three hash calls serves both. The host's
+** connector carries its own copy (host/dhost_crypto.c) rather than calling
+** this one, because this file is a guest library and that one must build
+** with no Lua state in sight.
+*/
+static void b_hmac (int sha1, const unsigned char *key, size_t keylen,
+                    const unsigned char *msg, size_t msglen,
+                    unsigned char *out) {
+  unsigned char k[64], ipad[64], opad[64];
+  unsigned char inner[DILUVIUM_SHA256_SIZE];    /* fits either digest */
+  size_t dlen = sha1 ? DILUVIUM_SHA1_SIZE : DILUVIUM_SHA256_SIZE;
+  size_t i;
+  memset(k, 0, sizeof(k));
+  if (keylen > 64) {
+    if (sha1) diluvium_sha1(key, keylen, k);
+    else diluvium_sha256(key, keylen, k);
+  }
+  else
+    memcpy(k, key, keylen);
+  for (i = 0; i < 64; i++) {
+    ipad[i] = k[i] ^ 0x36;
+    opad[i] = k[i] ^ 0x5c;
+  }
+  if (sha1) {
+    diluvium_sha1_ctx c;
+    diluvium_sha1_init(&c);
+    diluvium_sha1_update(&c, ipad, 64);
+    diluvium_sha1_update(&c, msg, msglen);
+    diluvium_sha1_final(&c, inner);
+    diluvium_sha1_init(&c);
+    diluvium_sha1_update(&c, opad, 64);
+    diluvium_sha1_update(&c, inner, dlen);
+    diluvium_sha1_final(&c, out);
+  }
+  else {
+    diluvium_sha256_ctx c;
+    diluvium_sha256_init(&c);
+    diluvium_sha256_update(&c, ipad, 64);
+    diluvium_sha256_update(&c, msg, msglen);
+    diluvium_sha256_final(&c, inner);
+    diluvium_sha256_init(&c);
+    diluvium_sha256_update(&c, opad, 64);
+    diluvium_sha256_update(&c, inner, dlen);
+    diluvium_sha256_final(&c, out);
+  }
+  memset(k, 0, sizeof(k));
+  memset(ipad, 0, sizeof(ipad));
+  memset(opad, 0, sizeof(opad));
+}
+
+static int b_hmac_sha256 (lua_State *L) {
+  size_t kn, mn;
+  const char *key = luaL_checklstring(L, 1, &kn);
+  const char *msg = luaL_checklstring(L, 2, &mn);
+  unsigned char mac[DILUVIUM_SHA256_SIZE];
+  b_hmac(0, (const unsigned char *)key, kn,
+         (const unsigned char *)msg, mn, mac);
+  lua_pushlstring(L, (const char *)mac, sizeof(mac));
+  return 1;
+}
+
+static int b_hmac_sha1 (lua_State *L) {
+  size_t kn, mn;
+  const char *key = luaL_checklstring(L, 1, &kn);
+  const char *msg = luaL_checklstring(L, 2, &mn);
+  unsigned char mac[DILUVIUM_SHA1_SIZE];
+  b_hmac(1, (const unsigned char *)key, kn,
+         (const unsigned char *)msg, mn, mac);
+  lua_pushlstring(L, (const char *)mac, sizeof(mac));
+  return 1;
+}
+
+/*
+** Equal-or-not without a data-dependent branch once the lengths agree.
+** Lengths are not treated as secret (a MAC's length is public), so a
+** mismatch returns early. For comparing MACs, tokens and pins, where Lua's
+** '==' would stop at the first differing byte and time the answer.
+*/
+static int b_consteq (lua_State *L) {
+  size_t an, bn, i;
+  const char *a = luaL_checklstring(L, 1, &an);
+  const char *b = luaL_checklstring(L, 2, &bn);
+  unsigned char diff = 0;
+  if (an != bn) {
+    lua_pushboolean(L, 0);
+    return 1;
+  }
+  for (i = 0; i < an; i++)
+    diff |= (unsigned char)((unsigned char)a[i] ^ (unsigned char)b[i]);
+  lua_pushboolean(L, diff == 0);
+  return 1;
+}
+
+
 /* ---- registration ---------------------------------------------------- */
 
 static const luaL_Reg bytes_lib[] = {
@@ -263,6 +399,11 @@ static const luaL_Reg bytes_lib[] = {
   {"frombase64url", b_frombase64url},
   {"urlencode",     b_urlencode},
   {"urldecode",     b_urldecode},
+  {"sha256",        b_sha256},
+  {"sha1",          b_sha1},
+  {"hmac_sha256",   b_hmac_sha256},
+  {"hmac_sha1",     b_hmac_sha1},
+  {"consteq",       b_consteq},
   {NULL, NULL}
 };
 

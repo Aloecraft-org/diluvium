@@ -856,6 +856,11 @@ static void exec_is_bounded_and_shell_free (void) {
 ** JWT_WRONGKEY is signed with an unrelated key, so it must fail on signature.
 */
 #define KEY_STR "test-signing-key-at-least-16-bytes-long"
+/* crypto.secrets entry: RAW, unlike the master. python:
+   hmac.new(b"github-webhook-secret-0123456789", b"abc", sha256) */
+#define GH_SECRET "github-webhook-secret-0123456789"
+#define GH_HMAC_ABC \
+  "92a180fcab02e16b1febcf591107918c632d989a75dd4a4a64158b8c4a60431c"
 #define SHA_ABC "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
 #define HMAC_ABC "cafdbc2f03808a8615e9f159cdb630c498bd8b637d0ca1ecf14ad1d280d1c942"
 #define JWT_VALID "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJib2IiLCJyb2xlIjoidXNlciIsImlhdCI6MTAwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwfQ.eys7cRcxPhiyFeD-vCiCRK6hAO-C603ji9_zhpragYw"
@@ -872,7 +877,7 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
   dh_host h;
   char err[512], line[512];
   {
-    char src[4200];
+    char src[5600];
     snprintf(src, sizeof(src),
       "local calls = queue.declare('host/calls', {capacity=16, exported=true})\n"
       "local replies = queue.declare('host/replies', {capacity=16})\n"
@@ -919,6 +924,28 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
       "  args={user='alice'}})\n"
       "v[#v+1] = (tc.status=='denied'\n"
       "  and string.find(tc.detail, 'connectors.crypto.turn', 1, true) ~= nil)\n"
+      "-- a named secret signs with its RAW bytes (the Python constant is\n"
+      "-- keyed by the configured secret itself, underived), an expect that\n"
+      "-- matches answers valid, a corrupted one answers invalid without a\n"
+      "-- raise, and an unknown name is denied naming the config knob\n"
+      "local nh = ask({tok=13, call='crypto/hmac',\n"
+      "  args={data='abc', key='github'}}).value\n"
+      "v[#v+1] = (nh == '%s')\n"
+      "local ve1 = ask({tok=14, call='crypto/hmac',\n"
+      "  args={data='abc', key='github', expect='%s'}}).value\n"
+      "v[#v+1] = (ve1.valid == true)\n"
+      "local ve2 = ask({tok=15, call='crypto/hmac',\n"
+      "  args={data='abc', key='github',\n"
+      "        expect='0'..string.sub('%s', 2)}}).value\n"
+      "v[#v+1] = (ve2.valid == false)\n"
+      "local nk = ask({tok=16, call='crypto/hmac',\n"
+      "  args={data='abc', key='nope'}})\n"
+      "v[#v+1] = (nk.status=='denied'\n"
+      "  and string.find(nk.detail, 'connectors.crypto.secrets', 1, true)\n"
+      "      ~= nil)\n"
+      "-- and the derived-key default is untouched by the secrets block\n"
+      "v[#v+1] = (ask({tok=17, call='crypto/hmac',\n"
+      "  args={data='abc'}}).value == '%s')\n"
       "queue.push(log, 'TOKEN:' .. tok)\n"
       "local good = true\n"
       "for i=1,#v do if not v[i] then good=false end end\n"
@@ -926,16 +953,18 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
       "  local t={} for i=1,#v do t[i]=tostring(v[i]) end\n"
       "  queue.push(log, 'bad:'..table.concat(t,',')) end\n"
       "queue.wait({park})\n",
-      SHA_ABC, HMAC_ABC, JWT_VALID, JWT_EXPIRED, JWT_WRONGKEY, JWT_RAWKEY);
+      SHA_ABC, HMAC_ABC, JWT_VALID, JWT_EXPIRED, JWT_WRONGKEY, JWT_RAWKEY,
+      GH_HMAC_ABC, GH_HMAC_ABC, GH_HMAC_ABC, HMAC_ABC);
     fixture("sup_crypto.lua", src);
   }
   {
-    char cfgsrc[640];
+    char cfgsrc[800];
     snprintf(cfgsrc, sizeof(cfgsrc),
              "return { supervisor = '%s/sup_crypto.lua',\n"
              "  caps = { 'host:crypto/*' },\n"
-             "  connectors = { crypto = { key = '%s', default_ttl = 3600 } }\n"
-             "}\n", tmpdir, KEY_STR);
+             "  connectors = { crypto = { key = '%s', default_ttl = 3600,\n"
+             "    secrets = { github = { secret = '%s' } } } }\n"
+             "}\n", tmpdir, KEY_STR, GH_SECRET);
     fixture("crypto.host.lua", cfgsrc);
   }
   {
@@ -964,8 +993,10 @@ static void crypto_signs_and_verifies_standard_jwts (void) {
     ok(got && strcmp(line, "good") == 0,
        "hash and hmac match a reference impl, random is fresh hex, a signed "
        "token round-trips, tampering and a wrong key and an expired token "
-       "are each refused by reason, a Python-minted token verifies, and "
-       "turn_credential without a turn block is denied by config name");
+       "are each refused by reason, a Python-minted token verifies, "
+       "turn_credential without a turn block is denied by config name, a "
+       "named secret signs raw and verifies constant-time, and an unknown "
+       "name is denied");
     if (got && strcmp(line, "good") != 0)
       printf("      (guest said: %s)\n", line);
   }
@@ -1059,6 +1090,11 @@ static void turn_credentials_match_coturn (void) {
     "  args={user='alice', ttl=600}}).value\n"
     "v[#v+1] = (type(r)=='table' and type(r.username)=='string'\n"
     "  and type(r.password)=='string' and type(r.expires)=='number')\n"
+    "-- the deployment's uris arrive verbatim, in order: the reply is a\n"
+    "-- complete ICE server entry\n"
+    "v[#v+1] = (type(r.uris)=='table' and #r.uris==2\n"
+    "  and r.uris[1]=='turn:t.example.org:3478?transport=udp'\n"
+    "  and r.uris[2]=='turns:t.example.org:5349')\n"
     "local good = true\n"
     "for i=1,#v do if not v[i] then good=false end end\n"
     "if good then\n"
@@ -1075,7 +1111,9 @@ static void turn_credentials_match_coturn (void) {
              "return { supervisor = '%s/sup_turn.lua',\n"
              "  caps = { 'host:crypto/*' },\n"
              "  connectors = { crypto = { key = '%s',\n"
-             "    turn = { secret = '%s', ttl = 86400 } } }\n"
+             "    turn = { secret = '%s', ttl = 86400,\n"
+             "      uris = { 'turn:t.example.org:3478?transport=udp',\n"
+             "               'turns:t.example.org:5349' } } } }\n"
              "}\n", tmpdir, KEY_STR, TURN_SECRET);
     fixture("turn.host.lua", cfgsrc);
   }

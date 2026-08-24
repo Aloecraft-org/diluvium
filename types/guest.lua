@@ -414,10 +414,16 @@ local hostcrypto = {}
 ---@return string hex
 function hostcrypto.hash(data) end
 
----HMAC-SHA256 under the host's derived key, as lowercase hex.
+---HMAC-SHA256, as lowercase hex. Without options, under the host's derived
+---key. `opts.key` selects a named raw secret from the deployment's
+---`crypto.secrets` (webhook interop -- the peer holds the same bytes);
+---`opts.expect` (hex) turns the call into a constant-time verification and
+---the return into `{valid = boolean}` -- an answer, never a raise, the
+---jwt_verify convention.
 ---@param data string
----@return string hex
-function hostcrypto.hmac(data) end
+---@param opts {key: string?, expect: string?}?
+---@return string|{valid: boolean}
+function hostcrypto.hmac(data, opts) end
 
 ---Host-quality randomness, as hex (two characters per byte).
 ---@param nbytes integer?  # default is the host's (32)
@@ -441,8 +447,10 @@ function hostcrypto.jwt_verify(token) end
 ---"<expiry>:<user>", `password` is base64 of HMAC-SHA1 over it under the
 ---deployment's shared secret. The host owns the expiry: `ttl` (seconds,
 ---default the deployment's turn.ttl) sets it, a guest never names a
----timestamp. Denied unless the deployment configures `crypto.turn`.
+---timestamp. When the deployment lists `turn.uris`, they arrive verbatim in
+---`uris`, so the reply is a complete ICE server entry. Denied unless the
+---deployment configures `crypto.turn`.
 ---@param user string  # 1..256 bytes, no NUL
 ---@param ttl integer?
----@return {username: string, password: string, expires: integer}
+---@return {username: string, password: string, expires: integer, uris: string[]?}
 function hostcrypto.turn_credential(user, ttl) end
