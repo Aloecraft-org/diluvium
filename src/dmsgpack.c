@@ -84,6 +84,7 @@
 
 /* Registry keys. Addresses of these are the keys, so they cannot collide. */
 static const char MP_SHAPE_MT = 0;      /* metatable shared by all wrappers */
+static const char MP_NULL = 0;          /* address of msgpack.null */
 static const char MP_RESOLVER = 0;      /* light userdata -> resolver */
 static const char MP_CURRENT = 0;       /* light userdata -> encode in progress */
 static const char MP_CURDEC = 0;        /* light userdata -> decode in progress */
@@ -513,6 +514,11 @@ static int mp_shape_of (lua_State *L, int idx) {
 
 LUA_API int diluvium_msgpack_shapeof (lua_State *L, int idx) {
   return mp_shape_of(L, idx);
+}
+
+LUA_API int diluvium_msgpack_isnull (lua_State *L, int idx) {
+  return lua_type(L, idx) == LUA_TLIGHTUSERDATA &&
+         lua_touserdata(L, idx) == (void *)&MP_NULL;
 }
 
 
@@ -945,6 +951,14 @@ static void mp_encode_value (lua_State *L, mp_ctx *ctx, int idx) {
     }
     default:
       break;
+  }
+  /* msgpack.null first: like the shape wrappers above, it is the codec's
+     own, so no resolver gets a say. Data path only -- in a snapshot it is
+     a named permanent and must keep its identity, not collapse to nil. */
+  if (ctx->snap == NULL && lua_type(L, abs) == LUA_TLIGHTUSERDATA &&
+      lua_touserdata(L, abs) == (void *)&MP_NULL) {
+    mp_enc_nil(ctx->buf);
+    return;
   }
   /* Anything else -- function, thread, userdata, light userdata -- is the
      resolver's last chance, then an error naming the type and the path. */
@@ -1928,6 +1942,17 @@ static const luaL_Reg mp_lib[] = {
 
 LUAMOD_API int luaopen_dmsgpack (lua_State *L) {
   luaL_newlib(L, mp_lib);
+  /* msgpack.null: a VALUE that encodes as msgpack nil. It exists because a
+     Lua table cannot hold nil -- an intentional null in an array (a bound
+     SQL NULL among positional params) would otherwise be a hole that
+     changes the table's shape. Light userdata at a runtime-owned address:
+     programs cannot forge one, identity survives a snapshot because the
+     permanents walk names it (dsnap.c), and both codecs know it -- the
+     msgpack encoder writes 0xc0, the json encoder writes null. Decode does
+     NOT produce it: null -> nil stays, as documented, so nothing existing
+     changes shape. */
+  lua_pushlightuserdata(L, (void *)&MP_NULL);
+  lua_setfield(L, -2, "null");
   return 1;
 }
 

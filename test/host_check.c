@@ -204,6 +204,53 @@ static void a_config_is_typed_data_and_typos_are_refused (void) {
      strstr(err, "readwrite") != NULL,
      "create under a read grant is a contradiction, refused");
 
+  /* The crypto turn/secrets refusals: each exercises an error path in the
+     nested config walk, where a miscounted lua_pop is a crash in
+     lua_close rather than a wrong message -- which is why every branch
+     gets a probe even when the sentences look alike. */
+  p = fixture("turn2src.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  crypto = { key = '0123456789abcdef',\n"
+    "    turn = { secret = '0123456789abcdef',\n"
+    "             secret_env = 'ALSO' } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "exactly one") != NULL,
+     "a turn block with two secret sources is refused");
+
+  p = fixture("turnkey.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  crypto = { key = '0123456789abcdef',\n"
+    "    turn = { secret = '0123456789abcdef', tll = 60 } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "tll") != NULL,
+     "a misspelled turn key is refused by name, not ignored");
+
+  p = fixture("turnuris.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  crypto = { key = '0123456789abcdef',\n"
+    "    turn = { secret = '0123456789abcdef',\n"
+    "      uris = { 'a','b','c','d','e','f','g','h','i' } } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "1..8") != NULL,
+     "a ninth turn uri is past the cap, refused");
+
+  p = fixture("secname.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  crypto = { key = '0123456789abcdef', secrets = {\n"
+    "    ['a-name-well-past-the-thirty-two-byte-bound'] =\n"
+    "      { secret = '0123456789abcdef' } } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "1..32") != NULL,
+     "an overlong secret name is refused");
+
+  p = fixture("secsrc.host.lua",
+    "return { supervisor = 's.lua', connectors = {\n"
+    "  crypto = { key = '0123456789abcdef', secrets = {\n"
+    "    hook = { } } } } }\n");
+  ok(dh_config_load(p, &cfg, err, sizeof(err)) != 0 &&
+     strstr(err, "exactly one") != NULL,
+     "a named secret with no source is refused");
+
   /* One listen block, the back-compatible shape, is one listener. */
   p = fixture("one_listen.host.lua",
     "return { supervisor = 's.lua', connectors = {\n"
@@ -461,6 +508,17 @@ static void sql_query_and_exec_split_along_the_grant (void) {
     "  args = {db = 'check.db', sql = 'SELECT a, b FROM t'}})\n"
     "v[3] = (m.status == 'ok' and m.value.cols[1] == 'a'\n"
     "  and m.value.rows[1][1] == 42 and m.value.rows[1][2] == 'x')\n"
+    "-- an intentional NULL is a value (msgpack.null), so the params\n"
+    "-- array has no hole and the connector binds SQL NULL\n"
+    "m = ask({tok = 7, call = 'sql/exec',\n"
+    "  args = {db = 'check.db', sql = 'INSERT INTO t VALUES (?, ?)',\n"
+    "          params = {msgpack.null, 'y'}}})\n"
+    "v[7] = (m.status == 'ok' and m.value.changes == 1)\n"
+    "m = ask({tok = 8, call = 'sql/query',\n"
+    "  args = {db = 'check.db',\n"
+    "          sql = 'SELECT b FROM t WHERE a IS NULL'}})\n"
+    "v[8] = (m.status == 'ok' and m.value.rows[1][1] == 'y'\n"
+    "  and m.value.rows[2] == nil)\n"
     "-- a write wearing query's grant\n"
     "m = ask({tok = 4, call = 'sql/query',\n"
     "  args = {db = 'check.db', sql = 'DELETE FROM t'}})\n"
@@ -476,10 +534,11 @@ static void sql_query_and_exec_split_along_the_grant (void) {
     "v[6] = (m.status == 'error'\n"
     "  and string.find(m.detail, 'name their database', 1, true) ~= nil)\n"
     "local all = v[1] and v[2] and v[3] and v[4] and v[5] and v[6]\n"
+    "  and v[7] and v[8]\n"
     "if all then queue.push(log, 'good')\n"
     "else queue.push(log, 'bad: ' .. tostring(v[1]) .. tostring(v[2])\n"
     "  .. tostring(v[3]) .. tostring(v[4]) .. tostring(v[5])\n"
-    "  .. tostring(v[6])) end\n"
+    "  .. tostring(v[6]) .. tostring(v[7]) .. tostring(v[8])) end\n"
     "queue.wait({park})\n");
   {
     char cfgsrc[768];

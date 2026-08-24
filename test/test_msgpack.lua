@@ -332,5 +332,27 @@ print("-- encode takes exactly one value")
 ok(not pcall(msgpack.encode), "encode with no argument is an error")
 ok(not pcall(msgpack.encode, 1, 2), "encode with two arguments is an error")
 
+print("-- msgpack.null: the value that encodes as nil")
+-- A table cannot hold nil, so an intentional null in an array needs a
+-- spelling that is not a hole. The sentinel is a value on the Lua side and
+-- 0xc0 on the wire; decode does NOT produce it (null -> nil stays), so a
+-- round-trip lands the hole where the null was -- asserted, because that
+-- asymmetry is the documented contract, not an accident.
+ok(msgpack.null ~= nil, "msgpack.null is a value, not nil")
+eq(msgpack.encode(msgpack.null), string.char(0xc0),
+   "msgpack.null encodes as the one-byte nil")
+do
+    local t = msgpack.decode(msgpack.encode({1, msgpack.null, 3}))
+    ok(t[1] == 1 and t[2] == nil and t[3] == 3,
+       "an array through the wire keeps its ends and lands a hole at the null")
+end
+do
+    local t = msgpack.decode(msgpack.encode({a = msgpack.null, b = 2}))
+    ok(t.a == nil and t.b == 2,
+       "a map value of msgpack.null decodes as an absent key")
+end
+eq(msgpack.encode({msgpack.null}), msgpack.encode(msgpack.as_array({msgpack.null})),
+   "the sentinel composes with a shape wrapper")
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then os.exit(1) end

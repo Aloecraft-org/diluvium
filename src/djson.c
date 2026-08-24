@@ -298,6 +298,10 @@ static int encode_value (lua_State *L, int idx, eb *b, int depth) {
     case LUA_TTABLE:
       return encode_table(L, idx, b, depth);
     default:
+      /* msgpack.null is the one non-graph value with a JSON form: the
+         spelled-out null, the same meaning it has on the msgpack wire. */
+      if (diluvium_msgpack_isnull(L, idx))
+        return eb_add(b, "null", 4) != 0 ? enc_oom(b) : 0;
       snprintf(b->err, sizeof(b->err), "a %s has no JSON form",
                luaL_typename(L, idx));
       return -1;

@@ -89,6 +89,15 @@ function queue.info(handle) end
 
 ---The wire format the queues speak, exposed for a program that needs bytes.
 ---@class diluvium.msgpacklib
+---@field null lightuserdata  # the VALUE that encodes as msgpack nil (and as
+---                           # JSON null). A table cannot hold nil, so an
+---                           # intentional null in an array -- a bound SQL
+---                           # NULL among positional params -- is spelled
+---                           # msgpack.null instead of being a hole. Decode
+---                           # never produces it: null -> nil stays. Identity
+---                           # survives a snapshot (it is a named permanent),
+---                           # so `x == msgpack.null` still holds after a
+---                           # wake.
 msgpack = {}
 
 ---@param value any
@@ -320,6 +329,10 @@ function host.children() end
 function host.events(waitms) end
 
 ---@class diluvium.hostsql
+---@field NULL lightuserdata  # `msgpack.null`, re-exported where a statement
+---                           # binder will look for it: pass it as a param to
+---                           # bind SQL NULL. A nil param stays refused --
+---                           # accidents still throw; intent is a value.
 local hostsql = {}
 
 ---Name a database inside the deployment's granted scope and get its handle.

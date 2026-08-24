@@ -190,7 +190,12 @@ static void ds_perm_walk (lua_State *L, int nameidx, int validx,
   lua_pushnil(L);
   while (lua_next(L, tableidx) != 0) {
     /* stack: ... key value */
-    if (lua_type(L, -2) == LUA_TSTRING && lua_iscfunction(L, -1)) {
+    /* C functions, and light userdata: a runtime-owned sentinel
+       (msgpack.null) is exactly the "named light userdata" the snapshot
+       encoder's refusal carves out, and naming it here is what makes its
+       identity survive a restore. */
+    if (lua_type(L, -2) == LUA_TSTRING &&
+        (lua_iscfunction(L, -1) || lua_islightuserdata(L, -1))) {
       const char *key = lua_tostring(L, -2);
       if (prefix == NULL)
         snprintf(buf, sizeof(buf), "%s", key);

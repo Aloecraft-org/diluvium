@@ -1406,7 +1406,8 @@ static void a_c_function_is_named_not_copied (lua_State *L) {
   int base = lua_gettop(L);
   int copy;
   if (!build(L, "return {p = print, ins = table.insert, fmt = string.format,"
-                " hex = bytes.tohex, je = json.encode, ti = time.iso}"))
+                " hex = bytes.tohex, je = json.encode, ti = time.iso,"
+                " nul = msgpack.null}"))
     return;
   copy = roundtrip_named(L, __func__);
   if (copy == 0) return;
@@ -1447,6 +1448,18 @@ static void a_c_function_is_named_not_copied (lua_State *L) {
   lua_getfield(L, -1, "iso");
   ok(lua_topointer(L, -3) == lua_topointer(L, -1),
      "and 'time.iso'");
+  lua_pop(L, 3);
+  /* A light userdata the runtime owns and the permanents walk names --
+     msgpack.null -- restores as the SAME sentinel, which is the property
+     that makes 'p == msgpack.null' still true after a wake. Without the
+     walk accepting light userdata, the snapshot refuses with the unnamed-
+     pointer error before this line runs. */
+  at(L, copy, "nul");
+  lua_getglobal(L, "msgpack");
+  lua_getfield(L, -1, "null");
+  ok(lua_touserdata(L, -3) == lua_touserdata(L, -1) &&
+     lua_touserdata(L, -1) != NULL,
+     "and 'msgpack.null', a runtime-owned light userdata sentinel");
   lua_settop(L, base);
 }
 

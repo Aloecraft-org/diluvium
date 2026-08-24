@@ -158,5 +158,16 @@ ok(pcall(json.encode, {"a", msgpack.as_map({1, 2})}) == false,
 ok(pcall(json.encode, msgpack.as_array(msgpack.as_map({}))) == false,
    "a wrapper wrapping a wrapper refuses")
 
+-- msgpack.null is the other half of the shared vocabulary: the value that
+-- means null in both codecs.
+eq(json.encode(msgpack.null), "null", "msgpack.null encodes as JSON null")
+do
+    local out = json.encode({ x = msgpack.null, n = 1 })
+    ok(string.find(out, '"x":null', 1, true) ~= nil,
+       "a null field inside an envelope (got " .. out .. ")")
+end
+eq(json.encode({ "a", msgpack.null, "b" }), '["a",null,"b"]',
+   "a null element does not shorten the array around it")
+
 print(string.format("\n%d passed, %d failed", pass, fail))
 if fail > 0 then os.exit(1) end

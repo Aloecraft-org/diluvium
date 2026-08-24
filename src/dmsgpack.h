@@ -48,6 +48,15 @@ LUA_API void diluvium_msgpack_encode (lua_State *L, int idx);
 #define DILUVIUM_MP_SHAPE_ARRAY	1
 #define DILUVIUM_MP_SHAPE_MAP	2
 LUA_API int diluvium_msgpack_shapeof (lua_State *L, int idx);
+
+/*
+** Is the value at 'idx' the msgpack.null sentinel? The VALUE that encodes
+** as msgpack nil (a table cannot hold nil, so an intentional null in an
+** array needs a spelling that is not a hole). Exported for djson, which
+** encodes it as JSON null -- one null vocabulary for both codecs, like the
+** shape wrappers.
+*/
+LUA_API int diluvium_msgpack_isnull (lua_State *L, int idx);
 LUA_API void diluvium_msgpack_decode (lua_State *L, const char *s, size_t len);
 
 /*
