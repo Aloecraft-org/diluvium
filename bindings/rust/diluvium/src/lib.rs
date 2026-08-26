@@ -144,6 +144,11 @@ pub enum Error {
     Busy(String),
     /// A message could not be encoded or decoded.
     Codec(String),
+    /// A snapshot's header was refused: a different runtime build, a different
+    /// permanents or capability set, or the wrong host stamp. Distinct from
+    /// [`Error::Program`] on purpose -- a mismatch means "wrong place", not
+    /// "corrupt", and a supervisor routes the two differently.
+    SnapshotMismatch(String),
 }
 
 impl fmt::Display for Error {
@@ -159,6 +164,7 @@ impl fmt::Display for Error {
             Error::UnknownQueue(q) => write!(f, "no such queue: {q:?}"),
             Error::Busy(m) => write!(f, "{m}"),
             Error::Codec(m) => write!(f, "msgpack: {m}"),
+            Error::SnapshotMismatch(m) => write!(f, "{m}"),
         }
     }
 }
@@ -190,6 +196,7 @@ pub struct Config {
     text_only: bool,
     unsafe_stdlib: bool,
     unsafe_debug: bool,
+    budget: Option<(u64, u64)>,
 }
 
 impl Default for Config {
@@ -200,6 +207,7 @@ impl Default for Config {
             text_only: false,
             unsafe_stdlib: false,
             unsafe_debug: false,
+            budget: None,
         }
     }
 }
@@ -245,6 +253,22 @@ impl Config {
         self
     }
 
+    /// Limit what the program may spend: a VM instruction count and a heap cap
+    /// in kilobytes. Zero for either means no limit on that axis.
+    ///
+    /// The budget **aborts, it does not schedule**: past the instruction limit
+    /// the program fails with an error, and past the memory limit an
+    /// allocation fails as an ordinary out-of-memory the program can even
+    /// catch. A guest cannot meaningfully limit itself -- a runaway loop never
+    /// yields -- so the limit lives out here. It applies at load and at
+    /// [`Config::restore`] alike, which is the only order that exists: the
+    /// runtime refuses a budget set on an instance that has started, and a
+    /// restored instance has.
+    pub fn budget(mut self, instructions: u64, memory_kb: u64) -> Self {
+        self.budget = Some((instructions, memory_kb));
+        self
+    }
+
     fn flags(self) -> u32 {
         let mut f = 0;
         if self.text_only {
@@ -268,6 +292,46 @@ impl Config {
     /// configuration. Refused when [`Config::text_only`] is set.
     pub fn load_bytecode(self, code: &[u8], name: &str) -> Result<Instance, Error> {
         Instance::load_with(self, code, name)
+    }
+
+    /// Wake a snapshot into a fresh instance under this configuration.
+    ///
+    /// `host` is the identity stamp: a stamped snapshot restores only under
+    /// the same string, and a host that supplies one refuses a snapshot
+    /// without it -- or stamping would be advisory. Pass `None` to accept only
+    /// unstamped snapshots.
+    ///
+    /// On success the instance is parked exactly as the snapshot's was, so the
+    /// next calls are [`Instance::current_wait`] to learn what it is waiting
+    /// for and then [`Instance::resume`] -- not [`Instance::run`]: the program
+    /// is not starting, it is continuing. The configuration must match the
+    /// captured instance's -- a snapshot does not cross the `unsafe_stdlib`
+    /// switch, because a program captured holding `io.open` cannot wake
+    /// somewhere there is none.
+    ///
+    /// Restoring refuses rather than raising, on *any* input: every field is
+    /// range-checked before anything is written, so a malformed snapshot
+    /// cannot leave a half-built instance. [`Error::SnapshotMismatch`] means
+    /// the header was refused; [`Error::Program`] means the header matched and
+    /// the payload did not survive reading.
+    pub fn restore(self, snapshot: &[u8], host: Option<&str>) -> Result<Instance, Error> {
+        let inst = Instance::fresh(self)?;
+        let chost = host.map(|h| {
+            CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap())
+        });
+        let st = unsafe {
+            sys::dv_restore(
+                inst.raw,
+                chost.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()),
+                snapshot.as_ptr(),
+                snapshot.len(),
+            )
+        };
+        match st {
+            sys::DV_OK => Ok(inst),
+            sys::DV_SNAPSHOT_MISMATCH => Err(Error::SnapshotMismatch(inst.last_error())),
+            _ => Err(Error::Program(inst.last_error())),
+        }
     }
 
     fn load(self, code: &[u8], name: &str) -> Result<Instance, Error> {
@@ -306,11 +370,22 @@ impl Instance {
         Self::load(code, name, false)
     }
 
+    /// Wake a snapshot taken by [`Instance::snapshot`], under the default
+    /// configuration. See [`Config::restore`] for the whole story, including
+    /// the `host` stamp and what to call next.
+    pub fn restore(snapshot: &[u8], host: Option<&str>) -> Result<Self, Error> {
+        Config::new().restore(snapshot, host)
+    }
+
     fn load(code: &[u8], name: &str, text_only: bool) -> Result<Self, Error> {
         Config::new().text_only(text_only).load(code, name)
     }
 
-    fn load_with(cfg: Config, code: &[u8], name: &str) -> Result<Self, Error> {
+    /// A fresh instance with the configuration's flags and budget applied and
+    /// nothing loaded: the shape [`Config::restore`] needs, and the first half
+    /// of a load. The budget goes on here because the runtime refuses one once
+    /// the instance has started, and a restored instance has.
+    fn fresh(cfg: Config) -> Result<Self, Error> {
         let library = unsafe { sys::dv_abi_version() };
         if library != sys::DV_ABI_VERSION {
             return Err(Error::AbiMismatch {
@@ -318,18 +393,26 @@ impl Instance {
                 wrapper: sys::DV_ABI_VERSION,
             });
         }
-        let cfg = sys::dv_config {
+        let raw_cfg = sys::dv_config {
             flags: cfg.flags(),
             ..Default::default()
         };
-        let raw = unsafe { sys::dv_new(&cfg) };
+        let raw = unsafe { sys::dv_new(&raw_cfg) };
         if raw.is_null() {
             return Err(Error::OutOfMemory);
         }
-        let inst = Instance {
+        let mut inst = Instance {
             raw,
             _not_sync: PhantomData,
         };
+        if let Some((instructions, memory_kb)) = cfg.budget {
+            inst.set_budget(instructions, memory_kb)?;
+        }
+        Ok(inst)
+    }
+
+    fn load_with(cfg: Config, code: &[u8], name: &str) -> Result<Self, Error> {
+        let inst = Self::fresh(cfg)?;
         let cname = CString::new(name).unwrap_or_else(|_| CString::new("=(program)").unwrap());
         let st = unsafe { sys::dv_load(inst.raw, code.as_ptr(), code.len(), cname.as_ptr()) };
         if st != sys::DV_OK {
@@ -480,21 +563,176 @@ impl Instance {
     fn settle(&mut self, st: sys::dv_status, ws: sys::dv_waitset) -> Result<Step, Error> {
         match st {
             sys::DV_DONE => Ok(Step::Done),
-            sys::DV_IDLE => {
-                let n = ws.n as usize;
-                Ok(Step::Parked(Wait {
-                    ids: ws.ids[..n.min(sys::DV_WAIT_MAX)]
-                        .iter()
-                        .map(|&i| QueueId(i))
-                        .collect(),
-                    timeout: (ws.timeout_ms >= 0)
-                        .then(|| std::time::Duration::from_millis(ws.timeout_ms as u64)),
-                    for_write: ws.for_write != 0,
-                }))
-            }
+            sys::DV_IDLE => Ok(Step::Parked(Self::wait_from(ws))),
             sys::DV_BUSY => Err(Error::Busy(self.last_error())),
             _ => Err(Error::Program(self.last_error())),
         }
+    }
+
+    fn wait_from(ws: sys::dv_waitset) -> Wait {
+        let n = ws.n as usize;
+        Wait {
+            ids: ws.ids[..n.min(sys::DV_WAIT_MAX)]
+                .iter()
+                .map(|&i| QueueId(i))
+                .collect(),
+            timeout: (ws.timeout_ms >= 0)
+                .then(|| std::time::Duration::from_millis(ws.timeout_ms as u64)),
+            for_write: ws.for_write != 0,
+        }
+    }
+
+    /// What the program is waiting for right now, or `None` when it is not
+    /// parked.
+    ///
+    /// [`Instance::run`] and [`Instance::resume`] already hand back the park as
+    /// [`Step::Parked`]; this is for the moment neither has run yet -- above
+    /// all a freshly [restored](Config::restore) instance, which is parked
+    /// exactly as the snapshot's was and whose park was never returned by
+    /// anything.
+    pub fn current_wait(&self) -> Option<Wait> {
+        let mut ws = sys::dv_waitset::default();
+        let st = unsafe { sys::dv_waitset_get(self.raw, &mut ws) };
+        (st == sys::DV_OK).then(|| Self::wait_from(ws))
+    }
+
+    /// Limit what the program may spend, before it starts.
+    ///
+    /// See [`Config::budget`], which is the same switch applied at
+    /// construction and reads better; this exists for a host that decides the
+    /// numbers after loading. Refused with [`Error::Busy`] once the instance
+    /// has started -- a budget that changed mid-flight would make "exceeded"
+    /// mean nothing.
+    pub fn set_budget(&mut self, instructions: u64, memory_kb: u64) -> Result<(), Error> {
+        let st = unsafe { sys::dv_set_budget(self.raw, instructions, memory_kb) };
+        match st {
+            sys::DV_OK => Ok(()),
+            sys::DV_BUSY => Err(Error::Busy(self.last_error())),
+            _ => Err(Error::Program(self.last_error())),
+        }
+    }
+
+    /// What the instance has spent: exact instructions, and its memory
+    /// high-water mark in kilobytes. The peak rather than the current figure,
+    /// because a supervisor deciding whether a child needs a larger budget
+    /// wants the peak; [`Instance::memory`] answers the other question.
+    pub fn usage(&self) -> Usage {
+        let mut instructions = 0u64;
+        let mut memory_kb = 0u64;
+        unsafe { sys::dv_usage(self.raw, &mut instructions, &mut memory_kb) };
+        Usage {
+            instructions,
+            memory_kb_peak: memory_kb,
+        }
+    }
+
+    /// What the instance is holding *now*, in bytes, beside the same peak
+    /// before it is divided into kilobytes.
+    ///
+    /// This is the number a host asks about a swarm -- what a thing costs at
+    /// rest -- where [`Instance::usage`] answers a supervisor's sizing
+    /// question. `bytes_now` below `bytes_peak` is the collector having run,
+    /// not a disagreement between two counters.
+    pub fn memory(&self) -> Memory {
+        let mut bytes_now = 0u64;
+        let mut bytes_peak = 0u64;
+        unsafe { sys::dv_memory(self.raw, &mut bytes_now, &mut bytes_peak) };
+        Memory {
+            bytes_now,
+            bytes_peak,
+        }
+    }
+
+    /// Did this instance stop because it ran out of budget?
+    ///
+    /// Distinguishes "the program failed" from "we stopped it", which arrive
+    /// as the same [`Error::Program`]: a supervisor restarts one and grows the
+    /// other's budget.
+    pub fn exceeded(&self) -> bool {
+        unsafe { sys::dv_exceeded(self.raw) != 0 }
+    }
+
+    /// Hibernate: write the instance's whole state -- the parked program, its
+    /// call chain, its reachable values, and every queue with its contents --
+    /// into bytes that [`Config::restore`] can wake.
+    ///
+    /// The instance must be *parked*, which is the only state in which all of
+    /// it is written down; snapshotting a running or finished program is an
+    /// [`Error::Program`] that says so. `host` is the identity stamp: a
+    /// snapshot with no stamp restores anywhere, a stamped one only under the
+    /// same string.
+    pub fn snapshot(&mut self, host: Option<&str>) -> Result<Vec<u8>, Error> {
+        let chost = host.map(|h| {
+            CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap())
+        });
+        let hostp = chost.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
+        let mut len: usize = 0;
+        let st = unsafe { sys::dv_snapshot(self.raw, hostp, std::ptr::null_mut(), 0, &mut len) };
+        // Asking for the size answers DV_OK with `*len` set; anything else is
+        // the refusal itself and the buffer would not have helped.
+        if st != sys::DV_OK && st != sys::DV_BUFFER_TOO_SMALL {
+            return Err(Error::Program(self.last_error()));
+        }
+        let mut buf = vec![0u8; len];
+        let st = unsafe { sys::dv_snapshot(self.raw, hostp, buf.as_mut_ptr(), buf.len(), &mut len) };
+        if st != sys::DV_OK {
+            return Err(Error::Program(self.last_error()));
+        }
+        buf.truncate(len);
+        Ok(buf)
+    }
+
+    /// Register a chunk shared across a fleet, so every snapshot of an
+    /// instance using it carries a 32-byte hash in place of the code.
+    ///
+    /// A host that registers nothing gets self-contained snapshots, which is
+    /// the right default; this is for the swarm case where one program has ten
+    /// thousand snapshots. The same registration must exist wherever those
+    /// snapshots wake.
+    pub fn register_code(&mut self, code: &[u8], name: &str) -> Result<(), Error> {
+        let cname = CString::new(name).unwrap_or_else(|_| CString::new("=(code)").unwrap());
+        let st =
+            unsafe { sys::dv_register_code(self.raw, code.as_ptr(), code.len(), cname.as_ptr()) };
+        if st != sys::DV_OK {
+            return Err(Error::Program(self.last_error()));
+        }
+        Ok(())
+    }
+
+    /// Pre-authorise an endpoint reference: when the program binds a reference
+    /// with exactly these bytes, it gets an endpoint identified to you by
+    /// `token`.
+    ///
+    /// What the bytes mean is entirely yours -- an index into your own tables,
+    /// an address, a name. The runtime carries them and does not read them.
+    /// Prefer this over [`Instance::on_endpoint_bind`]: a host almost always
+    /// knows what its own references mean, and saying so up front is simpler
+    /// than answering a question later.
+    pub fn endpoint_allow(&mut self, reference: &[u8], token: u32) {
+        unsafe { sys::dv_endpoint_allow(self.raw, reference.as_ptr(), reference.len(), token) };
+    }
+
+    /// The queue behind a bound endpoint, by the token you chose -- or `None`
+    /// while nothing has bound it.
+    ///
+    /// An endpoint is a real bounded local queue, so [`Instance::pop`] on this
+    /// handle is how messages leave the instance. The buffer being bounded is
+    /// the point: a host-side buffer that grew without limit would break the
+    /// accept-is-O(1) guarantee rather than extend it.
+    pub fn endpoint_queue(&self, token: u32) -> Option<QueueId> {
+        let id = unsafe { sys::dv_endpoint_queue(self.raw, token) };
+        (id != 0).then_some(QueueId(id))
+    }
+
+    /// Say that an endpoint's far end has closed. Pushes to it answer "gone"
+    /// from then on, immediately -- and once gone it stays gone: something new
+    /// at the same address is a new endpoint.
+    pub fn endpoint_close(&mut self, id: QueueId) -> Result<(), Error> {
+        let st = unsafe { sys::dv_endpoint_close(self.raw, id.0) };
+        if st != sys::DV_OK {
+            return Err(Error::UnknownQueue(id));
+        }
+        Ok(())
     }
 }
 
@@ -511,6 +749,24 @@ impl fmt::Debug for Instance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Instance").finish_non_exhaustive()
     }
+}
+
+/// What an instance has spent, against the budget it was given.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Usage {
+    /// VM instructions consumed, exact to the counting hook's granularity.
+    pub instructions: u64,
+    /// The heap's high-water mark, in kilobytes.
+    pub memory_kb_peak: u64,
+}
+
+/// What an instance is holding, in bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Memory {
+    /// Held right now. This is what an idle agent costs.
+    pub bytes_now: u64,
+    /// The high-water mark [`Usage::memory_kb_peak`] is derived from.
+    pub bytes_peak: u64,
 }
 
 /// How a queue is configured, and how full it is.
@@ -568,5 +824,40 @@ impl Instance {
             sys::dv_set_notify(self.raw, Some(trampoline::<F>), boxed as *mut c_void);
         }
         Notifier { _private: () }
+    }
+
+    /// Answer endpoint binds with a callback: the program hands over reference
+    /// bytes, and you return the token to know the endpoint by -- or `None` to
+    /// refuse, which raises in the program, because it asked for one specific
+    /// destination and did not get it.
+    ///
+    /// References registered with [`Instance::endpoint_allow`] are consulted
+    /// first, so the two compose: allow the ones you know, answer the rest
+    /// here. The callback fires inside `run` or `resume` and **must not touch
+    /// the instance** -- same rule as [`Instance::on_export`], same reason.
+    pub fn on_endpoint_bind<F>(&mut self, f: F)
+    where
+        F: FnMut(&[u8]) -> Option<u32> + Send + 'static,
+    {
+        unsafe extern "C" fn trampoline<F: FnMut(&[u8]) -> Option<u32>>(
+            ud: *mut c_void,
+            r: *const u8,
+            len: usize,
+            token: *mut u32,
+        ) -> std::os::raw::c_int {
+            let f = &mut *(ud as *mut F);
+            match f(std::slice::from_raw_parts(r, len)) {
+                Some(t) => {
+                    *token = t;
+                    1
+                }
+                None => 0,
+            }
+        }
+        // Leaked for the same reason as `on_export`.
+        let boxed: *mut F = Box::into_raw(Box::new(f));
+        unsafe {
+            sys::dv_set_endpoint_handler(self.raw, Some(trampoline::<F>), boxed as *mut c_void);
+        }
     }
 }
