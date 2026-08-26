@@ -45,6 +45,29 @@ pub const DV_QUEUE_DROPPED: dv_status = 13;
 
 pub type dv_queue_id = u32;
 
+/// Indices into the array `dv_layout` fills: the sizes and field offsets of the
+/// structs below, as the *library* was compiled. This exists for wasm -- a
+/// binding reading fields out of linear memory has no `offsetof`, and wasm32 is
+/// ILP32, so every struct holding a pointer or a `size_t` is laid out
+/// differently there than on the LP64 host where a developer would have
+/// measured it. Native bindings use it as a transcription check instead.
+pub const DV_LAYOUT_CONFIG_SIZE: usize = 0;
+pub const DV_LAYOUT_CONFIG_ABI: usize = 1;
+pub const DV_LAYOUT_CONFIG_FLAGS: usize = 2;
+pub const DV_LAYOUT_QUEUE_INFO_SIZE: usize = 3;
+pub const DV_LAYOUT_QUEUE_INFO_CAPACITY: usize = 4;
+pub const DV_LAYOUT_QUEUE_INFO_LEN: usize = 5;
+pub const DV_LAYOUT_QUEUE_INFO_ENABLED: usize = 6;
+pub const DV_LAYOUT_QUEUE_INFO_EXPORTED: usize = 7;
+pub const DV_LAYOUT_QUEUE_INFO_DIRECTION: usize = 8;
+pub const DV_LAYOUT_QUEUE_INFO_ON_FULL: usize = 9;
+pub const DV_LAYOUT_WAITSET_SIZE: usize = 10;
+pub const DV_LAYOUT_WAITSET_N: usize = 11;
+pub const DV_LAYOUT_WAITSET_IDS: usize = 12;
+pub const DV_LAYOUT_WAITSET_TIMEOUT: usize = 13;
+pub const DV_LAYOUT_WAITSET_FOR_WRITE: usize = 14;
+pub const DV_LAYOUT_COUNT: usize = 15;
+
 #[repr(C)]
 pub struct dv_instance {
     _opaque: [u8; 0],
@@ -146,6 +169,75 @@ extern "C" {
     pub fn dv_resume(inst: *mut dv_instance, fired: dv_queue_id) -> dv_status;
     pub fn dv_waitset_get(inst: *mut dv_instance, out: *mut dv_waitset) -> dv_status;
 
+    /// Answer a guest binding an endpoint reference: set `*token` and return 1,
+    /// or return 0 to refuse. References registered with `dv_endpoint_allow`
+    /// are consulted before any handler installed here, so the two compose.
+    pub fn dv_set_endpoint_handler(
+        inst: *mut dv_instance,
+        bind: Option<
+            unsafe extern "C" fn(
+                ud: *mut c_void,
+                r: *const u8,
+                len: usize,
+                token: *mut u32,
+            ) -> c_int,
+        >,
+        ud: *mut c_void,
+    );
+    /// Pre-authorise a reference, mapping bytes to a token, with no callback.
+    /// Prefer this; it is also the only shape reachable through wasm.
+    pub fn dv_endpoint_allow(inst: *mut dv_instance, r: *const u8, len: usize, token: u32);
+    /// The queue handle a token was bound to, or 0 if nothing bound it. This is
+    /// the buffer to drain: `dv_queue_pop` on it is how messages leave.
+    pub fn dv_endpoint_queue(inst: *mut dv_instance, token: u32) -> dv_queue_id;
+    /// Say the far end has closed. Once gone it stays gone.
+    pub fn dv_endpoint_close(inst: *mut dv_instance, id: dv_queue_id) -> dv_status;
+
+    /// Set before `dv_run` or `dv_restore`; refused (DV_BUSY) once the instance
+    /// has started. `instructions` is a VM instruction count, `memory_kb` a
+    /// heap cap; 0 means no limit. The budget aborts, it does not schedule.
+    pub fn dv_set_budget(inst: *mut dv_instance, instructions: u64, memory_kb: u64) -> dv_status;
+    /// What the instance has spent. `memory_kb` is the high-water mark. Either
+    /// pointer may be NULL.
+    pub fn dv_usage(inst: *mut dv_instance, instructions: *mut u64, memory_kb: *mut u64)
+        -> dv_status;
+    /// What the instance holds *now*, in bytes, beside the same peak before it
+    /// is divided into kilobytes. Either pointer may be NULL.
+    pub fn dv_memory(inst: *mut dv_instance, bytes_now: *mut u64, bytes_peak: *mut u64)
+        -> dv_status;
+    /// Did this instance stop because it ran out of budget?
+    pub fn dv_exceeded(inst: *mut dv_instance) -> c_int;
+
+    /// Write a parked instance's whole state into `out`; pass out == NULL to
+    /// ask only for the size. `host` is the identity stamp, or NULL for none.
+    pub fn dv_snapshot(
+        inst: *mut dv_instance,
+        host: *const c_char,
+        out: *mut u8,
+        cap: usize,
+        len: *mut usize,
+    ) -> dv_status;
+    /// Restore into a *fresh* instance. After DV_OK it is parked exactly as the
+    /// snapshot's was: read the park with `dv_waitset_get`, then `dv_resume` --
+    /// not `dv_run`. Refuses on any malformed input rather than raising.
+    pub fn dv_restore(
+        inst: *mut dv_instance,
+        host: *const c_char,
+        s: *const u8,
+        len: usize,
+    ) -> dv_status;
+    /// Register a shared chunk so snapshots carry a 32-byte hash in its place.
+    pub fn dv_register_code(
+        inst: *mut dv_instance,
+        code: *const u8,
+        len: usize,
+        name: *const c_char,
+    ) -> dv_status;
+
+    /// Fill `out` with up to `n` of the DV_LAYOUT_COUNT size/offset values, in
+    /// DV_LAYOUT_* order; returns how many were written.
+    pub fn dv_layout(out: *mut u32, n: usize) -> u32;
+
     pub fn dv_set_notify(
         inst: *mut dv_instance,
         cb: Option<unsafe extern "C" fn(ud: *mut c_void, id: dv_queue_id)>,
@@ -155,11 +247,61 @@ extern "C" {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use std::mem::{offset_of, size_of};
+
     /// §11.6: every binding checks the version at init and refuses a mismatch.
     /// Here that is a compile-and-link check as much as a value check -- if the
     /// constant and the library disagree, one of them was edited alone.
     #[test]
     fn version_matches_the_header() {
-        assert_eq!(unsafe { super::dv_abi_version() }, super::DV_ABI_VERSION);
+        assert_eq!(unsafe { dv_abi_version() }, DV_ABI_VERSION);
+    }
+
+    /// The transcription check `dv_layout` makes possible on a native target:
+    /// the library reports the sizes and offsets it was compiled with, and the
+    /// `#[repr(C)]` structs here must land every field in the same place. A
+    /// wasm binding *reads* these numbers; this crate gets to *assert* them.
+    #[test]
+    fn struct_layout_matches_the_library() {
+        let mut out = [0u32; DV_LAYOUT_COUNT];
+        let n = unsafe { dv_layout(out.as_mut_ptr(), out.len()) } as usize;
+        assert_eq!(n, DV_LAYOUT_COUNT, "the library knows entries we do not");
+
+        assert_eq!(out[DV_LAYOUT_CONFIG_SIZE] as usize, size_of::<dv_config>());
+        assert_eq!(out[DV_LAYOUT_CONFIG_ABI] as usize, offset_of!(dv_config, abi_version));
+        assert_eq!(out[DV_LAYOUT_CONFIG_FLAGS] as usize, offset_of!(dv_config, flags));
+
+        assert_eq!(out[DV_LAYOUT_QUEUE_INFO_SIZE] as usize, size_of::<dv_queue_info>());
+        assert_eq!(
+            out[DV_LAYOUT_QUEUE_INFO_CAPACITY] as usize,
+            offset_of!(dv_queue_info, capacity)
+        );
+        assert_eq!(out[DV_LAYOUT_QUEUE_INFO_LEN] as usize, offset_of!(dv_queue_info, len));
+        assert_eq!(
+            out[DV_LAYOUT_QUEUE_INFO_ENABLED] as usize,
+            offset_of!(dv_queue_info, enabled)
+        );
+        assert_eq!(
+            out[DV_LAYOUT_QUEUE_INFO_EXPORTED] as usize,
+            offset_of!(dv_queue_info, exported)
+        );
+        assert_eq!(
+            out[DV_LAYOUT_QUEUE_INFO_DIRECTION] as usize,
+            offset_of!(dv_queue_info, direction)
+        );
+        assert_eq!(
+            out[DV_LAYOUT_QUEUE_INFO_ON_FULL] as usize,
+            offset_of!(dv_queue_info, on_full)
+        );
+
+        assert_eq!(out[DV_LAYOUT_WAITSET_SIZE] as usize, size_of::<dv_waitset>());
+        assert_eq!(out[DV_LAYOUT_WAITSET_N] as usize, offset_of!(dv_waitset, n));
+        assert_eq!(out[DV_LAYOUT_WAITSET_IDS] as usize, offset_of!(dv_waitset, ids));
+        assert_eq!(out[DV_LAYOUT_WAITSET_TIMEOUT] as usize, offset_of!(dv_waitset, timeout_ms));
+        assert_eq!(
+            out[DV_LAYOUT_WAITSET_FOR_WRITE] as usize,
+            offset_of!(dv_waitset, for_write)
+        );
     }
 }
