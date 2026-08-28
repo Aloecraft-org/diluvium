@@ -277,6 +277,11 @@ fn export_notifications_reach_the_host() {
     assert_eq!(seen[0], inst.queue("pub").unwrap());
 }
 
+// Needs an OS thread, and wasm has none: wasm32-wasip1/p2 answer
+// `thread::spawn` with an error rather than a thread. The property under test
+// is `Send`, which the compiler has already checked by the time this runs
+// anywhere, so skipping it on wasm costs nothing.
+#[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn an_instance_moves_between_threads() {
     // Send but not Sync: moving is fine, sharing is not. The compiler enforces

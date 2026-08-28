@@ -106,3 +106,59 @@ wasip2 under wasmtime, and the browser with an embedder shim. The
 nested-module shape (`diluvium-wasmtime`) remains what it always was -- a
 sandboxing tier and the eventual multi-version engine -- not a workaround
 anything here forces.
+
+## In the tree, not just in the spike
+
+Everything above was first measured out of tree. It is now what
+`diluvium-sys` does, because the crate could not previously cross-compile at
+all -- and said so in the worst possible way.
+
+**The false green this closed.** `build.rs` shelled out to a bare `cc` with
+no `--target` and branched on `cfg!(target_os = ...)`, which in a build
+script describes the **host**. So `cargo build --target wasm32-unknown-unknown`
+compiled an x86-64 object, emitted `-DLUA_USE_LINUX` and `-lm`/`-ldl`, and
+finished green -- a library crate is never linked, so nothing looked. Forcing
+a link was the only way to see it:
+
+```
+rust-lld: warning: archive member 'onelua.o' is neither Wasm object file nor LLVM bitcode
+rust-lld: error: unable to find library -lm
+rust-lld: error: unable to find library -ldl
+```
+
+What replaced it: every decision reads `TARGET`; a wasm target with no
+wasm-capable C toolchain is a hard error naming `WASI_SDK_PATH` rather than a
+host object; the EH flags are probed once so an old clang gets one sentence
+instead of a wall of unknown-argument noise; and the compiled object's magic
+bytes are checked against the target before it is archived. That last check
+is the one that would have caught the original bug by itself, and it is the
+artifact being checked rather than a downstream symptom -- `tests/link.rs`
+forces a link on every target as a second layer, but on
+wasm32-unknown-unknown that layer is not sufficient alone: the target links
+with `--allow-undefined`, so a symbol the archive failed to provide becomes
+an `env::` import instead of an error.
+
+**Two further operational facts**, found running the real suites rather than
+the spike guest:
+
+- `wasm_compat.c` carries the three libc stubs (wrinkle 3) as **weak**
+  definitions, plus `clock()` for wasip2 (wrinkle 4), so a libc that has its
+  own wins and nothing collides. That is what makes the archive safe to link
+  against whichever libc a consumer brings.
+- **Running a module that carries the interpreter needs the exceptions
+  proposal turned on explicitly at the CLI**: `wasmtime run -W exceptions=y`.
+  The embedded API's `config.wasm_exceptions(true)` is the same switch by
+  another name. A test binary that happens to GC the EH code away runs
+  without it, which makes the failure look intermittent -- it is not; it is
+  whether the linker kept a `try_table`.
+
+Measured after the fix, with `WASI_SDK_PATH` set: the `diluvium-sys` and
+`diluvium` suites -- snapshots, budgets, endpoints and all -- run **39 tests
+green under wasmtime on both wasip1 and wasip2**, and the browser target
+compiles a genuine wasm object and links. `dv_layout`'s ILP32 assertion
+passes there too, which is the first time that check has run on a target
+where it could actually fail. Native is unchanged.
+
+One test is `cfg`-gated off wasm: `an_instance_moves_between_threads` spawns
+an OS thread, and wasm has none. The property it exercises (`Send`) is
+compile-time everywhere.
