@@ -96,13 +96,23 @@ static const char MP_CURDEC = 0;        /* light userdata -> decode in progress 
 
 
 /*
-** Render a byte as 0xNN. 'luaL_error' formats through Lua, which understands
-** %s, %d and %I but not printf's width or radix flags -- a "%02x" there is
-** copied out literally, which is how this was found.
+** Render a byte as 0xNN into 'out', which must hold five bytes. 'luaL_error'
+** formats through Lua, which understands %s, %d and %I but not printf's width
+** or radix flags -- a "%02x" there is copied out literally, which is how this
+** was found.
+**
+** The buffer comes from the caller because the obvious 'static char out[5]'
+** here is process-global, and every caller is on a path a guest program
+** reaches: two instances on two threads -- which dv.h permits -- decoding
+** malformed bytes at the same moment would both write it, and each could read
+** the other's digits back into its own error message. A garbled message rather
+** than a crash, but a data race all the same, and found while fixing the one
+** in the continuation registries (src/dsync.h).
 */
-static const char *mp_hexbyte (int b) {
+#define MP_HEXBYTE_LEN	5
+
+static const char *mp_hexbyte (int b, char *out) {
   static const char digits[] = "0123456789abcdef";
-  static char out[5];
   out[0] = '0'; out[1] = 'x';
   out[2] = digits[(b >> 4) & 0xf];
   out[3] = digits[b & 0xf];
@@ -1181,6 +1191,7 @@ static void mp_decode_map (mp_cur *c, size_t n, int depth) {
 */
 static void mp_decode_ext (mp_cur *c, int code, size_t len) {
   lua_State *L = c->L;
+  char hex[MP_HEXBYTE_LEN];
   const char *data;
   mp_need(c, len);
   data = (const char *)c->p;
@@ -1249,7 +1260,7 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
         return;
       }
       luaL_error(L, "msgpack: ext %s is only valid inside a snapshot stream",
-                 mp_hexbyte(code));
+                 mp_hexbyte(code, hex));
       return;
     case 0x03: case 0x05: case 0x06: case 0x07: case 0x08:
       if (c->snap != NULL && c->snap->hooks != NULL &&
@@ -1271,13 +1282,13 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
       }
       if (c->snap != NULL)
         luaL_error(L, "msgpack: ext %s needs a snapshot decoder that is not "
-                      "installed", mp_hexbyte(code));
+                      "installed", mp_hexbyte(code, hex));
       luaL_error(L, "msgpack: ext %s is only valid inside a snapshot stream",
-                 mp_hexbyte(code));
+                 mp_hexbyte(code, hex));
       return;
     default:
       luaL_error(L, "msgpack: ext %s is reserved for Diluvium and not assigned",
-                 mp_hexbyte(code));
+                 mp_hexbyte(code, hex));
       return;
   }
 }
@@ -1285,6 +1296,7 @@ static void mp_decode_ext (mp_cur *c, int code, size_t len) {
 
 static void mp_decode_value (mp_cur *c, int depth) {
   lua_State *L = c->L;
+  char hex[MP_HEXBYTE_LEN];
   unsigned char t;
   if (depth > (c->snap != NULL ? MP_SNAP_MAX_DEPTH : MP_MAX_DEPTH))
     luaL_error(L, "msgpack: nesting deeper than %d",
@@ -1394,7 +1406,7 @@ static void mp_decode_value (mp_cur *c, int depth) {
 
     default:
       luaL_error(L, "msgpack: byte %s is not a valid msgpack type",
-                 mp_hexbyte(t));
+                 mp_hexbyte(t, hex));
   }
 }
 

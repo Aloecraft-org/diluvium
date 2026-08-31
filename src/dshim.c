@@ -44,6 +44,7 @@
 #include "ltm.h"
 
 #include "dshim.h"
+#include "dsync.h"
 
 
 /*
@@ -747,39 +748,90 @@ typedef struct dshim_cont { const char *name; lua_KFunction k; } dshim_cont;
 static dshim_cont dshim_conts[DSHIM_MAXCONT];
 static int dshim_ncont = 0;
 
+/*
+** This array is process-global, and 'diluvium_openlibs' appends to it on every
+** 'dv_new' -- so two threads creating their own instances, which dv.h's "one
+** instance, one thread" contract expressly permits, meet here. Unsynchronised
+** they both claimed the same slot and left 'dshim_ncont' naming one that was
+** never written, and the next scan called 'strcmp' on its NULL name. See
+** dsync.h for the full account and for why this is a mutex rather than a
+** once-guard.
+**
+** Every function below holds it, readers included: a reader that walked the
+** array while an append was in flight could see the incremented count before
+** the name store, which is the same crash by another route.
+**
+** The critical sections are a scan of at most DSHIM_MAXCONT pointer or string
+** comparisons and they call nothing that can re-enter, so there is no lock
+** ordering to get wrong and nothing to unwind.
+*/
+static dsync_lock dshim_contlock = DSYNC_LOCK_INIT;
+
+
+/*
+** Under the lock a slot below 'dshim_ncont' always has a name, so the NULL
+** checks in the scans are unreachable today. They are there so that a future
+** change to how these are registered cannot bring the original crash back
+** silently, and they cost one comparison on a scan of at most 64 entries.
+*/
 LUA_API int diluvium_shim_addcont (const char *name, lua_KFunction k) {
   int i;
+  int res = 1;
   if (name == NULL || k == NULL)
     return 0;
+  dsync_lock_acquire(&dshim_contlock);
   for (i = 0; i < dshim_ncont; i++) {
-    if (strcmp(dshim_conts[i].name, name) == 0)
-      return (dshim_conts[i].k == k);  /* idempotent, never a silent rebind */
+    if (dshim_conts[i].name != NULL && strcmp(dshim_conts[i].name, name) == 0) {
+      res = (dshim_conts[i].k == k);  /* idempotent, never a silent rebind */
+      break;
+    }
   }
-  if (dshim_ncont >= DSHIM_MAXCONT)
-    return 0;
-  dshim_conts[dshim_ncont].name = name;
-  dshim_conts[dshim_ncont].k = k;
-  dshim_ncont++;
-  return 1;
+  if (i == dshim_ncont) {             /* not registered: append */
+    if (dshim_ncont >= DSHIM_MAXCONT)
+      res = 0;
+    else {
+      dshim_conts[dshim_ncont].name = name;
+      dshim_conts[dshim_ncont].k = k;
+      dshim_ncont++;
+    }
+  }
+  dsync_lock_release(&dshim_contlock);
+  return res;
 }
 
 
+/*
+** The name outlives the lock: these are string literals owned by the library
+** that registered them, and nothing ever removes an entry, so the pointer
+** stays good after the release.
+*/
 LUA_API const char *diluvium_shim_contname (lua_KFunction k) {
+  const char *found = NULL;
   int i;
+  dsync_lock_acquire(&dshim_contlock);
   for (i = 0; i < dshim_ncont; i++) {
-    if (dshim_conts[i].k == k)
-      return dshim_conts[i].name;
+    if (dshim_conts[i].k == k) {
+      found = dshim_conts[i].name;
+      break;
+    }
   }
-  return NULL;
+  dsync_lock_release(&dshim_contlock);
+  return found;
 }
 
 
 LUA_API lua_KFunction diluvium_shim_contfunc (const char *name, size_t len) {
+  lua_KFunction found = NULL;
   int i;
+  dsync_lock_acquire(&dshim_contlock);
   for (i = 0; i < dshim_ncont; i++) {
-    if (strlen(dshim_conts[i].name) == len &&
-        memcmp(dshim_conts[i].name, name, len) == 0)
-      return dshim_conts[i].k;
+    if (dshim_conts[i].name != NULL &&
+        strlen(dshim_conts[i].name) == len &&
+        memcmp(dshim_conts[i].name, name, len) == 0) {
+      found = dshim_conts[i].k;
+      break;
+    }
   }
-  return NULL;
+  dsync_lock_release(&dshim_contlock);
+  return found;
 }
