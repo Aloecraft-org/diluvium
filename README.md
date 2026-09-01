@@ -206,11 +206,18 @@ the `msgpack`, `queue`, `endpoint`, `bytes`, `json` and `time` libraries, the sh
 program that parks on a queue, embedding an instance from C, and running a swarm of them.
 Every sample in it was run against the tree.
 
-To run programs without writing a host in C, the **generic host** (`host/`,
-`make build_host`) is one binary that implements the host protocol from a supervisor
-program plus a typed `*.host.lua` configuration — with connectors for the wall clock,
-SQLite, crypto (including JWT-HS256) and an HTTP listener, each off until the config and
-a capability grant wire it. `doc/Host.md` is the contract it implements.
+To run programs without writing a host in C, use
+**[`diluvium-drt`](https://github.com/Aloecraft-org/diluvium-drt)** — one binary that
+embeds the language and implements the host protocol, with connectors, listeners and
+deployment config in Rust over the instance ABI. It reads a `*.host.lua` configuration
+unchanged and adds connectors the C host never had (`rest`, `ssh`), so a deployment
+moves to it by swapping the binary.
+
+The **generic host** (`host/`, `make build_host`) is the original C implementation of
+the same protocol, and is now **deprecated in favour of DRT**. It is still built and
+still shipped, so nothing breaks today, but new connector work belongs in DRT.
+`doc/Host.md` is the contract both implement; **[`doc/DRT.md`](doc/DRT.md)** covers the
+split and what the C host still does that DRT does not yet.
 
 **[`doc/Benchmarks.md`](doc/Benchmarks.md) is what a swarm costs** — agents per
 gibibyte awake and hibernated, spawn and wake rates, what a message across a queue is
