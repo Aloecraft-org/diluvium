@@ -227,7 +227,37 @@ static void dv_insn_hook (lua_State *L, lua_Debug *ar) {
   inst->insn_used += DV_HOOK_STEP;
   if (inst->insn_limit != 0 && inst->insn_used >= inst->insn_limit) {
     inst->exceeded = 1;
-    lua_sethook(L, NULL, 0, 0);   /* once is enough; the error is on its way */
+    /*
+    ** The hook stays armed, and that is the whole point of this branch.
+    **
+    ** It used to clear itself here -- "once is enough; the error is on its
+    ** way" -- which was true only if nothing caught the error. 'luaL_error'
+    ** raises an ordinary Lua error, so a guest's own 'pcall' catches it, and
+    ** with the hook already gone nothing re-armed it: 'dv_run' and
+    ** 'dv_restore' are the only other sites that arm it and neither is
+    ** reachable again on a running instance. Two lines of Lua switched the
+    ** budget off permanently:
+    **
+    **   pcall(function() while true do end end)   -- trips it once
+    **   while true do end                         -- then runs unbounded
+    **
+    ** 'insn_used' stopped advancing with the hook, so 'dv_usage' reported the
+    ** instance sitting exactly at its limit while it ran on -- which blinded
+    ** the one measurement a supervisor would have used to notice.
+    **
+    ** Left armed, the hook fires again DV_HOOK_STEP instructions later, so a
+    ** catch cannot buy the program more than that before the next raise. The
+    ** budget bounds the work again and the count keeps counting.
+    **
+    ** What this does NOT do, stated here because it is easy to assume
+    ** otherwise: it does not make the error uncatchable, and it does not
+    ** return control to the host. 'while true do pcall(f) end' still spins
+    ** forever, taking DV_HOOK_STEP instructions per raise and never leaving
+    ** 'dv_run'. Lua has no uncatchable error; bounding that needs either a
+    ** 'pcall' that refuses to catch once 'exceeded' is set (a core-file patch,
+    ** so an allowlist decision) or a process-level watchdog. See the tests in
+    ** test/dv_check.c that fence this in.
+    */
     luaL_error(L, "instruction budget of %I exceeded",
                (lua_Integer)inst->insn_limit);
   }
