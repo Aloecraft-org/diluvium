@@ -57,11 +57,37 @@ with tests naming them, and `drt-bench` runs this repository's
 `test/swarm_bench.c` scenarios against the port, diffing against a checked-in
 `bench/c-swarm_bench-baseline.json`.
 
-So `make build_swarm_lib` and `dvs_check` should keep running in `test.yml`,
-and `libdiluvium-swarm` should **not** become a release artifact — publishing
-it would commit us to supporting a layer already scheduled for removal, and
-would invite a host to link what DRT replaced. `doc/Messaging.md` §12.1 said
-otherwise until this was written; it now points here.
+**It does still ship, on the wasm targets, and that matters for the deletion.**
+An earlier revision of this document said the swarm layer "ships to nobody".
+That was wrong, and the mistake is worth recording because it is easy to
+repeat: `grep swarm .github/workflows/build.yml` matches only a comment, but
+build.yml calls `make build_wasm` and `_wasm_unknown_build`, and those targets
+carry `dvs.c` in. As of `5.5.1_build12` the released artifacts contain it in
+three places:
+
+| artifact | carries `dvs.c` |
+|---|---|
+| `diluvium_swarm_wasi.wasm` | yes — a standalone module, built separately *on purpose* (`Makefile:218`): `dvs_shim.c` declares three `env` imports, and linking it into `diluvium_wasi.wasm` would break every pure-WASI consumer at instantiation. A host on the far side of the boundary — the JS binding, lab — loads this one. |
+| `libdiluvium_wasi.a` | yes (`dvs_wasi.o`, `dvs_shim_wasi.o`) |
+| `libdiluvium_wasm_unknown.a` | yes |
+| `libdiluvium_<os>_<arch>.a`, `libdiluvium_musl_*.a` | **no** — onelua, wasm_stubs, diluvium_api, analyze only |
+
+So §12.1's `diluvium-swarm-<version>-<triple>` is *met for wasm and unmet for
+the native triples*, and `make build_swarm_lib`'s native
+`libdiluvium-swarm.a` is genuinely never run by `build.yml`.
+
+Two consequences:
+
+- **Do not add native swarm artifacts.** Publishing a new
+  `libdiluvium-swarm.{a,so,dylib,dll}` would commit us to supporting a layer
+  already scheduled for removal, and would invite a host to link what DRT
+  replaced. `build_swarm_lib` and `dvs_check` stay where they are, in the
+  test sweep.
+- **Deleting `dvs.c` is a breaking change to a published artifact**, not a
+  quiet internal cleanup. `diluvium_swarm_wasi.wasm` disappears and two wasm
+  archives lose symbols, so the removal needs a release boundary, a changelog
+  entry, and a word to whoever loads that module — the JS binding does. Worth
+  settling before DRT's port passes acceptance rather than after.
 
 Acceptance, per DRT's `SPEC.md` §12, is the ported capability suite passing
 against `drt start` plus the REPL/ssh-attach demo. DRT's README places that

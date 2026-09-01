@@ -1649,14 +1649,25 @@ diluvium-<version>-headers.tar.gz
 ```
 
 **Superseded in part, and the divergence is deliberate — see `doc/DRT.md`.**
-The swarm line no longer describes anything that should ship. `src/dvs.c` is
-now a *frozen differential-test reference*: `diluvium-drt` reimplements the
-layer in `drt-swarm`, benchmarks the port against `test/swarm_bench.c`, and
-its `SPEC.md` §2 records that this repository deletes `dvs.c` once that port
-passes acceptance. Publishing `diluvium-swarm-*` would commit us to
-supporting a layer already scheduled for removal, so `build.yml` does not
-build it and should not start. `make build_swarm_lib` and `dvs_check` stay in
-the test sweep, which is the right home for a reference implementation.
+`src/dvs.c` is now a *frozen differential-test reference*: `diluvium-drt`
+reimplements the layer in `drt-swarm`, benchmarks the port against
+`test/swarm_bench.c`, and its `SPEC.md` §2 records that this repository
+deletes `dvs.c` once that port passes acceptance.
+
+The swarm line above is therefore **half met, and should not be completed**.
+The wasm half exists: `diluvium_swarm_wasi.wasm` ships as a standalone module
+(deliberately separate — see `Makefile:218`), and `libdiluvium_wasi.a` and
+`libdiluvium_wasm_unknown.a` both carry `dvs.c`. The native half does not:
+`libdiluvium_<os>_<arch>.a` holds onelua, wasm_stubs, diluvium_api and analyze
+only, and `make build_swarm_lib`'s `libdiluvium-swarm.a` is never run by
+`build.yml`. Adding the native artifacts would commit us to supporting a layer
+already scheduled for removal, so they stay unbuilt; `build_swarm_lib` and
+`dvs_check` stay in the test sweep, which is the right home for a reference
+implementation.
+
+Note what that means for the deletion: removing `dvs.c` withdraws a *published*
+wasm artifact, so it needs a release boundary and a changelog entry rather than
+a quiet cleanup.
 
 The headers tarball is also unbuilt, and the premise underneath this whole
 section has moved: the Rust binding does not fetch a prebuilt library from
