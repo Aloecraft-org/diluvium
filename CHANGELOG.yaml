@@ -120,6 +120,26 @@ releases:
         other's digits into their own error message. The caller supplies
         the buffer now. A garbled message rather than a crash, but a
         race on a guest-reachable path all the same.
+    changed:
+      - |
+        **The generic host (`host/`, `make build_host`) is deprecated in
+        favour of [`diluvium-drt`](https://github.com/Aloecraft-org/diluvium-drt).**
+        Documentation only -- the host is still built, still shipped, and
+        behaves exactly as it did; there is no runtime deprecation notice,
+        because a deployment's log is the wrong place for a warning nobody
+        can act on without changing runtimes. `doc/Host.md` stays normative
+        for both implementations. New `doc/DRT.md` covers the split and
+        analyses what the C host still does that DRT does not yet -- local
+        `exec/run` most notably, which appears in none of DRT's own tracking.
+      - |
+        **`doc/Messaging.md` §12.1's artifact list is marked superseded in
+        part.** `src/dvs.c` is now a frozen differential-test reference that
+        `diluvium-drt` reimplements and benchmarks against, and its SPEC
+        records that this repository deletes it once that port passes
+        acceptance -- so `diluvium-swarm-*` is deliberately not a release
+        artifact, and `make build_swarm_lib`/`dvs_check` stay in the test
+        sweep where a reference implementation belongs. Stated because the
+        stale line reads as a broken release otherwise.
     added:
       - |
         **`make dshim_race_check` and `make dshim_race_tsan`**, over a

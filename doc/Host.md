@@ -1,5 +1,20 @@
 # The host protocol
 
+> **The generic host in `host/` is deprecated in favour of
+> [`diluvium-drt`](https://github.com/Aloecraft-org/diluvium-drt).** DRT is the
+> successor implementation of this protocol: one binary that embeds the
+> language, with connectors, listeners and deployment config in Rust over the
+> instance ABI. It reads a `diluvium-host` `.host.lua` unchanged.
+>
+> **This document is not deprecated.** It is the normative protocol both
+> implementations answer to, and DRT's `SPEC.md` cites it as such. What is
+> deprecated is the C *implementation* described below as the "generic host" —
+> still built by `make build_host`, still shipped, no longer where new
+> connector work belongs.
+>
+> `doc/DRT.md` covers the split, and what the C host still does that DRT does
+> not yet — `exec/run` most notably.
+
 What a host *is*, and the duties any host performs — written so that two
 implementations can exist and agree: the lab host in JavaScript (driving the
 wasm build from outside the module) and the generic host in C (native, and
@@ -17,8 +32,8 @@ instances, parents, capabilities and budgets. The standalone `diluvium`
 executable is none of these: it runs a script unsealed in its own state, and
 the boundary machinery is never engaged.
 
-The **generic host** (`host/`, `make build_host`) is the reference
-implementation of this protocol: one binary that drives a deployment from a
+The **generic host** (`host/`, `make build_host`) is the original reference
+implementation of this protocol, now deprecated in favour of DRT: one binary that drives a deployment from a
 supervisor program plus a typed `*.host.lua` configuration, so a deployment is
 data, not C. `host/dhost.c` is the core (construction, the drive loop, the
 roster, the hostcall pump); the listener, SQLite, crypto, fs and exec

@@ -4,6 +4,18 @@
 **
 **   diluvium-host deployment.host.lua
 **
+** DEPRECATED in favour of 'diluvium-drt', which implements the same protocol
+** with connectors and deployment config in Rust over the instance ABI, reads
+** a '.host.lua' unchanged, and does not require a second binary beside the
+** language. This host is still built and still shipped -- nothing here is
+** withdrawn -- but new connector work belongs there. doc/DRT.md has the split
+** and the surface this host still covers that DRT does not yet ('exec/run'
+** most notably); doc/Host.md remains the normative protocol for both.
+**
+** Deliberately no runtime deprecation notice: this binary's stdout is a
+** deployment's log, and a warning nobody can act on without changing runtimes
+** would be noise in every one of them.
+**
 ** Everything interesting is in dhost.c and doc/Host.md; what main owns is
 ** the outer loop's pacing. dvs_step is cheap on a parked swarm, so the loop
 ** sleeps on poll() when there is a listener and on a plain nanosleep when
