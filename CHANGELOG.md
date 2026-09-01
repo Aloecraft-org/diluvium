@@ -10,6 +10,100 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build12] - 2026-09-01
+
+`v5.5.1_build12` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**A crash fix for hosts that create instances on more than one
+thread.** `dv_new` appended to two process-global arrays with no
+synchronisation at all, so two threads creating their own
+instances at the same moment could kill the process -- inside
+`strcmp`, in a registry scan, in the first microseconds of a fresh
+process. Nothing else changes: no new surface, no format
+movement, and a single-threaded host behaves exactly as it did on
+build11.
+
+### Added
+
+- **`make dshim_race_check` and `make dshim_race_tsan`**, over a
+  new `test/dshim_race_check.c`: several threads released together
+  into `dv_new` in a *fresh* process, repeated over many
+  executions, asserting both that nothing crashes and that every
+  continuation name is still registered afterwards. The
+  ThreadSanitizer lane is the one that decides -- ASan, UBSan and
+  valgrind's default tool detect no data races, which is why the
+  existing sanitizer sweep was silent on this -- and it reports
+  the race on the unfixed tree within the first execution.
+
+### Changed
+
+- **The generic host (`host/`, `make build_host`) is deprecated in
+  favour of [`diluvium-drt`](https://github.com/Aloecraft-org/diluvium-drt).**
+  Documentation only -- the host is still built, still shipped, and
+  behaves exactly as it did; there is no runtime deprecation notice,
+  because a deployment's log is the wrong place for a warning nobody
+  can act on without changing runtimes. `doc/Host.md` stays normative
+  for both implementations. New `doc/DRT.md` covers the split and
+  analyses what the C host still does that DRT does not yet -- local
+  `exec/run` most notably, which appears in none of DRT's own tracking.
+- **`doc/Messaging.md` §12.1's artifact list is marked superseded in
+  part.** `src/dvs.c` is now a frozen differential-test reference that
+  `diluvium-drt` reimplements and benchmarks against, and its SPEC
+  records that this repository deletes it once that port passes
+  acceptance -- so `diluvium-swarm-*` is deliberately not a release
+  artifact, and `make build_swarm_lib`/`dvs_check` stay in the test
+  sweep where a reference implementation belongs. Stated because the
+  stale line reads as a broken release otherwise.
+
+### Fixed
+
+- **A data race in the named-continuation registries could kill
+  the process on concurrent `dv_new` (SIGSEGV in `strcmp`).**
+  `diluvium_shim_addcont` and `diluvium_snap_addcont` scanned and
+  appended to process-global arrays with no lock, atomic or
+  once-guard. Two threads could claim the same slot and both
+  increment the count, leaving an entry whose name was still
+  `NULL` for the next scan to hand to `strcmp`; separately,
+  nothing ordered the name store before the increment, so a
+  scanner could see the larger count and the older name. Both are
+  closed by a mutex (`src/dsync.h`: pthreads, SRWLOCK on Windows,
+  a no-op where there are no threads) held across the whole
+  scan-then-append -- and across the four readers too, which had
+  the same exposure.
+
+  This was reachable from a host obeying `dv.h` to the letter:
+  the "one instance, one thread" rule is per instance and the
+  registries are per process, and the header said nothing about
+  the gap. It now does. Anyone holding a binary built from
+  `f137b308c4dce917b24c71ab41add61606945e58` or earlier has an
+  affected copy.
+- **`ds_learnconts`'s once-flag raced.** A plain `static int done`
+  let two threads run the body at once, which both widened the
+  window above and could leave the registry missing
+  `baselib.pcall` -- surfacing much later, and far from its cause,
+  as a snapshot refused for a continuation the process could
+  perfectly well have known. Now guarded, with the body held
+  across the guard so nobody proceeds against a half-filled
+  registry.
+- **`msgpack`'s hex-byte formatter used a shared static buffer.**
+  Found while fixing the above: two instances on two threads
+  decoding malformed bytes at the same moment could each read the
+  other's digits into their own error message. The caller supplies
+  the buffer now. A garbled message rather than a crash, but a
+  race on a guest-reachable path all the same.
+
+### Upgrading
+
+Nothing to do. The snapshot format, the permanents fingerprint and
+the bytecode format are all unmoved, so snapshots and compiled
+chunks cross this build in both directions.
+
+Hosts that worked around the crash by serialising instance
+*creation* behind their own mutex can drop that once they are on
+this build; the runtime does it now, and only around the
+registration itself rather than around `dv_new`.
+
+
 ## [5.5.1_build11] - 2026-08-24
 
 `v5.5.1_build11` &middot; Lua 5.5.1 &middot; bytecode format `0x46`

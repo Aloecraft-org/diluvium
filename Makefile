@@ -526,6 +526,76 @@ dshim_check: _build_step0
 	  $(CURDIR)/test/dshim_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dshim_check
 
+# The named-continuation registries under concurrent 'dv_new'. See the header
+# comment in test/dshim_race_check.c for why this is shaped the way it is; the
+# short version is that the race window is the first few microseconds of a
+# *fresh* process and shuts permanently once every name is registered.
+#
+# So the iterations are executions, not loop turns: RACE_RUNS fresh processes,
+# each with RACE_THREADS threads released together into 'dv_new'. Running one
+# process a thousand times over is the axis that finds this; looping inside one
+# process is the axis that found nothing for four days.
+#
+# Not TEST_CFLAGS: that is the ltests.h build, whose accounting allocator keeps
+# process-global counters that several threads creating states at once would
+# race on themselves. -O1 -g matches what the sanitizer targets use.
+#
+# What this lane proves, stated plainly so nobody mistakes it for the gate: it
+# is a guard against the *crash* coming back, and it is a weak one. On the
+# unfixed tree it survived 300 executions at 8 threads and 200 at 32 on a
+# four-core machine without dying once -- which is the same result that made
+# 2,600 clean runs of a test binary look like evidence of absence for four
+# days. 'dshim_race_tsan' below is the lane that actually decides.
+RACE_CFLAGS = -O1 -g -fno-omit-frame-pointer $(PLATFORM_CFLAGS)
+RACE_RUNS ?= 300
+RACE_THREADS ?= 8
+
+dshim_race_check: _build_step0
+	gcc $(RACE_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data -pthread \
+	  -o $(CURDIR)/dist/dshim_race_check \
+	  $(CURDIR)/test/dshim_race_check.c $(CURDIR)/.data/onelua.c -lm
+	@echo "=== $(RACE_RUNS) fresh processes x $(RACE_THREADS) threads"
+	@i=0; while [ $$i -lt $(RACE_RUNS) ]; do \
+	  out=$$(DILUVIUM_RACE_THREADS=$(RACE_THREADS) \
+	          $(CURDIR)/dist/dshim_race_check 2>&1) || { \
+	    echo "$$out"; \
+	    echo "dshim_race_check failed on execution $$i of $(RACE_RUNS)"; \
+	    exit 1; }; \
+	  i=$$((i+1)); \
+	done; \
+	echo "$(RACE_RUNS) cold starts, $(RACE_THREADS) threads each, no crash and"
+	@echo "every continuation name still registered"
+
+# The real gate. ASan and UBSan do not detect data races and neither does
+# valgrind's default tool, which is why 'sanitize_checks' was silent on this for
+# four days; ThreadSanitizer is what sees it, and on an unfixed tree it reports
+# the race on 'dshim_ncont' within the first execution or two.
+#
+# Fewer executions than the plain lane on purpose: TSan finds the race from the
+# *memory accesses*, not from an unlucky interleaving, so it does not need the
+# repetition -- and it costs roughly an order of magnitude in run time.
+#
+# halt_on_error so the first report is the exit status rather than a warning
+# scrolled past in a green job.
+TSAN_RUNS ?= 20
+
+dshim_race_tsan: _build_step0
+	gcc -fsanitize=thread -O1 -g -fno-omit-frame-pointer \
+	  $(PLATFORM_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dshim_race_tsan \
+	  $(CURDIR)/test/dshim_race_check.c $(CURDIR)/.data/onelua.c -lm
+	@echo "=== $(TSAN_RUNS) fresh processes x $(RACE_THREADS) threads, under tsan"
+	@i=0; while [ $$i -lt $(TSAN_RUNS) ]; do \
+	  out=$$(TSAN_OPTIONS=halt_on_error=1 \
+	          DILUVIUM_RACE_THREADS=$(RACE_THREADS) \
+	          $(CURDIR)/dist/dshim_race_tsan 2>&1) || { \
+	    echo "$$out"; \
+	    echo "dshim_race_tsan failed on execution $$i of $(TSAN_RUNS)"; \
+	    exit 1; }; \
+	  i=$$((i+1)); \
+	done; \
+	echo "$(TSAN_RUNS) cold starts clean under ThreadSanitizer"
+
 # The generic host: doc/Host.md as a binary. Links the system sqlite for now;
 # the pinned amalgamation is the full-variant packaging decision and lands
 # with it. Built from src via .data like everything else.

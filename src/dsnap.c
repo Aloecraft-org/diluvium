@@ -22,6 +22,7 @@
 #include "dshim.h"
 #include "dtask.h"
 #include "dsnap.h"
+#include "dsync.h"
 
 
 int ds_decodeheader_trampoline (lua_State *L);
@@ -1021,14 +1022,63 @@ static void ds_learncont (lua_State *L, const char *src, const char *name) {
 }
 
 
-static void ds_learnconts (lua_State *L) {
-  static int done = 0;
-  if (done)
-    return;
-  done = 1;
+/*
+** The learning happens once per process, and the flag saying so is
+** process-global -- so two threads reaching this from their own instances both
+** saw it clear and both ran the body, which is two concurrent writers into the
+** shim registry rather than one. That widened the window in dshim.c's append
+** rather than being a separate defect, but it is a race in its own right and
+** is closed here.
+**
+** The lock is held across the body, not just the flag: a second thread that
+** was let past while the first was still learning would go on to take a
+** snapshot against a registry missing 'baselib.pcall', and a snapshot refused
+** for a name the process could have known is exactly the silent failure this
+** is meant to prevent. Registration is once per process and the body is two
+** small canary threads, so nothing waits on this twice.
+**
+** Different lock from dshim.c's, and the nesting only ever goes this way --
+** ds_learnconts -> ds_learncont -> diluvium_shim_addcont, never the reverse --
+** so the two cannot deadlock against each other.
+*/
+static dsync_lock ds_learnlock = DSYNC_LOCK_INIT;
+static int ds_learned = 0;
+
+
+static int ds_learnconts_body (lua_State *L) {
   ds_learncont(L, "pcall(function() coroutine.yield() end)", "baselib.pcall");
   ds_learncont(L, "xpcall(function() coroutine.yield() end, function(e) "
                   "return e end)", "baselib.xpcall");
+  return 0;
+}
+
+
+/*
+** Through 'lua_pcall' because the body is not raise-free: 'lua_newthread' in
+** 'ds_learncont' throws LUA_ERRMEM if the allocator refuses, and an error
+** longjmping past the release below would leave the lock held for the life of
+** the process. Everything before the 'lua_pcall' is chosen to be raise-free
+** too -- 'lua_checkstack' reports rather than throws, and 'lua_pushcfunction'
+** with no upvalues stores a light C function and allocates nothing.
+**
+** A failed attempt is not retried, which is the behaviour the old flag had:
+** learning nothing means a snapshot needing the name is refused by name later,
+** which 'ds_learncont' above already documents as the correct outcome. The
+** error object is dropped rather than reported for the same reason -- and it
+** must be dropped: 'lua_pcall' pushes it whatever 'nresults' says, and this
+** runs from 'diluvium_snap_hooks', which owes its caller an unchanged stack.
+*/
+static void ds_learnconts (lua_State *L) {
+  dsync_lock_acquire(&ds_learnlock);
+  if (!ds_learned) {
+    ds_learned = 1;
+    if (lua_checkstack(L, 2)) {     /* the function, and room for an error */
+      lua_pushcfunction(L, ds_learnconts_body);
+      if (lua_pcall(L, 0, 0, 0) != LUA_OK)
+        lua_pop(L, 1);
+    }
+  }
+  dsync_lock_release(&ds_learnlock);
 }
 
 
@@ -1309,35 +1359,73 @@ typedef struct ds_cont { const char *name; lua_KFunction k; } ds_cont;
 static ds_cont ds_conts[DS_MAXCONT];
 static int ds_ncont = 0;
 
+/*
+** The same process-global array over the same defect as dshim.c's, and locked
+** the same way for the same reasons -- writers and readers alike, see the
+** comment on 'dshim_contlock' and dsync.h. It has not been seen to crash only
+** because it is reached from the snapshot path rather than from every
+** 'dv_new', which makes it rarer and not safer.
+**
+** Its own lock rather than dshim.c's: the two arrays are independent, and
+** sharing one would put this file's critical sections in the path of every
+** instance creation for no benefit.
+*/
+static dsync_lock ds_contlock = DSYNC_LOCK_INIT;
+
 LUA_API int diluvium_snap_addcont (const char *name, lua_KFunction k) {
   int i;
-  if (name == NULL || k == NULL || ds_ncont >= DS_MAXCONT)
+  int res = 1;
+  if (name == NULL || k == NULL)
     return 0;
-  for (i = 0; i < ds_ncont; i++) {
-    if (strcmp(ds_conts[i].name, name) == 0)
-      return (ds_conts[i].k == k);   /* idempotent, but not a silent rebind */
+  dsync_lock_acquire(&ds_contlock);
+  if (ds_ncont >= DS_MAXCONT)
+    res = 0;
+  else {
+    for (i = 0; i < ds_ncont; i++) {
+      if (ds_conts[i].name != NULL && strcmp(ds_conts[i].name, name) == 0) {
+        res = (ds_conts[i].k == k);  /* idempotent, but not a silent rebind */
+        break;
+      }
+    }
+    if (i == ds_ncont) {             /* not registered: append */
+      ds_conts[ds_ncont].name = name;
+      ds_conts[ds_ncont].k = k;
+      ds_ncont++;
+    }
   }
-  ds_conts[ds_ncont].name = name;
-  ds_conts[ds_ncont].k = k;
-  ds_ncont++;
-  return 1;
+  dsync_lock_release(&ds_contlock);
+  return res;
 }
 
+/* The name outlives the lock; see 'diluvium_shim_contname' for why. */
 static const char *ds_contname (lua_KFunction k) {
+  const char *found = NULL;
   int i;
-  for (i = 0; i < ds_ncont; i++)
-    if (ds_conts[i].k == k) return ds_conts[i].name;
-  return NULL;
+  dsync_lock_acquire(&ds_contlock);
+  for (i = 0; i < ds_ncont; i++) {
+    if (ds_conts[i].k == k) {
+      found = ds_conts[i].name;
+      break;
+    }
+  }
+  dsync_lock_release(&ds_contlock);
+  return found;
 }
 
 static lua_KFunction ds_contfunc (const char *name, size_t len) {
+  lua_KFunction found = NULL;
   int i;
+  dsync_lock_acquire(&ds_contlock);
   for (i = 0; i < ds_ncont; i++) {
-    if (strlen(ds_conts[i].name) == len &&
-        memcmp(ds_conts[i].name, name, len) == 0)
-      return ds_conts[i].k;
+    if (ds_conts[i].name != NULL &&
+        strlen(ds_conts[i].name) == len &&
+        memcmp(ds_conts[i].name, name, len) == 0) {
+      found = ds_conts[i].k;
+      break;
+    }
   }
-  return NULL;
+  dsync_lock_release(&ds_contlock);
+  return found;
 }
 
 

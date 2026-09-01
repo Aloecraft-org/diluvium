@@ -145,6 +145,15 @@ jobs:
       - name: Run the accessor-shim contract tests
         run: make dshim_check
 
+      # The named-continuation registries under concurrent 'dv_new'. Fresh
+      # processes rather than loop turns: the race window is the first few
+      # microseconds of a cold process and shuts for good once every name is
+      # registered, so iterations inside one process sample nothing. This lane
+      # is a crash-regression guard and a weak one -- ThreadSanitizer, in the
+      # sanitizers job below, is what actually decides.
+      - name: Run the registry race check
+        run: make dshim_race_check
+
       # SHA-256 against the published vectors. Checked against the standard and
       # not against itself, because 10.5 makes a Proto's hash a security
       # boundary: a collision is a snapshot naming one function and being handed
@@ -412,6 +421,15 @@ jobs:
       # with (NULL, 0), and memcpy's parameters are non-null whatever the length.
       - name: Contract tests under the sanitizers
         run: make sanitize_checks
+
+      # ThreadSanitizer, in its own build because it cannot be combined with
+      # AddressSanitizer. This is the gate on the continuation registries, and
+      # the reason it exists is that neither ASan nor UBSan -- nor valgrind's
+      # default tool -- detects a data race at all, so four days of clean
+      # sanitizer runs said nothing about a race that was killing CI. On the
+      # unfixed tree this reports 'dshim_ncont' on the first execution.
+      - name: The registry race check under ThreadSanitizer
+        run: make dshim_race_tsan
 
       # The compiler and the analyzer walk instruction operands by hand, so
       # they are exactly where a decoding mistake hides. This is what caught

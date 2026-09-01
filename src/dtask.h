@@ -70,6 +70,13 @@ LUA_API int diluvium_task_call (lua_State *L, int nargs, int nres,
 **
 ** Process-wide, not per-state. The ABI is one-instance-one-thread and this
 ** is an embedder setting, not a guest-visible one.
+**
+** Being process-wide, this and 'diluvium_task_setwait' below are unsynchronised
+** and are meant to be set once, at startup, before any thread creates an
+** instance -- which is what the interpreter in lua.c does. Setting one while
+** another thread is running a program is a data race on the pointer. Unlike the
+** continuation registries (see src/dsync.h), no path inside the runtime calls
+** these, so nothing here is reached by merely creating instances concurrently.
 */
 typedef void (*diluvium_task_hook) (lua_State *co, void *ud);
 

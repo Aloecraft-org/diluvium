@@ -18,6 +18,20 @@
 **   -- the Rust wrapper is !Sync, the Python one documents it, the JS one is
 **   single-threaded by construction.
 **
+**   The rule is about one instance, and the contract has never forbidden two.
+**   Creating, running and freeing *different* instances on different threads at
+**   the same time is permitted, 'dv_new' included: the little process-global
+**   state behind this surface -- the named-continuation registries -- is locked
+**   by the library, so there is no initialisation call to make first and no
+**   order to get right. See src/dsync.h.
+**
+**   That sentence is new, and it is here because its absence was a bug rather
+**   than a documentation gap. The registries were unsynchronised, so two
+**   threads in 'dv_new' at once could kill the process in the registry scan --
+**   and a host reading the rule above carefully, obeying it exactly, still
+**   walked into it. Fixed in 5.5.1_build12; a build older than that crashes
+**   here whatever this header says.
+**
 **   The host drives. 'dv_run' returns when the program parks, hands over what
 **   it is waiting for, and leaves the decision to the caller. There is no
 **   scheduler and no clock in here.
