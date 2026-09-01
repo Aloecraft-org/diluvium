@@ -1648,6 +1648,22 @@ diluvium-swarm-<version>-<target-triple>.{a,so,dylib,dll,wasm}
 diluvium-<version>-headers.tar.gz
 ```
 
+**Superseded in part, and the divergence is deliberate — see `doc/DRT.md`.**
+The swarm line no longer describes anything that should ship. `src/dvs.c` is
+now a *frozen differential-test reference*: `diluvium-drt` reimplements the
+layer in `drt-swarm`, benchmarks the port against `test/swarm_bench.c`, and
+its `SPEC.md` §2 records that this repository deletes `dvs.c` once that port
+passes acceptance. Publishing `diluvium-swarm-*` would commit us to
+supporting a layer already scheduled for removal, so `build.yml` does not
+build it and should not start. `make build_swarm_lib` and `dvs_check` stay in
+the test sweep, which is the right home for a reference implementation.
+
+The headers tarball is also unbuilt, and the premise underneath this whole
+section has moved: the Rust binding does not fetch a prebuilt library from
+the mirror, it compiles `src/onelua.c` from source (`bindings/rust/diluvium-sys`).
+Whether the mirror-fetch model still applies to the npm and PyPI packaging is
+an open question rather than a settled one — it has not been re-checked.
+
 The npm, crates, and PyPI packaging scripts all fetch from the mirror. No package
 gets its own retrieval logic.
 
