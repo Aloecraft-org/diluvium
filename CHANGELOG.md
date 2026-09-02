@@ -10,11 +10,12 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
-## [5.5.1_build13] - unreleased (prerelease)
+## [5.5.1_build12p1] - 2026-09-02
 
-`v5.5.1_build13` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+`v5.5.1_build12p1` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
-**The instruction budget was switched off by its own first firing.**
+**A patch release on build12: the instruction budget was switched off
+by its own first firing.**
 A guest that tripped the budget inside its own `pcall` ran unbounded
 from then on, for the life of the instance, and `dv_usage` reported it
 sitting exactly at its limit the whole time. Two lines of Lua were

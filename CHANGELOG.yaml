@@ -56,16 +56,18 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
-  - version: "5.5.1_build13"
-    tag: v5.5.1_build13
-    date: null
-    status: unreleased
-    stable: false
-    mirror: false
+  - version: "5.5.1_build12p1"
+    tag: v5.5.1_build12p1
+    date: 2026-09-02
+    status: released
+    stable: true
+    mirror: true
+    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
-      **The instruction budget was switched off by its own first firing.**
+      **A patch release on build12: the instruction budget was switched off
+      by its own first firing.**
       A guest that tripped the budget inside its own `pcall` ran unbounded
       from then on, for the life of the instance, and `dv_usage` reported it
       sitting exactly at its limit the whole time. Two lines of Lua were
@@ -139,7 +141,6 @@ releases:
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
