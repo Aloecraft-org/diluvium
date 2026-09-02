@@ -1448,6 +1448,72 @@ static void an_instruction_budget_aborts_a_runaway (void) {
 }
 
 
+static void a_budget_survives_a_guest_pcall (void) {
+  /*
+  ** The budget used to be switched off by its own first firing. The hook
+  ** cleared itself before raising, 'luaL_error' raises an ordinary catchable
+  ** error, and nothing re-arms the hook on a running instance -- so a guest
+  ** that tripped the budget inside a 'pcall' ran unbounded from then on, for
+  ** the life of the instance.
+  **
+  ** 30,000,000 instructions of work against a 1,000,000 budget: this returned
+  ** DV_DONE before the fix, which is the whole bug in one assertion. The
+  ** margin is deliberately wide so the case cannot pass by accident.
+  */
+  static const char *src =
+    "pcall(function() while true do end end)\n"
+    "local n = 0\n"
+    "for i = 1, 30000000 do n = n + 1 end\n"
+    "return n\n";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  dv_status st;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  dv_set_budget(inst, 1000000, 0);
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=pcall-escape");
+  memset(&ws, 0, sizeof(ws));
+  st = dv_run(inst, &ws);
+  ok(st == DV_ERROR,
+     "a runaway caught by the guest's own pcall still stops the program");
+  ok(dv_exceeded(inst), "and the instance is marked exceeded");
+  dv_free(inst);
+}
+
+
+static void usage_keeps_counting_past_the_budget (void) {
+  /*
+  ** The other half, and the one a supervisor sees. With the hook cleared,
+  ** 'insn_used' froze at the limit: an escaped instance reported itself
+  ** sitting exactly at budget while it ran on, which is the healthiest
+  ** possible reading. SPEC-level health checks measure saturation from
+  ** 'dv_usage', so the escape blinded the instrument meant to catch it.
+  **
+  ** Asserting strictly greater than the limit is what distinguishes a hook
+  ** that kept counting from one that stopped: the frozen value was exactly
+  ** the limit.
+  */
+  static const char *src =
+    "pcall(function() while true do end end)\n"
+    "local n = 0\n"
+    "for i = 1, 30000000 do n = n + 1 end\n";
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  uint64_t used = 0;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  dv_set_budget(inst, 1000000, 0);
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=usage-past-budget");
+  memset(&ws, 0, sizeof(ws));
+  dv_run(inst, &ws);
+  dv_usage(inst, &used, NULL);
+  ok(used > 1000000,
+     "usage keeps counting past a budget the guest caught and tried to ignore");
+  if (used <= 1000000)
+    printf("      (used %lu, which is the frozen-at-the-limit reading)\n",
+           (unsigned long)used);
+  dv_free(inst);
+}
+
+
 static void a_budget_does_not_disturb_a_program_inside_it (void) {
   static const char *src = "local n = 0 for i = 1, 1000 do n = n + i end return n";
   dv_instance *inst = dv_new(NULL);
@@ -2478,6 +2544,8 @@ int main (void) {
 
   printf("\n=== budgets (9.4) ===\n");
   an_instruction_budget_aborts_a_runaway();
+  a_budget_survives_a_guest_pcall();
+  usage_keeps_counting_past_the_budget();
   a_budget_does_not_disturb_a_program_inside_it();
   a_memory_budget_refuses_an_allocation();
   the_memory_counter_agrees_with_the_collector();

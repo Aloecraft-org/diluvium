@@ -10,6 +10,84 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build13] - unreleased (prerelease)
+
+`v5.5.1_build13` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**The instruction budget was switched off by its own first firing.**
+A guest that tripped the budget inside its own `pcall` ran unbounded
+from then on, for the life of the instance, and `dv_usage` reported it
+sitting exactly at its limit the whole time. Two lines of Lua were
+enough. One line of C fixes it. Read the "what this does not fix"
+note below before treating the whole class as closed.
+
+### Changed
+
+- **`dv_usage` keeps counting past a budget the guest tried to ignore.**
+  `insn_used` advanced only in the hook, so it froze the moment the hook
+  cleared itself: an escaped instance reported *exactly* its limit —
+  the healthiest possible reading — while running on. A supervisor
+  measuring saturation from `dv_usage` was reading a number the defect
+  controlled. `usage_keeps_counting_past_the_budget` holds it, asserting
+  strictly greater than the limit, because the frozen value was the
+  limit exactly.
+
+### Fixed
+
+- **A guest `pcall` permanently disabled the instruction budget.** The
+  count hook cleared itself before raising:
+
+  ```c
+  inst->exceeded = 1;
+  lua_sethook(L, NULL, 0, 0);   /* once is enough; the error is on its way */
+  luaL_error(L, "instruction budget of %I exceeded", ...);
+  ```
+
+  `luaL_error` raises an ordinary catchable Lua error, so a guest's own
+  `pcall` caught it — and with the hook already cleared nothing re-armed
+  it, because `dv_run` and `dv_restore` are the only other sites that arm
+  it and neither is reachable again on a running instance. So:
+
+  ```lua
+  pcall(function() while true do end end)   -- trips the budget once
+  while true do end                         -- then runs unbounded
+  ```
+
+  Measured against a 1,000,000-instruction budget, a program doing
+  30,000,000 instructions of work returned `DV_DONE`. The hook now stays
+  armed, so it fires again within `DV_HOOK_STEP` and the budget bounds
+  the work again. `a_budget_survives_a_guest_pcall` holds it.
+
+### Known issues
+
+- **What this does not fix: a guest that catches in a loop still spins.**
+  Stated plainly so the class is not filed as closed. The fix bounds the
+  *work* a guest can do past its budget; it does not make the error
+  uncatchable and it does not return control to the host.
+
+  ```lua
+  while true do pcall(function() while true do end end) end
+  ```
+
+  still never leaves `dv_run` — each catch buys `DV_HOOK_STEP`
+  instructions and the loop repeats. Lua has no uncatchable error.
+  Closing it needs one of: a `pcall`/`xpcall` that refuses to catch once
+  `exceeded` is set, which is a core-file patch and so a
+  `CORE_PATCH_ALLOWLIST` decision rather than a change; or a
+  process-level watchdog, since a host inside `dv_run` has no way in --
+  `dv.h` exposes no interrupt. The practical bound today is operational:
+  run the host under a supervisor that restarts it, and alert on the
+  restart count rather than absorbing it.
+
+### Upgrading
+
+Nothing to do, and no format movement. One behaviour change worth
+knowing: a guest that catches the budget error in a `pcall` no longer
+continues past it — the error is re-raised roughly every 1,000
+instructions until the program unwinds. A program that relied on
+catching the budget error and carrying on was relying on the defect.
+
+
 ## [5.5.1_build12] - 2026-09-01
 
 `v5.5.1_build12` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
