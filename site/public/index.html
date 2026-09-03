@@ -1,0 +1,295 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diluvium — a small language that runs anywhere</title>
+<meta name="description" content="Diluvium is a small, sealed, portable language and runtime. Modern syntax, one portable bytecode, under 1 MiB, running everywhere from a browser tab to bare metal — and in your browser right now.">
+<meta property="og:title" content="Diluvium — a small language that runs anywhere">
+<meta property="og:description" content="A small, sealed, portable language and runtime. Try it in the browser, no install.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://diluvium.aloecraft.org/">
+</head>
+<body>
+
+<a class="skip" href="#repl">Skip to the interpreter</a>
+
+<header class="site">
+  <a class="brand" href="/">
+    <span class="mark" aria-hidden="true">~</span>
+    <span>Diluvium</span>
+  </a>
+  <span class="version" id="version-badge" title="Latest release on the mirror"></span>
+  <nav>
+    <a href="#repl">Try</a>
+    <a href="#install">Install</a>
+    <a href="/lab/">Lab</a>
+    <a href="/release/">Releases</a>
+    <a href="/docs/">Docs</a>
+    <a href="https://github.com/Aloecraft-org/diluvium" rel="noopener">GitHub</a>
+  </nav>
+</header>
+
+<main>
+
+  <section class="hero">
+    <div class="hero-copy">
+      <h1>Small language. Sealed runtime. Runs anywhere.</h1>
+      <p class="lede">
+        Diluvium is a general-purpose language and the runtime underneath it.
+        Modern syntax — string interpolation, <code>switch</code>,
+        <code>defer</code>, safe navigation — compiled to
+        <strong>one portable bytecode</strong> that behaves the same in a browser
+        tab, on a server, or on hardware with a few hundred kilobytes to spare.
+        The whole runtime is under a megabyte, and a program can reach nothing
+        you did not hand it.
+      </p>
+      <p class="lede-note">
+        The syntax is a compatible superset of Lua 5.5, so existing Lua code runs
+        unmodified. If you have never written Lua, there is nothing to catch up on.
+      </p>
+      <div class="cta">
+        <div class="oneliner">
+          <code id="install-cmd">curl -fsSL https://diluvium.aloecraft.org/start | sh</code>
+          <button id="copy-install" class="copy" type="button" aria-label="Copy install command">Copy</button>
+        </div>
+        <p class="cta-sub">
+          or <a href="#repl">try it below</a> — it runs in the page, nothing to install.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- The interpreter. This is the real runtime, not a simulation: the page
+       fetches libdiluvium_wasi.wasm from the release mirror and drives it
+       through repl_eval, the same entry point the native REPL uses. -->
+  <section id="repl" class="repl-section">
+    <div class="panel">
+      <div class="panel-bar">
+        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="panel-title">diluvium</span>
+        <span class="panel-status" id="repl-status">loading…</span>
+        <button id="repl-reset" class="ghost" type="button">Restart</button>
+      </div>
+      <div id="term" class="term"></div>
+      <div class="panel-foot">
+        <span class="hint">Tab completes · ↑↓ history · ^C cancels · ^L clears</span>
+        <span class="examples" id="examples"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="features" id="features">
+    <h2>The language</h2>
+    <p class="section-lede">
+      Small, plain, and readable on sight. Everything below compiles straight to
+      bytecode and none of it takes a reserved word, so existing code keeps
+      working and adoption is as gradual as you want it.
+    </p>
+
+    <div class="grid">
+
+      <article class="feature">
+        <h3>String interpolation</h3>
+        <pre><code class="language-lua">local name = "world"
+local pi = 3.14159
+
+print($"Hello, {name}!")
+
+-- pi is 3.14
+print($"pi is {pi::%.2f}")
+-- [   42]
+print($"[{42::%5d}]")</code></pre>
+        <p>Everything after <code>::</code> goes to <code>string.format</code>.
+        It is <code>::</code> and not <code>:</code> because <code>:</code>
+        already means a method call.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Null coalescing &amp; safe navigation</h3>
+        <pre><code class="language-lua">local cfg = user_cfg ?? defaults
+
+local city = user?.address?.city
+local port = cfg?.server?.port ?? 8080
+
+-- not called when nil
+handler?.on_event(payload)
+
+-- assign only if nil
+port ??= 8080</code></pre>
+        <p>Once a value is nil the rest of the chain is skipped entirely.
+        It tests nil, not falsiness, so <code>false?.x</code> still raises.</p>
+      </article>
+
+      <article class="feature">
+        <h3>switch</h3>
+        <pre><code class="language-lua">switch code do
+    case 200, 201, 204 then
+        print("ok")
+    case 301, 302 then
+        print("redirected")
+    default
+        print($"odd: {code}")
+end</code></pre>
+        <p>The subject is evaluated once, a case can list several values, and
+        there is no fallthrough. A contextual keyword, so
+        <code>local switch = 1</code> still works.</p>
+      </article>
+
+      <article class="feature">
+        <h3>defer &amp; with</h3>
+        <pre><code class="language-lua">local f = io.open("data.txt")
+defer f:close()   -- however we exit
+
+with g = assert(io.open("o.txt")) do
+    g:write("done")
+end               -- closed, always</code></pre>
+        <p>Both desugar to Lua's to-be-closed variables, so unwinding is
+        inherited rather than invented: they run on <code>break</code>,
+        <code>goto</code>, <code>return</code>, an error, and
+        <code>coroutine.close</code>.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Compound assignment</h3>
+        <pre><code class="language-lua">total += 10    -- -= *= /= //= %= ^=
+name  ..= "uvium"
+flags |= 0x04  -- &amp;= &lt;&lt;= &gt;&gt;=
+port  ??= 8080</code></pre>
+        <p>The target's prefix is evaluated once, so
+        <code>t[next_key()] += 1</code> calls <code>next_key</code> a single
+        time. There is no <code>~=</code> form — that already means
+        "not equal".</p>
+      </article>
+
+      <article class="feature">
+        <h3>Secure functions</h3>
+        <pre><code class="language-lua">~function check()
+    local key = "not-in-the-clear"
+    return $"key is {key}"
+end</code></pre>
+        <p>Names and string constants are scrambled at rest, so
+        <code>strings</code> on the bytecode does not turn them up.
+        <strong>Cryptographically weak</strong> — obfuscation, not
+        protection.</p>
+      </article>
+
+    </div>
+  </section>
+
+  <section class="features" id="runtime">
+    <h2>The runtime</h2>
+    <p class="section-lede">
+      The syntax is the part you see. Underneath it is a machine built to be
+      small, portable, and sealed — the same one running in the panel above.
+    </p>
+
+    <div class="grid">
+
+      <article class="feature">
+        <h3>One bytecode, every target</h3>
+        <p>Source compiles to a single portable bytecode with one set of
+        semantics behind it. The same file runs under WebAssembly in this page,
+        on x86_64 and ARM64 natively, and on hardware smaller than either.
+        Natively it is one static binary under a megabyte, with nothing to
+        install alongside it.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Sealed by default</h3>
+        <p>A program starts with no ambient authority. It cannot open a socket,
+        read a file, or reach the process it lives in, because there is nothing
+        in the runtime to call. Everything it can touch is handed in from
+        outside, nothing can pass on more than it was given, and the trusted
+        base enforcing that is small enough to read end to end.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Freeze and resume</h3>
+        <p>A running program can be snapshotted mid-execution into a flat string
+        of bytes and brought back later at the exact instruction it left — in
+        another process, or on another machine. A program does not have to be
+        running to exist.</p>
+      </article>
+
+    </div>
+  </section>
+
+  <section class="install" id="install">
+    <h2>Install</h2>
+
+    <div class="install-grid">
+      <div class="install-main">
+        <h3>One line</h3>
+        <div class="oneliner wide">
+          <code id="install-cmd-2">curl -fsSL https://diluvium.aloecraft.org/start | sh</code>
+          <button id="copy-install-2" class="copy" type="button" aria-label="Copy install command">Copy</button>
+        </div>
+        <p class="note">
+          Detects your platform, downloads from the mirror, and verifies the
+          binary against the <code>SHA256SUMS.txt</code> the release workflow
+          published. Installs to <code>/usr/local/bin</code>, or
+          <code>~/.local/bin</code> when that is not writable.
+        </p>
+        <details>
+          <summary>Read it before you pipe it to a shell</summary>
+          <p>
+            Sensible. It is a single POSIX <code>sh</code> script with no
+            dependencies beyond <code>curl</code> or <code>wget</code>:
+          </p>
+          <div class="oneliner wide">
+            <code>curl -fsSL https://diluvium.aloecraft.org/start | less</code>
+          </div>
+          <p>
+            Options: <code>--prefix DIR</code>, <code>--version TAG</code>,
+            <code>--compiler</code> to also install the bytecode compiler.
+          </p>
+        </details>
+      </div>
+
+      <div class="install-side">
+        <h3>Direct download</h3>
+        <p class="note">Single static binary, no runtime dependencies.</p>
+        <ul class="downloads" id="downloads"></ul>
+        <p class="note" id="release-note"></p>
+      </div>
+    </div>
+  </section>
+
+  <section class="portal">
+    <h2>Everything else</h2>
+    <div class="cards">
+      <a class="card" href="/lab/">
+        <h3>Lab <span aria-hidden="true">→</span></h3>
+        <p>Notebooks in the browser. Cells and a console over one live kernel,
+        stored as <code>.ipynb</code>, running whichever release you pick.</p>
+      </a>
+      <a class="card" href="/release/">
+        <h3>Releases <span aria-hidden="true">→</span></h3>
+        <p>Every build for every platform, with checksums and notes. Stable
+        paths under <code>/release/latest/</code>.</p>
+      </a>
+      <a class="card" href="/docs/">
+        <h3>Docs <span aria-hidden="true">→</span></h3>
+        <p>The language reference, the standard library, the host API, and
+        what differs from stock Lua.</p>
+      </a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site">
+  <p>
+    <a href="https://github.com/Aloecraft-org/diluvium" rel="noopener">Aloecraft-org/diluvium</a>
+    · Apache-2.0
+    · <span id="footer-version"></span>
+  </p>
+  <p class="muted">
+    Diluvium's syntax builds on <a href="https://www.lua.org/" rel="noopener">Lua</a>,
+    which is a trademark-free MIT-licensed language by PUC-Rio.
+  </p>
+</footer>
+
+</body>
+</html>

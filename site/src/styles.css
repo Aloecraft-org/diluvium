@@ -1,0 +1,294 @@
+/* diluvium.aloecraft.org
+ *
+ * Plain CSS on purpose. The previous site carried Tailwind, PostCSS and four
+ * webfont families for a page whose whole visual vocabulary is two colours
+ * and a monospace stack; this is smaller, and there is nothing between the
+ * markup and what ships.
+ *
+ * System font stacks mean zero font downloads, so the terminal is the first
+ * thing that costs anything on the wire. */
+
+:root {
+  --bg:        #0d0f14;
+  --bg-soft:   #12141a;
+  --bg-panel:  #171a21;
+  --line:      #262b35;
+  --line-soft: #1d222a;
+  --ink:       #d7dae0;
+  --ink-dim:   #8a919e;
+  --ink-bright:#f2f4f8;
+  --accent:    #7fd1b9;
+  --accent-dim:#4f9d88;
+  --warn:      #e0a458;
+  --radius:    10px;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+          "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
+          Arial, sans-serif;
+  --wide: 1080px;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 16px/1.65 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+code, pre, .mono { font-family: var(--mono); }
+
+h1, h2, h3 { color: var(--ink-bright); line-height: 1.25; }
+
+.skip {
+  position: absolute; left: -9999px;
+  background: var(--accent); color: #06231c;
+  padding: .6rem 1rem; border-radius: 0 0 var(--radius) 0; z-index: 100;
+}
+.skip:focus { left: 0; top: 0; }
+
+/* ---------------------------------------------------------------- header */
+
+header.site {
+  display: flex; align-items: center; gap: 1rem;
+  max-width: var(--wide); margin: 0 auto;
+  padding: 1.1rem 1.25rem;
+  border-bottom: 1px solid var(--line-soft);
+  flex-wrap: wrap;
+}
+.brand {
+  display: inline-flex; align-items: baseline; gap: .5rem;
+  color: var(--ink-bright); font-weight: 650; font-size: 1.05rem;
+  letter-spacing: .2px;
+}
+.brand:hover { text-decoration: none; }
+.brand .mark {
+  font-family: var(--mono); color: var(--accent);
+  font-size: 1.3rem; line-height: 1;
+}
+.version {
+  font-family: var(--mono); font-size: .72rem; color: var(--accent);
+  border: 1px solid var(--accent-dim); border-radius: 100px;
+  padding: .1rem .55rem; white-space: nowrap;
+}
+.version:empty { display: none; }
+header.site nav {
+  margin-left: auto; display: flex; gap: 1.15rem; flex-wrap: wrap;
+  font-size: .92rem;
+}
+header.site nav a { color: var(--ink-dim); }
+header.site nav a:hover { color: var(--accent); text-decoration: none; }
+
+main { max-width: var(--wide); margin: 0 auto; padding: 0 1.25rem 4rem; }
+
+section { margin: 4.5rem 0; }
+section > h2 {
+  font-size: 1.4rem; margin: 0 0 .4rem;
+}
+.section-lede { color: var(--ink-dim); max-width: 60ch; margin: 0 0 2rem; }
+
+/* ------------------------------------------------------------------ hero */
+
+.hero { margin: 3.5rem 0 2.5rem; }
+.hero h1 {
+  font-size: clamp(2rem, 5.2vw, 3.1rem);
+  margin: 0 0 1rem; letter-spacing: -0.02em;
+}
+.lede { font-size: 1.1rem; color: var(--ink); max-width: 62ch; margin: 0 0 .9rem; }
+.lede code { color: var(--accent); font-size: .95em; }
+.lede strong { color: var(--ink-bright); }
+.lede-note {
+  font-size: .92rem; color: var(--ink-dim); max-width: 62ch; margin: 0 0 1.8rem;
+}
+
+.oneliner {
+  display: flex; align-items: center; gap: .75rem;
+  background: var(--bg-panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: .7rem .9rem;
+  max-width: 100%; overflow-x: auto;
+}
+.oneliner.wide { width: 100%; }
+.oneliner code {
+  font-size: .88rem; color: var(--ink-bright); white-space: nowrap;
+}
+.oneliner code::before { content: "$ "; color: var(--ink-dim); }
+.copy {
+  margin-left: auto; flex: none;
+  background: transparent; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: .25rem .6rem; font: 600 .75rem var(--sans); cursor: pointer;
+}
+.copy:hover { color: var(--accent); border-color: var(--accent-dim); }
+.cta-sub { color: var(--ink-dim); font-size: .92rem; margin: .8rem 0 0; }
+
+/* ------------------------------------------------------------------ repl */
+
+.repl-section { margin: 2.5rem 0 5rem; }
+.panel {
+  background: var(--bg-soft);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+  box-shadow: 0 18px 50px -30px rgba(0,0,0,.9);
+}
+.panel-bar {
+  display: flex; align-items: center; gap: .8rem;
+  padding: .6rem .9rem;
+  background: var(--bg-panel); border-bottom: 1px solid var(--line);
+}
+.dots { display: inline-flex; gap: .35rem; }
+.dots i {
+  width: 10px; height: 10px; border-radius: 50%;
+  background: var(--line); display: block;
+}
+.panel-title {
+  font-family: var(--mono); font-size: .8rem; color: var(--ink-dim);
+}
+.panel-status {
+  margin-left: auto; font-family: var(--mono); font-size: .75rem;
+  color: var(--ink-dim);
+}
+.panel-status.ok  { color: var(--accent); }
+.panel-status.bad { color: var(--warn); }
+.ghost {
+  background: transparent; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: .2rem .6rem; font: 600 .75rem var(--sans); cursor: pointer;
+}
+.ghost:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+.term { height: 380px; padding: .6rem .4rem .2rem .7rem; background: #12141a; }
+@media (max-width: 640px) { .term { height: 300px; } }
+
+.panel-foot {
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  padding: .55rem .9rem; background: var(--bg-panel);
+  border-top: 1px solid var(--line);
+}
+.hint { font-size: .75rem; color: var(--ink-dim); font-family: var(--mono); }
+.examples { margin-left: auto; display: flex; gap: .4rem; flex-wrap: wrap; }
+.chip {
+  background: transparent; color: var(--ink-dim);
+  border: 1px solid var(--line); border-radius: 100px;
+  padding: .15rem .7rem; font: 500 .75rem var(--sans); cursor: pointer;
+}
+.chip:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+/* -------------------------------------------------------------- features */
+
+.grid {
+  display: grid; gap: 1.1rem;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+}
+.feature {
+  background: var(--bg-soft); border: 1px solid var(--line-soft);
+  border-radius: var(--radius); padding: 1.2rem 1.3rem 1.3rem;
+}
+.feature h3 { font-size: 1rem; margin: 0 0 .8rem; }
+.feature p { color: var(--ink-dim); font-size: .88rem; margin: .9rem 0 0; }
+.feature p code { color: var(--accent); font-size: .9em; }
+.feature pre {
+  margin: 0; padding: .9rem 1rem; overflow-x: auto;
+  background: #0b0d11; border: 1px solid var(--line-soft);
+  border-radius: 8px; font-size: .81rem; line-height: 1.6;
+}
+.feature pre code { color: var(--ink); }
+
+/* --------------------------------------------------------------- install */
+
+.install-grid {
+  display: grid; gap: 1.6rem;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+}
+@media (max-width: 800px) { .install-grid { grid-template-columns: 1fr; } }
+.install h3 { font-size: .95rem; margin: 0 0 .7rem; }
+.note { color: var(--ink-dim); font-size: .86rem; }
+.note code { color: var(--accent); }
+details { margin-top: 1.2rem; }
+summary {
+  cursor: pointer; color: var(--ink-dim); font-size: .88rem;
+  padding: .3rem 0;
+}
+summary:hover { color: var(--accent); }
+details p { color: var(--ink-dim); font-size: .86rem; }
+
+.downloads { list-style: none; padding: 0; margin: 0 0 1rem; }
+.downloads li {
+  display: flex; align-items: center; gap: .6rem;
+  padding: .5rem 0; border-bottom: 1px solid var(--line-soft);
+  font-size: .9rem;
+}
+.downloads li:last-child { border-bottom: none; }
+.downloads .tag {
+  font-size: .68rem; color: var(--accent); border: 1px solid var(--accent-dim);
+  border-radius: 100px; padding: .05rem .5rem; margin-left: auto;
+}
+.downloads .sums a { color: var(--ink-dim); font-size: .8rem; font-family: var(--mono); }
+
+/* ---------------------------------------------------------------- portal */
+
+.cards {
+  display: grid; gap: 1.1rem;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+.card {
+  display: block; background: var(--bg-soft);
+  border: 1px solid var(--line-soft); border-radius: var(--radius);
+  padding: 1.3rem; color: inherit;
+}
+.card:hover {
+  border-color: var(--accent-dim); text-decoration: none;
+  background: var(--bg-panel);
+}
+.card h3 { font-size: 1rem; margin: 0 0 .5rem; color: var(--accent); }
+.card p { color: var(--ink-dim); font-size: .88rem; margin: 0; }
+.card p code { color: var(--ink); }
+
+/* ---------------------------------------------------------------- footer */
+
+footer.site {
+  max-width: var(--wide); margin: 0 auto;
+  padding: 1.6rem 1.25rem 3rem;
+  border-top: 1px solid var(--line-soft);
+  color: var(--ink-dim); font-size: .84rem;
+}
+footer.site p { margin: .3rem 0; }
+footer.site .muted { color: #5f6773; }
+
+/* ----------------------------------------------------------- highlighting
+ * A small Prism theme rather than importing one, so the code samples share
+ * the page's palette instead of fighting it. */
+
+.token.comment       { color: #5f6773; font-style: italic; }
+.token.string,
+.token.interpolated-string { color: #9bd1a0; }
+.token.number        { color: #e0a458; }
+.token.keyword,
+.token.contextual-keyword,
+.token.secure-function { color: #c99bd8; }
+.token.function      { color: #7fb4d1; }
+.token.operator,
+.token.null-coalescing,
+.token.compound-assign { color: var(--accent); }
+.token.punctuation   { color: #6f7783; }
+.token.boolean       { color: #e0a458; }
+.token.interpolation { color: #d7dae0; }
+.token.interpolation-punctuation { color: var(--accent); }
+.token.format-spec   { color: var(--warn); }
+.token.variable      { color: #d7dae0; }
+
+/* xterm sizes itself from the container; without this the canvas can grow
+   past the panel on the first paint before the fit addon runs. */
+.xterm { height: 100%; }
+.xterm-viewport::-webkit-scrollbar { width: 10px; }
+.xterm-viewport::-webkit-scrollbar-thumb {
+  background: var(--line); border-radius: 6px;
+}
