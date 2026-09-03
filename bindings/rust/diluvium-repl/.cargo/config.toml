@@ -1,0 +1,20 @@
+# Running the wasm targets, so `cargo test --target ...` works without
+# remembering the incantation.
+
+[target.wasm32-wasip2]
+# Without a runner cargo tries to exec the .wasm directly and gets EACCES.
+#
+# '--wasm exceptions' is load-bearing rather than cautious: Lua's error
+# handling is setjmp/longjmp, the wasi-sdk lowers that onto the exception
+# -handling proposal, and an engine without the feature enabled refuses the
+# module outright. Same flag .github/workflows/build.yml passes to run the
+# WASI artifact.
+runner = ["wasmtime", "run", "--wasm", "exceptions", "--dir=.", "--"]
+
+[target.wasm32-unknown-unknown]
+# The browser target has no runner here. It builds -- see doc/ROADMAP.md,
+# "A cross-platform prompt" -- but the module imports its libc from the
+# embedder, so there is nothing to run it against until a page supplies
+# those. `cargo build --target wasm32-unknown-unknown` is the check.
+
+# No [build] target on purpose: a bare `cargo test` builds for the host.

@@ -8,8 +8,10 @@
 # and its own CI job. ego-cli keeps `ego_shell/` outside its workspace for
 # the same reason.
 #
-# What it is for: answering whether the seam fits, and what a Rust prompt
-# costs. See doc/ROADMAP.md, "A cross-platform prompt".
+# What it is for: answering whether the seam fits, what a Rust prompt costs,
+# and whether it runs anywhere but the machine it was written on. It runs on
+# three of the four targets -- linux-gnu, windows-gnu and wasip2 -- and builds
+# for the fourth. See doc/ROADMAP.md, "A cross-platform prompt".
 
 # Its own workspace root, so it has its own lockfile and pins its own
 # git dependencies independently of the crates that ship.

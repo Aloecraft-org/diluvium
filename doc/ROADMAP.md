@@ -756,19 +756,42 @@ discipline is on. At the prompt, in raw mode, Ctrl+C is a key press and
 arrives as `ReadOutcome::Interrupted`. Both meanings land where they belong
 without either side arranging it.
 
-**What does it cost?** Measured on x86-64 Linux, stripped:
+**Does it actually run anywhere but here?** Three of the four targets, and
+run rather than only built -- the same fourteen tests, and the prompt itself
+driven through a pipe on each:
 
-| | |
-| :--- | ---: |
-| `dv`, the C interpreter (`-O2`, dynamic libc) | 518 KB |
-| `dv-repl`, plain `--release` | 1.5 MB |
-| `dv-repl`, `opt-level = "z"` + LTO + `panic = "abort"` | **1.0 MB** |
+| target | how | state |
+| :--- | :--- | :--- |
+| `x86_64-unknown-linux-gnu` | natively | 14/14, prompt runs |
+| `x86_64-pc-windows-gnu` | mingw-w64, under wine | 14/14, prompt runs |
+| `wasm32-wasip2` | wasi-sdk 27, under wasmtime | 14/14, prompt runs |
+| `wasm32-unknown-unknown` | wasi-sdk 27 | builds; see below |
 
-Roughly twice the C binary, for the whole runtime plus a line editor that
-works on Windows, WASI and in a browser. An earlier estimate in this
-discussion said 4.5x, extrapolated from `ego_cli`'s demo binary; that was
-wrong, because cross-crate LTO removes most of what the demo's dependency
-graph carries.
+Windows is the one that matters most, because it is the platform Diluvium
+has shipped to since `build.yml` grew its MSYS2 job and never had an editor
+on: `dline.c` needs a termios and degrades to `fgets` there. This is arrow
+keys, word motions, history and Tab completion on Windows, from the same
+source as everywhere else.
+
+WASI has no raw mode -- a component cannot reach the host's termios -- so
+`Session` takes its line-at-a-time path there and the conveniences are
+absent by construction, which is the platform's answer and not this
+crate's.
+
+**What does it cost?** Stripped, at the crate's release profile
+(`opt-level = "z"`, LTO, `panic = "abort"`):
+
+| | C interpreter | `dv-repl` |
+| :--- | ---: | ---: |
+| linux-gnu | 518 KB (`-O2`) | 1.0 MB |
+| windows-gnu | -- | 956 KB |
+| wasm | 572 KB (`-O2`), 340 KB (`-Oz`) | 759 KB |
+
+Between 1.3x and 2.2x the C binary depending on which C build you compare
+against, for the whole runtime plus an editor that works on three
+platforms. An earlier estimate in this discussion said 4.5x, extrapolated
+from `ego_cli`'s demo binary; that was wrong, because cross-crate LTO
+removes most of what the demo's dependency graph carries.
 
 ### What it is not, and what is still open
 
@@ -777,19 +800,23 @@ It is not `src/lua.c`. No argument handling, no script running, no
 question -- whether Rust should own the whole CLI or only the interactive
 front end -- and this spike deliberately does not answer it.
 
-- **The browser.** `run` is generic over the terminal and ready for
-  `XtermTerminal`, but `wasm32-unknown-unknown` takes its libc from the
-  embedder (`bindings/rust/WASM-SPIKE.md`, "the browser contract"), so a
-  browser build needs those 84 symbols supplied from Rust first. That is
-  the missing half, and it is a real piece of work rather than a flag.
-- **WASI.** The code path is there and needs a wasi-sdk to build; only the
-  native target has been run.
+- **The browser.** Closer than expected. It compiles and links, and the
+  module it produces asks the embedder for **56 `env` imports** -- `malloc`,
+  `snprintf`, `fopen`, `strftime` and the rest of the C library the core
+  reaches for -- which is exactly the role `src/wasm_stubs_unknown.c` and
+  the site's JS shim already play for the existing browser artifact
+  (`bindings/rust/WASM-SPIKE.md`, "the browser contract", counts 84 for the
+  whole library; dead-code elimination prunes it to 56 for a prompt). What
+  is missing is not a flag and not a port: it is a page handing over its
+  xterm.js terminal through `wasm-bindgen`, and something supplying those
+  56. Both exist in the tree already, in JavaScript.
 - **`ego_platform`.** `ego_cli` is pinned by revision here, but its own
   manifest tracks `ego_platform`'s main branch, so the committed lockfile
   is the only thing holding that still. Before anything shipping depends on
   this, that crate wants a release rather than a branch.
 - **MSVC.** `diluvium-sys` builds for `*-pc-windows-gnu` and refuses MSVC by
-  name; a Windows binary from this crate inherits that.
+  name; a Windows binary from this crate inherits that. The artifact
+  `build.yml` already ships is MSYS2/MINGW64, so this is the same ABI.
 
 ## Analyzer
 
