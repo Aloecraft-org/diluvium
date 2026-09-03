@@ -783,15 +783,33 @@ crate's.
 
 | | C interpreter | `dv-repl` |
 | :--- | ---: | ---: |
-| linux-gnu | 518 KB (`-O2`) | 1.0 MB |
-| windows-gnu | -- | 956 KB |
+| linux-gnu | 518 KB (`-O2`) | 928 KB |
+| windows-gnu | -- | 851 KB |
 | wasm | 572 KB (`-O2`), 340 KB (`-Oz`) | 759 KB |
 
-Between 1.3x and 2.2x the C binary depending on which C build you compare
+Between 1.3x and 2.7x the C binary depending on which C build you compare
 against, for the whole runtime plus an editor that works on three
 platforms. An earlier estimate in this discussion said 4.5x, extrapolated
 from `ego_cli`'s demo binary; that was wrong, because cross-crate LTO
 removes most of what the demo's dependency graph carries.
+
+There is no async runtime on native. `ego_cli`'s `runtime` feature is off
+here, which takes `term::platform()` to `BlockingNative` -- crossterm's
+blocking `read` and `std::io` for writes, so no future ever pends and
+`futures_executor::block_on` drives the whole session. The native
+dependency tree is 37 crates. That also answers a worry from when this was
+still a proposal: an interpreter running `--task` already has a
+cooperative scheduler, and there is no second one in the process now. WASI
+keeps the feature, because `CookedStdio` is behind it.
+
+**Two writers, one file descriptor.** Lua's `print` and `io.write` go
+through C stdio; the session writes through Rust. On a tty C stdio is line
+buffered and the two interleave correctly by luck; on a pipe it is fully
+buffered, so an `io.write` with no newline stayed in C's buffer until exit
+and came out after everything Rust had written since. `State::eval` flushes
+C's streams before returning, and a test spawns the real binary with a real
+pipe to keep it that way. Worth knowing generally: anything that puts Rust
+and the C core on the same descriptor has this shape.
 
 ### What it is not, and what is still open
 
@@ -800,16 +818,30 @@ It is not `src/lua.c`. No argument handling, no script running, no
 question -- whether Rust should own the whole CLI or only the interactive
 front end -- and this spike deliberately does not answer it.
 
-- **The browser.** Closer than expected. It compiles and links, and the
-  module it produces asks the embedder for **56 `env` imports** -- `malloc`,
-  `snprintf`, `fopen`, `strftime` and the rest of the C library the core
-  reaches for -- which is exactly the role `src/wasm_stubs_unknown.c` and
-  the site's JS shim already play for the existing browser artifact
-  (`bindings/rust/WASM-SPIKE.md`, "the browser contract", counts 84 for the
-  whole library; dead-code elimination prunes it to 56 for a prompt). What
-  is missing is not a flag and not a port: it is a page handing over its
-  xterm.js terminal through `wasm-bindgen`, and something supplying those
-  56. Both exist in the tree already, in JavaScript.
+- **The browser**, which is implementation rather than testing, and less
+  of it than it looks. The module compiles and links, and asks its embedder
+  for **56 `env` imports**. Fifty-three of them are already defined, in C,
+  in this tree: `src/wasm_stubs_unknown.c`, which the Makefile's
+  `_wasm_unknown_build` compiles into the browser archive and which
+  `bindings/rust/diluvium-sys/build.rs` does not. Teaching build.rs to
+  compile it for `Platform::Browser` is the first step and a small one.
+
+  Three are left over -- `snprintf`, `clock_gettime`, `strtoll` -- plus the
+  `strlen`/`memcpy`/`memset`/`vsnprintf` that stub file's own header names
+  as the consumer's. `memcpy` and friends come from Rust's
+  `compiler_builtins`; the formatter is the only real work, and
+  `wasm_stubs_unknown.c` deliberately refuses to fake it ("a silent refusal
+  is the failure mode this tree exists to avoid").
+
+  Then a `#[wasm_bindgen]` entry point taking the page's xterm.js
+  `Terminal`, which `XtermTerminal::attach` already accepts.
+
+  Testing it is nearly free once that links: `MemTerminal` needs no
+  terminal, so the tests here run unchanged in a browser, and ego-cli's CI
+  already drives `wasm-bindgen-test-runner` against Firefox and geckodriver
+  -- installed and named explicitly rather than taken from the runner
+  image, because wasm-bindgen opens a Chrome session with a JSON Wire shape
+  modern chromedriver no longer honours. Copy that job.
 - **`ego_platform`.** `ego_cli` is pinned by revision here, but its own
   manifest tracks `ego_platform`'s main branch, so the committed lockfile
   is the only thing holding that still. Before anything shipping depends on

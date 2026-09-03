@@ -17,13 +17,15 @@
 //! needs a `main`. `diluvium_repl::run` is generic over the terminal and
 //! ready for it; the embedder is the missing half.
 
+// No async runtime. `term::platform()` is ego-cli's `BlockingNative` with
+// its `runtime` feature off, and nothing it returns ever pends, so a plain
+// poll loop drives the whole session. An interpreter has one thread, one
+// lua_State that cannot leave it, and wants a line at exactly one point --
+// there was never a reactor's worth of work here.
 #[cfg(not(target_arch = "wasm32"))]
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
-    // Single-threaded on purpose. A lua_State cannot move between threads,
-    // and nothing here would use a second one.
-    if let Err(error) = diluvium_repl::run(ego_cli::term::platform().expect("open terminal")).await
-    {
+fn main() {
+    let terminal = ego_cli::term::platform().expect("open terminal");
+    if let Err(error) = futures_executor::block_on(diluvium_repl::run(terminal)) {
         eprintln!("dv-repl: {error}");
         std::process::exit(1);
     }

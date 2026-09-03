@@ -209,6 +209,7 @@ version = "0.1.0"
 dependencies = [
  "diluvium-sys",
  "ego_cli",
+ "futures-executor",
  "tokio",
 ]
 
@@ -228,7 +229,7 @@ dependencies = [
 [[package]]
 name = "ego_cli"
 version = "0.1.0"
-source = "git+https://github.com/aloecraft-org/ego-cli?rev=3e45e9129d5c0fa6399405d866ac37cc5fbb751a#3e45e9129d5c0fa6399405d866ac37cc5fbb751a"
+source = "git+https://github.com/aloecraft-org/ego-cli?rev=e5bd70d#e5bd70d51fef2a922f2a141bf86e2bde7e7ab25c"
 dependencies = [
  "crossterm",
  "ego_platform",

@@ -39,6 +39,12 @@ use std::os::raw::{c_char, c_int};
 
 use diluvium_sys::lua::*;
 
+unsafe extern "C" {
+    /// Flush C's stdio. A null stream means every open stream, which is
+    /// what this needs: see `flush_c_output`.
+    fn fflush(stream: *mut std::ffi::c_void) -> c_int;
+}
+
 /// What an entry is called in an error message. Lua's `=` prefix means
 /// "use this verbatim rather than dressing it up as a file name".
 const CHUNKNAME: &CStr = c"=stdin";
@@ -134,6 +140,7 @@ impl State {
                 }
             };
             lua_settop(self.l, base);
+            flush_c_output();
             outcome
         }
     }
@@ -213,6 +220,24 @@ unsafe extern "C" fn msghandler(l: *mut lua_State) -> c_int {
     let msg = luaL_tolstring(l, 1, std::ptr::null_mut());
     luaL_traceback(l, l, msg, TRACEBACK_LEVEL);
     1
+}
+
+/// Push whatever the chunk printed out of C's buffer, so it lands before
+/// whatever the prompt writes next.
+///
+/// Two writers share fd 1: Lua's `print` and `io.write` go through C stdio,
+/// and the session writes through Rust. On a tty C stdio is line buffered
+/// and the two happen to interleave correctly; on a pipe it is fully
+/// buffered, so `io.write("x")` with no newline sat in C's buffer until the
+/// process exited and came out *after* everything Rust had written since.
+/// Found by piping the prompt's output and reading it back.
+///
+/// Flushing after each evaluation is the whole fix: the prompt writes at
+/// exactly one point, right after this.
+fn flush_c_output() {
+    // Null flushes every stream. It cannot fail in a way that matters here
+    // -- a closed stdout is the caller's problem, not this function's.
+    unsafe { fflush(std::ptr::null_mut()) };
 }
 
 /// A string Lua owns, copied out.

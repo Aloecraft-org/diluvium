@@ -42,16 +42,30 @@ diluvium-sys = { path = "../diluvium-sys", features = ["lua"] }
 # ego_platform's main branch, so the only thing holding that still is this
 # crate's lockfile -- which is why the lockfile is committed even though
 # this builds a binary and a library rather than shipping either.
-ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "3e45e9129d5c0fa6399405d866ac37cc5fbb751a" }
+#
+# default-features = false takes ego-cli's runtime-free native backend:
+# `BlockingNative` blocks on crossterm::event::read and writes with
+# std::io, so no future it returns ever pends and `Session::read_line`
+# completes on the first poll under a plain executor. An interpreter is a
+# straight-line program that wants a line at exactly one point; taking on
+# tokio for that was the wrong shape, and it was the "two schedulers in one
+# process" worry when this was still a proposal -- `--task` already has a
+# cooperative scheduler of its own.
+ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", default-features = false }
 
-[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
-
+# ...but wasm needs the runtime feature back: `CookedStdio`, which is what
+# `term::platform()` returns on WASI, is behind it. Cargo unions features
+# per target, so this adds it there and nowhere else.
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt"] }
+
+# The whole executor this needs on native: a poll loop.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-executor = "0.3"
 
 [dev-dependencies]
-tokio = { version = "1", features = ["macros", "rt"] }
+futures-executor = "0.3"
 
 # Size is the open question this spike exists to answer, so the answer is a
 # property of the crate rather than of flags someone has to remember. These
