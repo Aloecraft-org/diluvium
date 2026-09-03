@@ -257,9 +257,37 @@ jobs:
         working-directory: bindings/rust
         run: cargo test --all
 
+      # 'lua' is off by default -- dv.h is sealed and a lua_State is a
+      # deliberate exception to that -- so '--all' does not reach it, and the
+      # FFI a front end depends on would rot unwatched. Named here rather
+      # than made default so the boundary stays something you ask for.
+      - name: Test the Lua C API feature
+        working-directory: bindings/rust
+        run: cargo test -p diluvium-sys --features lua
+
       - name: The example host runs
         working-directory: bindings/rust
         run: cargo run --quiet --example echo
+
+      # Windows, from here. Cross-compiling catches what matters -- that the
+      # amalgamation compiles for the target, and that every symbol resolves
+      # -- without a second runner, and 'cargo build --tests' is the part that
+      # counts: a library crate is never linked, so 'cargo build' alone
+      # reports success on an object built for the wrong platform. That was a
+      # live bug until build.rs learned to check the object's format for
+      # native targets and not only for wasm.
+      #
+      # GNU rather than MSVC: build.rs drives a GCC-style compiler and refuses
+      # MSVC by name. If that changes, this is where it gets proved.
+      - name: Windows toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mingw-w64
+          rustup target add x86_64-pc-windows-gnu
+
+      - name: Cross-compile and link for Windows
+        working-directory: bindings/rust
+        run: cargo build --tests -p diluvium-sys --features lua --target x86_64-pc-windows-gnu
 
   wasmtime-binding:
     name: wasmtime binding
