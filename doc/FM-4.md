@@ -43,6 +43,9 @@ diffs are in `doc/attic/` so it can be re-run rather than trusted.
   plus half a day in DRT (pin, FM-4 entry, re-measure under `drt start`).
   Optional follow-on once the error is uncatchable: `dv_interrupt`, about a
   day including bindings, because it moves the ABI version (§6).
+- **It splits into four increments that each ship on their own**, and the
+  first three need no changes to any existing test. §9 has the layers, what
+  each one closes, and the per-layer measurements.
 
 ---
 
@@ -468,3 +471,160 @@ Then, on a branch, `patch -p1 < doc/attic/fm4-prototype.diff` (or the
 patched `.data`. `FM4_FULL=1` prints the whole error. The five C suites are
 `make dv_check dsnap_check dvs_check dtask_check dshim_check`; expect the
 one `dv_check` failure named in §4 until that test is rewritten.
+
+---
+
+## 9. Building it in increments
+
+§5 is the whole change as one landing. It does not have to be one: the fix
+separates along the *mechanism* boundaries of §1, and the layers were
+measured separately rather than merely sketched. Four increments, each of
+which compiles, passes the suites, ships on its own, and needs at most one
+decision.
+
+The measurements below come from staging the prototype into layers on this
+tree and running every door, all five C suites, twenty conformance tests and
+the sanitizers at each layer. Two things fell out that a plan written from
+reading would have got wrong, and they are why the layers are drawn here
+rather than one row up or down:
+
+- **Increments 1 to 3 need no changes to any existing test.** All five
+  suites report their full counts with zero failures through increment 3
+  (`dv_check` 257, `dsnap_check` 160, `dvs_check` 139, `dtask_check` 25,
+  `dshim_check` 102). The one rewrite §4 names arrives only with
+  increment 4, because only then does the program stop *at* the limit.
+- **The finalizer half does not close in one line.** `gc_run` and `gc_free`
+  do, but `gc_remark` and `gc_alloc` do not: a finalizer that re-marks its
+  own object is finalized again on every cycle, and the shared instruction
+  count always reaches zero *inside* it, so `GCTM`'s own protected call
+  absorbs every raise and the main loop never sees an uncaught one. Same
+  shape as `sortpcall`. Those two need increment 4's re-throw, and a plan
+  that promised them at increment 2 would have been wrong.
+
+### The increments
+
+| # | lands | core lines | allowlist | doors it closes |
+|---|---|---|---|---|
+| 1 | the doors as a CI gate | 0 | none | none — it makes the class visible |
+| 2 | the finalizer half | 1 (`lgc.c`) | +`lgc.c` | `gc_run`, `gc_free` |
+| 3 | the raise itself | 0 | none | `xhandler` |
+| 4 | uncatchable | ~20 (`ldo.c`, `lgc.c`) | +`ldo.c` | `pcall`, `xpcall`, `sortpcall`, `load`, `gc_remark`, `gc_alloc`, `memcatch` |
+| 5 | release, docs, DRT | 0 | none | none |
+
+**1 — the doors become a gate.** `doc/attic/fm4-probe.c` gets a Makefile
+target beside `dv_check`, and `doc/attic/fm4-budget-check.sh` becomes
+`test/budget_check.sh` with a step in `test.yml`. One subprocess per door
+under a timeout, each verdict compared against a table of what is closed
+*today* — so a door that reopens fails as `REGRESSED`, and a door that has
+just been closed fails as `CLOSED -- update the table`. That second
+direction is what makes every later increment's evidence come from CI
+rather than from a claim in a commit message.
+
+Verified: green on the unmodified tree, all fourteen doors as tabled; red
+against each of the three prototype layers, naming exactly the rows that
+moved; exit 2 when the probe is missing, which is `patch_series.sh`'s own
+convention for a guard that cannot check.
+
+The timeout's failure mode is asymmetric and safe: a closed door returns in
+about 10 ms, so no plausible timeout calls one a hang, and a loaded runner
+only costs time on the rows that are meant to hang. Nothing in `src/`
+changes, and no decision is attached — so this can land while the allowlist
+conversation is still open.
+
+**2 — the finalizer half.** The one-line condition in `GCTM` (only *debug*
+hooks stop for a finalizer; a count-only mask is a budget) plus `dv_free`
+arming the hook on the main state before `lua_close`. Both halves are
+needed for either door: at close time the hook was never armed, and inside a
+finalizer it was never allowed to fire.
+
+Closes the two doors that report **zero** usage and `dv_exceeded` false —
+including the one where a program that has already finished cleanly hangs
+whoever frees it, which in a swarm is the supervisor's `kill`. Gate: five
+suites green with no test changes, twenty conformance tests green, ASan and
+UBSan clean on the two doors and on `dv_check`. The `luaE_warnerror` per
+bounded finalization is silent by default (5.5 warnings are off until
+`@on`), so this adds no output to a deployment's log.
+
+Decision: `lgc.c` on the allowlist, with a reason line that stands on its
+own — a count hook is a budget rather than a debugger, and debug hooks are
+still stopped there. `patch_series.sh check` cannot be run from a shallow
+clone (it exits 2 by design), so CI's `fetch-depth: 0` job is where that
+entry is actually proved.
+
+**3 — the raise itself.** `diluvium_shim_throw` in `dshim.c`, the hook
+building its own message and traceback at the throw point, and `settle`
+refusing to report `DV_DONE` for an instance whose budget is spent. Costs
+**no allowlist entry at all**: `dshim.c`, `dshim.h` and `dv.c` have no
+upstream counterpart, so the patch guard does not cover them.
+
+Closes `xhandler`, the door that needs no loop and freezes the count exactly
+at the limit. Upgrades `gc_run` from a bounded `DV_DONE` to `DV_ERROR`, and
+gives every budget error a position and a traceback where today it has
+neither. `settle`'s own message is plain — `instruction budget exceeded` —
+because a guest that caught the real error discarded it; increment 4 is what
+makes the traceback survive. Gate: as increment 2, all green, no test
+changes.
+
+Increments 2 and 3 are order-independent. Take 3 first if the allowlist
+conversation needs time, since it needs no decision; take 2 first if it does
+not, since it closes more.
+
+**4 — uncatchable.** The flag, `precover`'s condition, `luaD_pcall`'s
+re-throw with its three guards, and `GCTM`'s re-throw. This is the increment
+FM-4 is named for, and the seven doors it closes are every VM-side one left.
+
+It does not subdivide further, and the reason is worth recording: a flag no
+reader consults is dead code, a reader with no writer is a no-op, and
+`precover` and `luaD_pcall` must land together because `sortpcall` is
+exactly the door that either one alone leaves open. Gate: the `dv_check`
+rewrite of §4, the negatives (an instance *under* budget still catches with
+`pcall`, `load` still returns `nil, msg`, an error in `__gc` still warns),
+the full `run_tests.sh`, and the patch guard with both entries.
+
+Decision: `ldo.c` on the allowlist, or the on-top `dlibs.c` variant of §3
+— also prototyped, and complete for what a guest can reach today. By this
+point the doctrine line has already been crossed once, by an increment that
+is merged and reviewed rather than by an argument in this document.
+
+**5 — release, docs, DRT.** The changelog entry, the doc reconciliation
+§5 lists, the Rust binding's test, then DRT's pin move, FM-4 rewritten to
+"closed upstream for VM-bound guests, open for C loops", and a re-measure
+under `drt start` with the root-that-spawns-it program its entry describes.
+
+If increments 2 and 3 ship together as one release and increment 4 as the
+next, DRT pins twice and FM-4's headline closes at the second. One release
+for all three is equally coherent if the allowlist answer arrives early —
+that is the only thing the release shape turns on.
+
+### Where each layer leaves the doors
+
+Measured, one column per increment. `error` is `DV_ERROR` from `dv_run`,
+`done` a clean finish with a bounded `dv_free`, `hang` still open at 10 s.
+
+| door | today | +1 | +2 | +3 | +4 |
+|---|---|---|---|---|---|
+| control | error | error | error | error | error |
+| pcall | hang | hang | hang | hang | **error** |
+| xpcall | hang | hang | hang | hang | **error** |
+| sortpcall | hang | hang | hang | hang | **error** |
+| load | hang | hang | hang | hang | **error** |
+| memcatch | hang | hang | hang | hang | **error** |
+| xhandler | hang | hang | hang | **error** | error |
+| gc_run | hang | hang | **done** | **error** | error |
+| gc_free | hang | hang | **done** | done | done |
+| gc_remark | hang | hang | hang | hang | **error** |
+| gc_alloc | hang | hang | hang | hang | **error** |
+| coresume | error | error | error | error | error |
+| coclose | error | error | error | error | error |
+| matcher | hang | hang | hang | hang | hang — §6 |
+| existing suites | green | green | green | green | one rewrite |
+
+### Beyond the four
+
+Neither of these belongs in the sequence above, and both get easier once it
+is done. `dv_interrupt` (§6) is an ABI addition, so it moves
+`DV_ABI_VERSION` and every binding follows; about a day, and §18's standing
+objection to it is answered by increment 4 rather than by anything in it.
+The C-loop class (§6) is host-side: DRT's sized watchdog, or the cheaper
+move of abandoning a thread, with an optional matcher step cap in the core
+as defence in depth.
