@@ -43,6 +43,12 @@ diluvium-sys = { path = "../diluvium-sys", features = ["lua"] }
 # crate's lockfile -- which is why the lockfile is committed even though
 # this builds a binary and a library rather than shipping either.
 #
+# a48cf47 is ego-cli's first commit carrying wasm-bindgen 0.2.127. The
+# commit before it is tagged `pre-wasm-bindgen-0.2.127` (also `v0.1.0`) and
+# is what this pinned until now -- 0.2.114 was the one version that could
+# not post-process the browser module, so that tag is exactly the boundary
+# between "the browser does not work" and "it does".
+#
 # default-features = false takes ego-cli's runtime-free native backend:
 # `BlockingNative` blocks on crossterm::event::read and writes with
 # std::io, so no future it returns ever pends and `Session::read_line`
@@ -51,7 +57,7 @@ diluvium-sys = { path = "../diluvium-sys", features = ["lua"] }
 # tokio for that was the wrong shape, and it was the "two schedulers in one
 # process" worry when this was still a proposal -- `--task` already has a
 # cooperative scheduler of its own.
-ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", default-features = false }
+ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "a48cf47", default-features = false }
 
 # ...but WASI needs the runtime feature back: `CookedStdio`, which is what
 # `term::platform()` returns there, is behind it. Cargo unions features per
@@ -61,7 +67,7 @@ ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", d
 # module, which matters more than it sounds: see src/main.rs on catch
 # wrappers.
 [target.'cfg(all(target_arch = "wasm32", target_env = "p2"))'.dependencies]
-ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", features = ["runtime"] }
+ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "a48cf47", features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]

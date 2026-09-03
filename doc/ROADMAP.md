@@ -841,43 +841,35 @@ front end -- and this spike deliberately does not answer it.
   fixed-size bump allocator, `setjmp`/`longjmp` trap, and it defines its
   own `global_L` and exports a competing REPL. Right names, wrong meanings.
 
-  The blocker, and it is a version number. wasm-bindgen **0.2.114** cannot
-  post-process this module -- "`__instance_terminated` global required for
-  catch wrappers" -- and **0.2.115 can**. Bisected: 0.2.114 fails, 0.2.115,
-  0.2.118, 0.2.122 and 0.2.127 all succeed.
+  The blocker was a version number, and it is gone. wasm-bindgen
+  **0.2.114** could not post-process this module -- "`__instance_terminated`
+  global required for catch wrappers" -- and **0.2.115 onwards can**;
+  bisected 0.2.114 / .115 / .118 / .122 / .127. `ego_cli` and
+  `ego_platform` have both moved to 0.2.127, and this crate pins
+  `ego_cli` at the first commit carrying it. The browser now runs the same
+  fourteen tests as every other target, in CI.
 
-  Why it was ever a problem: the core is compiled with the wasm
-  exception-handling proposal, which is what makes Lua's `setjmp`/`longjmp`
-  -- and therefore `pcall` -- catch rather than trap
-  (`bindings/rust/WASM-SPIKE.md` records that as a deliberate departure from
-  the JavaScript artifact, which stubs `setjmp` and lets a Lua error kill
-  the module). That leaves a `tag` section in the wasm, ego-cli's own
-  browser modules have none, and 0.2.114 takes an exception-aware path for
-  catch wrappers that wants a global only a Rust build with EH enabled
-  emits. Nothing on this side avoids it: dropping the `Result<_, JsValue>`
+  Worth keeping, because the shape recurs: the core is compiled with the
+  wasm exception-handling proposal, which is what makes Lua's
+  `setjmp`/`longjmp` -- and therefore `pcall` -- catch rather than trap
+  (`bindings/rust/WASM-SPIKE.md` records that as a deliberate departure
+  from the JavaScript artifact, which stubs `setjmp` and lets a Lua error
+  kill the module). That leaves a `tag` section in the wasm. ego-cli's own
+  browser modules have none, and that section was the entire difference
+  between a module 0.2.114 would post-process and one it would not.
+  Nothing on this side avoided it: dropping the `Result<_, JsValue>`
   return, making `start` synchronous, and dropping `ego_platform` and
   web-sys from the browser build were each tried, and
   `wasm_bindgen_futures` generates catch wrappers regardless.
 
-  The pin is not this crate's. `ego_cli` and `ego_platform` both carry
-  `wasm-bindgen = "=0.2.114"`, and cargo resolves one graph, so either of
-  them holds the whole build at the one version that does not work --
-  including the browser build, which no longer depends on `ego_platform` at
-  all. **Both need `0.2.115` or newer**; this crate names no version, so it
-  follows whatever they settle on.
-
-  With those two relaxed locally, the whole thing works: **14/14 in
-  Chromium 141**, through `wasm-bindgen-test-runner` and a webdriver, with
-  no browser-specific test code -- `MemTerminal` is the same on every
-  target. One real bug turned up on the way, and only there: these bindings
-  still declared `lua_Integer` as 32 bits on `wasm32-unknown-unknown`, left
-  over from before `luaconf.h` pinned the numeric types. `luaL_checkversion`
+  A real bug surfaced on the way, and only there: these bindings still
+  declared `lua_Integer` as 32 bits on `wasm32-unknown-unknown`, left over
+  from before `luaconf.h` pinned the numeric types. `luaL_checkversion`
   caught it, in a browser, which is exactly the job it was wired up for.
 
-  ego-cli's `c038187` is the CI job to copy. It installs Firefox and
-  geckodriver explicitly and names them, because the runner otherwise takes
-  whichever driver is first on PATH, and it documents why Chrome needs a
-  driver no newer than 141 -- which is what was used here.
+  The commit before each bump is tagged `pre-wasm-bindgen-0.2.127` in both
+  repositories, which is the boundary to reach for if the browser ever
+  needs bisecting across it.
 
 - **`ego_platform`.** `ego_cli` is pinned by revision here, but its own
   manifest tracks `ego_platform`'s main branch, so the committed lockfile
