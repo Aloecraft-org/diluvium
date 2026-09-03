@@ -7,4 +7,13 @@ description = "Raw FFI declarations for the Diluvium instance ABI"
 links = "diluvium"
 build = "build.rs"
 
+[features]
+default = []
+# The Lua C API (src/lua.rs), for a front end that has to reach `drepl.c`.
+# Off by default: `dv.h` is sealed -- bytes in, bytes out, no Lua type across
+# the boundary -- and a `lua_State` is a deliberate exception to that, so it
+# should be asked for. The symbols are in the archive either way; this gates
+# the declarations, not the code.
+lua = []
+
 [dependencies]

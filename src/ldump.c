@@ -420,6 +420,27 @@ static void dumpFunction (DumpState *D, const Proto *f) {
   { tvar i = value; dumpByte(D, sizeof(tvar)); dumpVar(D, i); }
 
 
+/*
+** Diluvium: the dump format's portability rests on these two sizes.
+**
+** 'dumpInteger', 'dumpSize' and 'dumpInt' are varints, so the body of a
+** chunk does not depend on how wide an integer is -- but the header
+** records 'sizeof(lua_Integer)' and 'sizeof(lua_Number)' and 'checkHeader'
+** refuses a chunk that disagrees. Pinning the types in luaconf.h is what
+** makes every Diluvium build agree; this is what says so at compile time,
+** so a build flag cannot move them the way LUA_USE_C89 once did.
+**
+** The negative array size is the C89 spelling of a static assertion:
+** '-std=c99' is what this is compiled with, so '_Static_assert' is not
+** available. A failure here reads as "size of array is negative", which
+** is the sizes below being wrong and nothing else.
+*/
+#if !defined(DILUVIUM_NUMBERS_UNPINNED)
+typedef char diluvium_numbers_are_pinned[
+  (sizeof(lua_Integer) == 8 && sizeof(lua_Number) == 8) ? 1 : -1];
+#endif
+
+
 static void dumpHeader (DumpState *D) {
   dumpLiteral(D, LUA_SIGNATURE);
   dumpByte(D, LUAC_VERSION);

@@ -19,6 +19,16 @@
 // link on every target so the silent version cannot come back, and a target
 // this script cannot honestly compile for is a hard error rather than a
 // wrong object.
+//
+// That fix was half a fix, and Windows found the other half. The format check
+// asked `if self.is_wasm()`, and the toolchain for a *native* target was still
+// a bare `cc` with no `--target` -- so
+// `cargo build --target x86_64-pc-windows-gnu` on a Linux host archived an ELF
+// object and finished green, the identical bug on the branch nobody had tried.
+// The check now covers every target, and a native cross-compile picks the
+// target's own toolchain (`x86_64-w64-mingw32-gcc` and friends) rather than the
+// host's, refusing when it is absent. MSVC is refused by name: every flag here
+// is spelled the GCC way.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -95,7 +105,13 @@ fn main() {
 
     match &plat {
         Platform::Native { os } => {
-            println!("cargo:rustc-link-lib=dylib=m");
+            // Windows has no separate libm -- the math is in the C runtime,
+            // and on MSVC there is no `m.lib` to ask for at all -- so asking
+            // for one is at best a no-op and at worst the link error that
+            // greets anyone who gets an MSVC build this far.
+            if os != "windows" {
+                println!("cargo:rustc-link-lib=dylib=m");
+            }
             if os == "linux" {
                 println!("cargo:rustc-link-lib=dylib=dl");
             }
@@ -156,6 +172,58 @@ fn run(mut cmd: Command, what: &str) {
     assert!(status.success(), "{what} failed: {cmd:?}");
 }
 
+/// The container an object file is written in, which is what says whether a
+/// compiler built for the target or for the machine it was running on.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ObjectFormat {
+    Elf,
+    MachO,
+    Coff,
+    /// Core wasm, or the LLVM bitcode an LTO build emits in its place.
+    Wasm,
+}
+
+impl ObjectFormat {
+    /// COFF has no magic number: an object begins with its machine type, so
+    /// the only way to recognise one is to know the machines. These are the
+    /// four Windows targets rustc has, and an unlisted machine reads as
+    /// unrecognised rather than as COFF -- a wrong answer here would be
+    /// exactly the silence this check exists to break.
+    const COFF_MACHINES: [[u8; 2]; 4] = [
+        [0x64, 0x86], // IMAGE_FILE_MACHINE_AMD64
+        [0x4c, 0x01], // IMAGE_FILE_MACHINE_I386
+        [0x64, 0xaa], // IMAGE_FILE_MACHINE_ARM64
+        [0xc4, 0x01], // IMAGE_FILE_MACHINE_ARMNT
+    ];
+
+    fn of(bytes: &[u8]) -> Option<Self> {
+        let magic = bytes.get(..4)?;
+        if magic == b"\x7fELF" {
+            return Some(ObjectFormat::Elf);
+        }
+        // 64- and 32-bit little-endian Mach-O.
+        if magic == b"\xcf\xfa\xed\xfe" || magic == b"\xce\xfa\xed\xfe" {
+            return Some(ObjectFormat::MachO);
+        }
+        if magic == b"\0asm" || magic == b"BC\xc0\xde" {
+            return Some(ObjectFormat::Wasm);
+        }
+        if Self::COFF_MACHINES.iter().any(|m| magic.starts_with(m)) {
+            return Some(ObjectFormat::Coff);
+        }
+        None
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            ObjectFormat::Elf => "an ELF object (Linux and the other ELF platforms)",
+            ObjectFormat::MachO => "a Mach-O object (macOS)",
+            ObjectFormat::Coff => "a COFF object (Windows)",
+            ObjectFormat::Wasm => "a wasm object or LLVM bitcode",
+        }
+    }
+}
+
 /// What the *target* is, as opposed to whatever machine is doing the building.
 enum Platform {
     Native { os: String },
@@ -198,6 +266,20 @@ impl Platform {
         !matches!(self, Platform::Native { .. })
     }
 
+    /// The container a correct object for this target is written in.
+    fn object_format(&self) -> ObjectFormat {
+        match self {
+            Platform::Native { os } => match os.as_str() {
+                "macos" => ObjectFormat::MachO,
+                "windows" => ObjectFormat::Coff,
+                // linux and the "other" catch-all: every native target this
+                // script accepts outside those two is ELF.
+                _ => ObjectFormat::Elf,
+            },
+            Platform::Wasi { .. } | Platform::Browser => ObjectFormat::Wasm,
+        }
+    }
+
     /// Look at what the compiler actually produced.
     ///
     /// This is the guard that would have caught the original bug on its own,
@@ -208,37 +290,43 @@ impl Platform {
     /// failed to provide becomes an `env::` import instead of an error, and
     /// dead-code elimination can drop the reference entirely. Four bytes of
     /// magic cannot be argued with.
+    ///
+    /// It checks **every** target, not only wasm. The first version asked
+    /// `if self.is_wasm()`, which left the identical bug live on the native
+    /// branch: `cargo build --target x86_64-pc-windows-gnu` on a Linux host
+    /// ran the host `cc`, archived an ELF object, and finished green, because
+    /// a library crate is never linked. The same reasoning that motivated
+    /// this function applies wherever the target is not the host, so the
+    /// question it asks is now "is this the format the target wants".
     fn assert_object_format(&self, obj: &Path) {
         let bytes = std::fs::read(obj).unwrap_or_else(|e| {
             panic!("the compiler reported success but {} is unreadable: {e}", obj.display())
         });
-        let magic = bytes.get(..4).unwrap_or_default();
-        let looks_wasm = magic == b"\0asm";
-        // A wasm object may also be LLVM bitcode under LTO ('BC\xc0\xde').
-        let looks_bitcode = magic == b"BC\xc0\xde";
-        if self.is_wasm() && !(looks_wasm || looks_bitcode) {
-            let what = if magic.starts_with(b"\x7fELF") {
-                "an ELF object (a native build)"
-            } else if magic == b"\xcf\xfa\xed\xfe" || magic == b"\xce\xfa\xed\xfe" {
-                "a Mach-O object (a native build)"
-            } else {
-                "not a wasm object"
-            };
-            panic!(
-                "\n\
-                 {} is {what}, but the target is wasm.\n\
-                 \n\
-                 The C compiler in use is building for the host instead of the\n\
-                 target. Set WASI_SDK_PATH (or CC) to a wasm-capable toolchain --\n\
-                 see bindings/rust/WASM-SPIKE.md.\n\
-                 \n\
-                 Checked here because a wrong-architecture object is invisible to\n\
-                 `cargo build`: a library crate is never linked, so the build\n\
-                 reports success and the failure surfaces much later, in whatever\n\
-                 downstream binary first tries to link it.\n",
-                obj.display()
-            );
+        let want = self.object_format();
+        let got = ObjectFormat::of(&bytes);
+        if got == Some(want) {
+            return;
         }
+        let saw = match got {
+            Some(f) => f.describe(),
+            None => "not an object format this script recognises",
+        };
+        panic!(
+            "\n\
+             {} is {saw}, but the target wants {}.\n\
+             \n\
+             The C compiler in use is building for the host instead of the\n\
+             target. Set CC (or CC_<target-with-underscores>) to a compiler for\n\
+             this target -- for wasm, WASI_SDK_PATH; see\n\
+             bindings/rust/WASM-SPIKE.md.\n\
+             \n\
+             Checked here because a wrong-architecture object is invisible to\n\
+             `cargo build`: a library crate is never linked, so the build\n\
+             reports success and the failure surfaces much later, in whatever\n\
+             downstream binary first tries to link it.\n",
+            obj.display(),
+            want.describe(),
+        );
     }
 
     fn cflags(&self, src: &Path, toolchain: &Toolchain) -> Vec<String> {
@@ -328,9 +416,67 @@ impl Toolchain {
         let ar_env = std::env::var(env_key("AR")).or_else(|_| std::env::var("AR"));
 
         if !plat.is_wasm() {
+            // MSVC is refused rather than attempted. Everything this script
+            // passes is spelled the GCC way -- `-O2`, `-std=c99`, `-fPIC`,
+            // `-c`, `-o` -- and `cl.exe` takes none of it; the link would then
+            // ask for a `libm` that does not exist on that platform either.
+            // A hard error naming the route that works beats an unreadable
+            // wall of `cl` diagnostics.
+            assert!(
+                !target.contains("msvc"),
+                "\n\
+                 diluvium-sys cannot build the C core for {target}.\n\
+                 \n\
+                 This script drives a GCC-style compiler, and MSVC accepts none\n\
+                 of its flags. Build for the GNU ABI instead:\n\
+                 \n\
+                     rustup target add x86_64-pc-windows-gnu\n\
+                     cargo build --target x86_64-pc-windows-gnu\n\
+                 \n\
+                 which needs a mingw-w64 toolchain on PATH (`mingw-w64` on\n\
+                 Debian/Ubuntu, `mingw-w64-gcc` on Arch, MSYS2 on Windows).\n"
+            );
+
+            // A cross-compile needs a compiler for the target. `cc` is the
+            // host's, and building the host's object for a foreign target is
+            // exactly the silent failure `assert_object_format` exists to
+            // catch -- so name the right program up front rather than let the
+            // check fire later.
+            let host = std::env::var("HOST").expect("cargo sets HOST");
+            let (cc, ar) = if host == target {
+                (
+                    cc_env.unwrap_or_else(|_| "cc".into()),
+                    ar_env.unwrap_or_else(|_| "ar".into()),
+                )
+            } else {
+                let prefix = gnu_cross_prefix(target);
+                let cc = cc_env.unwrap_or_else(|_| format!("{prefix}-gcc"));
+                let ar = ar_env.unwrap_or_else(|_| format!("{prefix}-ar"));
+                assert!(
+                    on_path(&cc),
+                    "\n\
+                     diluvium-sys is cross-compiling the C core from {host} to\n\
+                     {target}, and '{cc}' is not on PATH.\n\
+                     \n\
+                     Install a cross toolchain for the target, or point at one:\n\
+                     \n\
+                         export CC_{env_target}=/path/to/compiler\n\
+                         export AR_{env_target}=/path/to/ar\n\
+                     \n\
+                     For the Windows targets that is mingw-w64 (`mingw-w64` on\n\
+                     Debian/Ubuntu, `mingw-w64-gcc` on Arch, MSYS2 on Windows).\n\
+                     \n\
+                     Refusing rather than falling back to the host's 'cc': that\n\
+                     builds a host object, and `cargo build` on a library crate\n\
+                     never links, so it would report success.\n",
+                    env_target = target.replace('-', "_"),
+                );
+                (cc, ar)
+            };
+
             return Toolchain {
-                cc: cc_env.unwrap_or_else(|_| "cc".into()),
-                ar: ar_env.unwrap_or_else(|_| "ar".into()),
+                cc,
+                ar,
                 target_flags: Vec::new(),
                 sysroot: None,
                 wasi_lib_subdir: "",
@@ -458,6 +604,28 @@ impl Toolchain {
             self.cc
         );
     }
+}
+
+/// rustc's triples are not always a cross toolchain's program prefix.
+///
+/// The GNU convention is `<prefix>-gcc`, and for most targets the prefix is
+/// the triple itself (`aarch64-unknown-linux-gnu-gcc`). Windows is the
+/// exception: mingw-w64 builds for rustc's `*-pc-windows-gnu` but calls
+/// itself `*-w64-mingw32`.
+fn gnu_cross_prefix(target: &str) -> String {
+    let arch = target.split('-').next().unwrap_or(target);
+    if target.contains("windows") {
+        format!("{arch}-w64-mingw32")
+    } else {
+        target.to_string()
+    }
+}
+
+fn on_path(program: &str) -> bool {
+    Command::new(program)
+        .arg("--version")
+        .output()
+        .is_ok_and(|o| o.status.success())
 }
 
 /// rustc's triples are not always clang's.

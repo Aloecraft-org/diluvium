@@ -4,7 +4,26 @@
 //! matter for correctness. The safe wrapper in the `diluvium` crate is where
 //! lifetimes and the threading rule are enforced; this crate is deliberately a
 //! transcription, so a reader can diff it against the header.
+//!
+//! # Surface
+//!
+//! Entry points: `dv_new` / `dv_free` bracket an instance, `dv_load` gives it
+//! a program, `dv_run` / `dv_resume` drive it, and the `dv_queue_*` family
+//! moves msgpack across the boundary. `dv_abi_version` is called first and its
+//! answer refused on mismatch.
+//!
+//! Configurable values: [`DV_ABI_VERSION`] and [`DV_WAIT_MAX`], which are
+//! transcribed rather than chosen, and the `DV_FLAG_*` set, which is what a
+//! host actually decides.
+//!
+//! Fan-out points: two modules, and the reason there are two is a boundary.
+//! This one is `dv.h` -- sealed, bytes in and bytes out, no Lua type crossing.
+//! [`lua`] is the Lua C API, behind the off-by-default `lua` feature, for a
+//! front end that has to reach `drepl.c` and therefore cannot stay sealed.
 #![allow(non_camel_case_types)]
+
+#[cfg(feature = "lua")]
+pub mod lua;
 
 use std::os::raw::{c_char, c_int, c_void};
 

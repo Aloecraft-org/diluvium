@@ -602,6 +602,100 @@ throughout.
 There is no `~=` form: it is already "not equal", so bitwise xor has no
 compound spelling. `??=` exists and short-circuits.
 
+## Numeric types and portable bytecode
+
+A chunk compiled by any Diluvium build loads on any other. Stock Lua does
+not promise that and does not need to; Diluvium does, for the same reason
+`luai_makeseed` fixes the string hash seed -- a contract runtime whose
+nodes disagree about what an integer is has no consensus to reach, and a
+compiler you have to re-run per target is one you cannot ship artifacts
+from.
+
+The format already carried most of the way. 5.5 writes integers, sizes and
+counts as varints, so a chunk's *body* does not depend on how wide an
+integer is; `lua_Number` is the one field still written raw. And the header
+records `sizeof(int)`, `sizeof(Instruction)`, `sizeof(lua_Integer)` and
+`sizeof(lua_Number)`, each followed by a sentinel read back raw -- so a
+width, a byte order or a float format that disagrees is *refused* at load
+rather than misread. That half matters more than the portability: the
+failure mode was never silent corruption.
+
+What was missing was the builds agreeing with each other. `luaconf.h`
+infers the numeric types from the platform, and one inference is a trap.
+`LUA_C89_NUMBERS` is on whenever `LUA_USE_C89` is set and the platform is
+not Windows, and it takes `long` for the integer -- but `LUA_USE_C89` is a
+statement about the *library* a target has, and the browser build sets it
+for the wasm shim's sake. Two unrelated decisions on one switch, so
+`wasm32-unknown-unknown` was a 32-bit-integer build:
+
+| | every other target | `wasm32-unknown-unknown` |
+| :--- | :--- | :--- |
+| `math.maxinteger` | 9223372036854775807 | 2147483647 |
+| `3000000000 + 1` | `3000000001`, an integer | `3000000001.0`, a float |
+| `math.tointeger(2^40)` | 1099511627776 | nil |
+
+Not only a narrower range: the subtype changes, which reaches `math.type`,
+`//`, `%`, `%d` and table keys. Nothing shipped was affected -- the WASI
+builds never set the flag, `site/` loads `libdiluvium_wasi.wasm`, and the
+browser target is advisory and unreleased -- so it was a trap armed for
+whoever shipped that target first.
+
+`luaconf.h` now pins `long long` and `double` regardless, with
+`DILUVIUM_NUMBERS_UNPINNED` as the deliberate way back out. It costs
+nothing: both types exist on every target, wasm included, where `i64` is a
+core value type and not an emulated pair. `ldump.c` asserts the two sizes
+at compile time, so a build flag cannot move them again.
+
+Three checks, each covering what the others cannot:
+
+- `make dump_check` -- the header a dump produces, byte for byte, and a
+  mutated header being refused. Runs wherever CI runs.
+- `test/dump_cross_check.sh` -- that no build flag moves the numeric types
+  any more, read from the *macro* rather than from a `sizeof`, because on
+  an LP64 host `long` is 64 bits and the bug is invisible; and a genuinely
+  mismatched build getting a refusal rather than a misread.
+- `test/fingerprint_check.sh` -- already there, and the reminder that
+  agreeing about numbers is not agreeing about *codegen*: the debug and
+  release builds of this tree compile the same source to different
+  bytecode, which is why a snapshot's runtime identity is a hash and not a
+  field list.
+
+### What this does not buy
+
+Portable bytecode is a property of the artifact, not of the run. The same
+chunk on two machines can still produce two answers, and the analyzer's
+determinism verdict remains the thing that says whether it will:
+
+- **Host calls.** Anything reaching out -- clock, filesystem, network,
+  entropy -- is nondeterministic by construction, and the analyzer already
+  treats it that way. `doc/Messaging.md` 8.3 gives the host the clock on
+  purpose. `doc/Determinism.md` is about making the *scheduler* replayable
+  given a message log, which is a third guarantee again, distinct from both
+  of these.
+- **libm.** IEEE-754 specifies `+ - * /` and `sqrt` to be correctly
+  rounded, which is why ordinary arithmetic is bit-identical everywhere --
+  `0.1 + 0.2` and `1e16 + 2.0` agree across platforms. It does not specify
+  the transcendentals, and implementations differ. Same pinned chunk, no
+  host call anywhere near it:
+
+  ```
+  math.sin(1e22)    glibc   -0.85220084976718879
+                    msvcrt   0.46261304076460175
+  ```
+
+  Not a last-bit difference: argument reduction for large inputs is where
+  libms diverge outright. `sin`, `cos`, `tan`, `exp`, `log` and `^` are all
+  in this class, and a decimal library would not change it -- that is a
+  question about *precision*, this is one about which implementation
+  answered.
+- **Addresses.** `tostring` of a table or function prints a pointer, so it
+  differs between runs as much as between platforms.
+- **The collector.** `collectgarbage("count")`, and anything measured
+  against GC progress.
+
+Settled, and worth not re-litigating: `pairs` order over string keys, which
+`luai_makeseed` fixed by pinning the hash seed to `"DILU"`.
+
 ## CLI and REPL
 
 The intelligence a REPL needs -- unfinished versus broken input,
