@@ -173,7 +173,11 @@ impl Runtime {
         // because there is nothing mounted to read.
         let mut linker: Linker<WasiP1Ctx> = Linker::new(&engine);
         wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |cx| cx)?;
-        Ok(Runtime { engine, module, linker })
+        Ok(Runtime {
+            engine,
+            module,
+            linker,
+        })
     }
 
     /// Instantiate and load a program from Lua source.
@@ -195,7 +199,10 @@ impl Runtime {
         // reach the terminal, and nothing else. No directories, no environment,
         // no arguments -- a sandbox that mounted the host's filesystem would
         // give away the reason to use one.
-        let wasi = WasiCtxBuilder::new().inherit_stdout().inherit_stderr().build_p1();
+        let wasi = WasiCtxBuilder::new()
+            .inherit_stdout()
+            .inherit_stderr()
+            .build_p1();
         let mut store = Store::new(&self.engine, wasi);
         // Without fuel the store refuses to run at all once consume_fuel is on,
         // so start with a generous allowance and let the caller narrow it.
@@ -258,7 +265,12 @@ impl Runtime {
         let name_ptr = me.write_cstring(name)?;
         let st = me.f.load.call(
             &mut me.store,
-            (ptr as i32, code_ptr as i32, code.len() as i32, name_ptr as i32),
+            (
+                ptr as i32,
+                code_ptr as i32,
+                code.len() as i32,
+                name_ptr as i32,
+            ),
         )?;
         me.free(code_ptr)?;
         me.free(name_ptr)?;
@@ -578,7 +590,12 @@ impl Instance {
         let p = self.write_bytes(reference)?;
         self.f.endpoint_allow.call(
             &mut self.store,
-            (self.ptr as i32, p as i32, reference.len() as i32, token as i32),
+            (
+                self.ptr as i32,
+                p as i32,
+                reference.len() as i32,
+                token as i32,
+            ),
         )?;
         self.free(p)?;
         Ok(())

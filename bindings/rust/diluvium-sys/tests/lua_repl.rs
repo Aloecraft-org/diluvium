@@ -47,7 +47,11 @@ unsafe fn eval(l: *mut lua_State, source: &str) -> Result<String, c_int> {
         lua_settop(l, 0); // an error left its message; drop it
         return Err(status);
     }
-    assert_eq!(lua_pcall(l, 0, LUA_MULTRET, 0), LUA_OK, "chunk raised: {source}");
+    assert_eq!(
+        lua_pcall(l, 0, LUA_MULTRET, 0),
+        LUA_OK,
+        "chunk raised: {source}"
+    );
     let printed = if lua_gettop(l) == 0 {
         String::new()
     } else {
@@ -66,7 +70,11 @@ unsafe fn eval(l: *mut lua_State, source: &str) -> Result<String, c_int> {
 /// `l` must be a state from `setup`.
 unsafe fn complete(l: *mut lua_State, line: &str, cursor: usize) -> (usize, Vec<String>) {
     let offset = diluvium_repl_complete(l, line.as_ptr().cast(), cursor);
-    assert_eq!(lua_type(l, -1), LUA_TTABLE, "completion did not push a table");
+    assert_eq!(
+        lua_type(l, -1),
+        LUA_TTABLE,
+        "completion did not push a table"
+    );
     let n = lua_rawlen(l, -1) as usize;
     let mut out = Vec::with_capacity(n);
     for i in 1..=n {
@@ -88,11 +96,11 @@ unsafe extern "C" fn checkversion_body(l: *mut lua_State) -> c_int {
 
 /// The transcription check that matters most.
 ///
-/// `lua_Integer` is `long long` here and `long` on `wasm32-unknown-unknown`,
-/// because the browser build compiles with `-DLUA_USE_C89`. Lua's own version
-/// check compares `sizeof(lua_Integer)` and `sizeof(lua_Number)` against what
-/// the library was built with, so a wrong alias fails here rather than
-/// silently misreading a number later.
+/// Lua's own version check compares `sizeof(lua_Integer)` and
+/// `sizeof(lua_Number)` against what the library was built with, so a wrong
+/// alias fails here rather than silently misreading a number later. It has
+/// already earned its place once: the browser target's aliases stayed at
+/// 32 bits after `luaconf.h` pinned the C at 64, and this is what said so.
 #[test]
 fn version_and_widths_agree() {
     unsafe {
@@ -101,7 +109,9 @@ fn version_and_widths_agree() {
         lua_pushcfunction(l, checkversion_body);
         let status = lua_pcall(l, 0, 0, 0);
         if status != LUA_OK {
-            let message = CStr::from_ptr(lua_tostring(l, -1)).to_string_lossy().into_owned();
+            let message = CStr::from_ptr(lua_tostring(l, -1))
+                .to_string_lossy()
+                .into_owned();
             lua_close(l);
             panic!("luaL_checkversion failed: {message}");
         }
@@ -125,7 +135,10 @@ fn a_bare_expression_yields_its_value() {
 fn diluvium_syntax_compiles() {
     unsafe {
         let l = setup();
-        assert_eq!(eval(l, r#"local n = "world"; return $"hello {n}""#).unwrap(), "hello world");
+        assert_eq!(
+            eval(l, r#"local n = "world"; return $"hello {n}""#).unwrap(),
+            "hello world"
+        );
         assert_eq!(eval(l, "nil ?? 8080").unwrap(), "8080");
         lua_close(l);
     }
@@ -157,13 +170,22 @@ fn completion_offers_globals_and_keywords() {
     unsafe {
         let l = setup();
         let (offset, items) = complete(l, "prin", 4);
-        assert_eq!(offset, 0, "the replacement starts at the token, not the cursor");
-        assert!(items.iter().any(|c| c == "print"), "no 'print' in {items:?}");
+        assert_eq!(
+            offset, 0,
+            "the replacement starts at the token, not the cursor"
+        );
+        assert!(
+            items.iter().any(|c| c == "print"),
+            "no 'print' in {items:?}"
+        );
 
         // A Diluvium contextual keyword: not a value, so no table walk finds
         // it, and `drepl.c` carries the list for exactly that reason.
         let (_, items) = complete(l, "swit", 4);
-        assert!(items.iter().any(|c| c == "switch"), "no 'switch' in {items:?}");
+        assert!(
+            items.iter().any(|c| c == "switch"),
+            "no 'switch' in {items:?}"
+        );
         lua_close(l);
     }
 }
@@ -177,7 +199,10 @@ fn completion_offset_points_past_the_dot() {
         let l = setup();
         let (offset, items) = complete(l, "string.f", 8);
         assert_eq!(offset, 7, "'string.f' should replace from index 7, not 0");
-        assert!(items.iter().any(|c| c == "format"), "no 'format' in {items:?}");
+        assert!(
+            items.iter().any(|c| c == "format"),
+            "no 'format' in {items:?}"
+        );
         lua_close(l);
     }
 }
@@ -197,7 +222,10 @@ fn completion_runs_no_metamethod() {
         .unwrap();
         let (offset, items) = complete(l, "tricky.any", 10);
         assert_eq!(offset, 7);
-        assert!(items.is_empty(), "a raw walk should find nothing: {items:?}");
+        assert!(
+            items.is_empty(),
+            "a raw walk should find nothing: {items:?}"
+        );
         // The state is still usable, which is the half that matters.
         assert_eq!(eval(l, "1 + 1").unwrap(), "2");
         lua_close(l);

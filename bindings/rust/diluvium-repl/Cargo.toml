@@ -65,9 +65,12 @@ ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", f
 tokio = { version = "1", features = ["macros", "rt"] }
 
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
-# Pinned to match ego_cli and ego_platform: the wasm-bindgen ABI must agree
-# with the wasm-bindgen-cli that post-processes the module.
-wasm-bindgen = "=0.2.114"
+# Deliberately unpinned. ego_cli and ego_platform both pin `=0.2.114`, which
+# binds the whole graph, so naming a version here would only add a second
+# constraint to keep in step -- and 0.2.114 is the one version that cannot
+# post-process this module. See src/main.rs and doc/ROADMAP.md: 0.2.115
+# fixes it, and this follows whatever those two settle on.
+wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
 js-sys = "0.3"
 

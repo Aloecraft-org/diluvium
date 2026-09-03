@@ -841,43 +841,43 @@ front end -- and this spike deliberately does not answer it.
   fixed-size bump allocator, `setjmp`/`longjmp` trap, and it defines its
   own `global_L` and exports a competing REPL. Right names, wrong meanings.
 
-  The blocking one: **wasm-bindgen cannot post-process this module.** It
-  fails with "`__instance_terminated` global required for catch wrappers".
-  The cause is a genuine conflict rather than a misconfiguration:
+  The blocker, and it is a version number. wasm-bindgen **0.2.114** cannot
+  post-process this module -- "`__instance_terminated` global required for
+  catch wrappers" -- and **0.2.115 can**. Bisected: 0.2.114 fails, 0.2.115,
+  0.2.118, 0.2.122 and 0.2.127 all succeed.
 
-  1. The core is compiled with the wasm exception-handling proposal, which
-     is what makes Lua's `setjmp`/`longjmp` -- and therefore `pcall` --
-     catch rather than trap. `bindings/rust/WASM-SPIKE.md` records that as
-     a deliberate departure from the JavaScript artifact, which stubs
-     `setjmp` and accepts that a Lua error kills the module.
-  2. That leaves a `tag` section in the wasm. ego-cli's own browser
-     modules have none, which is why they post-process fine and this does
-     not -- the section is the whole difference.
-  3. wasm-bindgen sees the tags, takes its exception-aware path for catch
-     wrappers, and wants a global only a Rust build with exception-handling
-     enabled emits.
-  4. Catch wrappers cannot be avoided from this side. Removing the
-     `Result<_, JsValue>` return, making `start` synchronous, and dropping
-     `ego_platform` and web-sys from the browser build were each tried;
-     `wasm_bindgen_futures` and `js_sys` generate them regardless.
+  Why it was ever a problem: the core is compiled with the wasm
+  exception-handling proposal, which is what makes Lua's `setjmp`/`longjmp`
+  -- and therefore `pcall` -- catch rather than trap
+  (`bindings/rust/WASM-SPIKE.md` records that as a deliberate departure from
+  the JavaScript artifact, which stubs `setjmp` and lets a Lua error kill
+  the module). That leaves a `tag` section in the wasm, ego-cli's own
+  browser modules have none, and 0.2.114 takes an exception-aware path for
+  catch wrappers that wants a global only a Rust build with EH enabled
+  emits. Nothing on this side avoids it: dropping the `Result<_, JsValue>`
+  return, making `start` synchronous, and dropping `ego_platform` and
+  web-sys from the browser build were each tried, and
+  `wasm_bindgen_futures` generates catch wrappers regardless.
 
-  Three ways out, cheapest first. Try a newer wasm-bindgen: the pin is
-  `=0.2.114` only because `ego_platform` pins it, and this may already be
-  fixed. Failing that, build Rust itself with exception-handling
-  (`-C target-feature=+exception-handling` over `-Z build-std`, so the
-  global exists) -- nightly, but principled. The third is to give up wasm
-  EH in the browser and take the trapping `setjmp`, which is what the
-  JavaScript artifact does today and is wrong for a prompt: every Lua error
-  would kill the module instead of printing a message.
+  The pin is not this crate's. `ego_cli` and `ego_platform` both carry
+  `wasm-bindgen = "=0.2.114"`, and cargo resolves one graph, so either of
+  them holds the whole build at the one version that does not work --
+  including the browser build, which no longer depends on `ego_platform` at
+  all. **Both need `0.2.115` or newer**; this crate names no version, so it
+  follows whatever they settle on.
 
-  Everything else is ready. `run` is generic over the terminal,
-  `XtermTerminal::attach` takes the page's xterm.js object, and the tests
-  need no browser-specific code at all -- `MemTerminal` is the same on
-  every target, so the moment the module post-processes, the same fourteen
-  run in a browser. ego-cli's `c038187` is the CI job to copy: it installs
-  Firefox and geckodriver explicitly and names them, because the runner
-  otherwise picks whichever driver is first on PATH, and it documents why
-  Chrome needs a driver no newer than 141.
+  With those two relaxed locally, the whole thing works: **14/14 in
+  Chromium 141**, through `wasm-bindgen-test-runner` and a webdriver, with
+  no browser-specific test code -- `MemTerminal` is the same on every
+  target. One real bug turned up on the way, and only there: these bindings
+  still declared `lua_Integer` as 32 bits on `wasm32-unknown-unknown`, left
+  over from before `luaconf.h` pinned the numeric types. `luaL_checkversion`
+  caught it, in a browser, which is exactly the job it was wired up for.
+
+  ego-cli's `c038187` is the CI job to copy. It installs Firefox and
+  geckodriver explicitly and names them, because the runner otherwise takes
+  whichever driver is first on PATH, and it documents why Chrome needs a
+  driver no newer than 141 -- which is what was used here.
 
 - **`ego_platform`.** `ego_cli` is pinned by revision here, but its own
   manifest tracks `ego_platform`'s main branch, so the committed lockfile

@@ -34,19 +34,27 @@
 //! plain `extern` off Windows. The feature gates the declarations, not the
 //! code.
 //!
-//! # The widths are not the same everywhere
+//! # The widths, and why they are the same everywhere now
 //!
-//! `lua_Integer` is `long long` on native and WASI, and `long` -- 32 bits --
-//! on `wasm32-unknown-unknown`, because the browser configuration in
-//! `build.rs` passes `-DLUA_USE_C89`, which sends `luaconf.h` down its
-//! `LUA_C89_NUMBERS` branch to "the largest types available for C89". Same
-//! class of hazard as the one [`crate::dv_layout`] exists for, and invisible
-//! in a hand-written transcription that was only ever checked on LP64.
+//! `lua_Integer` is `long long` and `lua_Number` is `double`, on every
+//! target. That is not the platform's doing: `luaconf.h` pins both, so that
+//! a compiled chunk loads wherever it is carried (doc/ROADMAP.md, "Numeric
+//! types and portable bytecode").
 //!
-//! [`luaL_checkversion`] is the guard: it is Lua's own check that the
-//! library was compiled with the `lua_Integer` and `lua_Number` sizes the
-//! caller believes in, and it fails loudly rather than misreading a number.
-//! Call it once after [`luaL_newstate`], the way `src/lua.c` does.
+//! It was not always true, and the history is why the check below stays.
+//! The browser build passes `-DLUA_USE_C89` for the wasm shim's sake, and
+//! stock `luaconf.h` reads that as a statement about integer width too,
+//! taking `long` -- 32 bits on wasm32. These aliases were `cfg`-selected to
+//! match. When the pin landed the C changed and the `cfg` did not, so this
+//! module claimed 4 bytes where the library had 8, on the one target where
+//! the two ever differed.
+//!
+//! [`luaL_checkversion`] found it, which is the whole point of wiring it up:
+//! it is Lua's own check that the library was compiled with the sizes the
+//! caller believes in, and it failed loudly in a browser rather than
+//! misreading a number. Call it once after [`luaL_newstate`], the way
+//! `src/lua.c` does, and keep calling it even though the pin makes a
+//! mismatch unlikely -- unlikely is what this was.
 //!
 //! # Safety
 //!
@@ -84,22 +92,14 @@ pub struct lua_Debug {
     _opaque: [u8; 0],
 }
 
-/// `LUA_INTEGER`: `long long`, except on the browser target -- see the
-/// module docs, and check it with [`luaL_checkversion`].
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
+/// `LUA_INTEGER`: `long long`, pinned in `luaconf.h` rather than inferred,
+/// so it is the same on every target. Checked by [`luaL_checkversion`].
 pub type lua_Integer = i64;
-/// `LUA_INTEGER` under `-DLUA_USE_C89`: `long`, 32 bits on wasm32.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub type lua_Integer = i32;
 
 /// `LUA_UNSIGNED`, which `luaconf.h` defines as `unsigned LUA_INTEGER`.
-#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub type lua_Unsigned = u64;
-/// `LUA_UNSIGNED` under `-DLUA_USE_C89`.
-#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
-pub type lua_Unsigned = u32;
 
-/// `LUA_NUMBER`: `double` on every target this crate builds for.
+/// `LUA_NUMBER`: `double`, pinned alongside the integer.
 pub type lua_Number = f64;
 
 /// `LUA_KCONTEXT`: `intptr_t`, or `ptrdiff_t` under C89. Pointer-sized
@@ -223,11 +223,7 @@ extern "C" {
     /// Resolution is raw -- no metamethod runs -- so this cannot fail and
     /// has no side effects, which is why a synchronous `&self` completer can
     /// answer from it before the keystroke.
-    pub fn diluvium_repl_complete(
-        L: *mut lua_State,
-        buf: *const c_char,
-        cursor: usize,
-    ) -> usize;
+    pub fn diluvium_repl_complete(L: *mut lua_State, buf: *const c_char, cursor: usize) -> usize;
 
     /* --- stack --- */
 
@@ -266,12 +262,7 @@ extern "C" {
 
     /// Push a traceback for `L1`. The message handler an interpreter
     /// installs as `lua_pcall`'s `errfunc`.
-    pub fn luaL_traceback(
-        L: *mut lua_State,
-        L1: *mut lua_State,
-        msg: *const c_char,
-        level: c_int,
-    );
+    pub fn luaL_traceback(L: *mut lua_State, L1: *mut lua_State, msg: *const c_char, level: c_int);
 
     /* --- interrupting a running chunk --- */
 
@@ -285,7 +276,7 @@ extern "C" {
 /* The macros lua.h defines, as functions                                 */
 /* ====================================================================== */
 /* Each is a macro in the C headers, so there is no symbol to link; these
-   are the same expansions, kept here rather than left to every caller. */
+are the same expansions, kept here rather than left to every caller. */
 
 /// `lua_pcall(L, n, r, f)` -- `lua_pcallk` with no continuation.
 ///
@@ -293,12 +284,7 @@ extern "C" {
 /// `nargs + 1` values must be on the stack, and `errfunc` must be 0 or a
 /// valid index holding a function.
 #[inline]
-pub unsafe fn lua_pcall(
-    L: *mut lua_State,
-    nargs: c_int,
-    nresults: c_int,
-    errfunc: c_int,
-) -> c_int {
+pub unsafe fn lua_pcall(L: *mut lua_State, nargs: c_int, nresults: c_int, errfunc: c_int) -> c_int {
     lua_pcallk(L, nargs, nresults, errfunc, 0, None)
 }
 
@@ -353,7 +339,7 @@ pub unsafe fn luaL_openlibs(L: *mut lua_State) {
 #[inline]
 pub unsafe fn luaL_checkversion(L: *mut lua_State) {
     // LUAL_NUMSIZES == sizeof(lua_Integer) * 16 + sizeof(lua_Number)
-    const NUMSIZES: usize = std::mem::size_of::<lua_Integer>() * 16
-        + std::mem::size_of::<lua_Number>();
+    const NUMSIZES: usize =
+        std::mem::size_of::<lua_Integer>() * 16 + std::mem::size_of::<lua_Number>();
     luaL_checkversion_(L, lua_Number::from(LUA_VERSION_NUM), NUMSIZES);
 }
