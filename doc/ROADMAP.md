@@ -724,6 +724,73 @@ Not done: `-r` on the main binary. Emitting the analysis report there
 needs `analyze.c` in the amalgamation, since the debug build is a single
 translation unit that does not link it. `luac` still has it.
 
+## A cross-platform prompt
+
+`bindings/rust/diluvium-repl` is a spike: `ego_cli`'s line editing driving
+`drepl.c`'s REPL intelligence. It exists to answer two questions before
+anything is committed to, and it answers both.
+
+**Does the seam fit?** Better than expected: it needs no adapter at all.
+`ego_cli::extend::Completion` is `{ start, end, candidates }`, and
+`diluvium_repl_complete` returns the offset a replacement starts at with the
+candidates on the stack -- so the completer is one call and a range. An
+earlier draft added keywords and sorted the result on top, which was both
+redundant and wrong: `drepl.c` already offers the keywords, already gates
+them to a bare word, and already sorts, so the draft offered `for` as a
+completion of `string.fo`. The test caught it and the fix was deletion.
+
+Highlighting ports across as a classifier, `dline.c`'s `classify` arm for
+arm, including the Diluvium syntax it colours separately (`$"`, `??`, `?.`,
+`?[`, `~function`). One thing does not port: `dline.c` classifies and
+reassembles by byte, which is safe there because it writes bytes back out.
+Reassembling by byte in Rust turns `héllo` into `hÃ©llo`, and the invariant
+`ego_cli` asks of a highlighter -- same printable characters, escapes added
+-- is what caught it.
+
+**What does Ctrl+C do?** It resolves itself, which was not obvious in
+advance. `Session::read_line` sets raw mode on entry and restores it before
+returning, the error path included, so evaluation always happens in cooked
+mode: a real SIGINT is delivered during a chunk, where `lua.c`'s hook
+interrupts it, and Lua's own `print` reaches a terminal whose line
+discipline is on. At the prompt, in raw mode, Ctrl+C is a key press and
+arrives as `ReadOutcome::Interrupted`. Both meanings land where they belong
+without either side arranging it.
+
+**What does it cost?** Measured on x86-64 Linux, stripped:
+
+| | |
+| :--- | ---: |
+| `dv`, the C interpreter (`-O2`, dynamic libc) | 518 KB |
+| `dv-repl`, plain `--release` | 1.5 MB |
+| `dv-repl`, `opt-level = "z"` + LTO + `panic = "abort"` | **1.0 MB** |
+
+Roughly twice the C binary, for the whole runtime plus a line editor that
+works on Windows, WASI and in a browser. An earlier estimate in this
+discussion said 4.5x, extrapolated from `ego_cli`'s demo binary; that was
+wrong, because cross-crate LTO removes most of what the demo's dependency
+graph carries.
+
+### What it is not, and what is still open
+
+It is not `src/lua.c`. No argument handling, no script running, no
+`--task`, no `LUA_INIT`, no history file. Those are the second half of the
+question -- whether Rust should own the whole CLI or only the interactive
+front end -- and this spike deliberately does not answer it.
+
+- **The browser.** `run` is generic over the terminal and ready for
+  `XtermTerminal`, but `wasm32-unknown-unknown` takes its libc from the
+  embedder (`bindings/rust/WASM-SPIKE.md`, "the browser contract"), so a
+  browser build needs those 84 symbols supplied from Rust first. That is
+  the missing half, and it is a real piece of work rather than a flag.
+- **WASI.** The code path is there and needs a wasi-sdk to build; only the
+  native target has been run.
+- **`ego_platform`.** `ego_cli` is pinned by revision here, but its own
+  manifest tracks `ego_platform`'s main branch, so the committed lockfile
+  is the only thing holding that still. Before anything shipping depends on
+  this, that crate wants a release rather than a branch.
+- **MSVC.** `diluvium-sys` builds for `*-pc-windows-gnu` and refuses MSVC by
+  name; a Windows binary from this crate inherits that.
+
 ## Analyzer
 
 The determinism verdict (three-valued: deterministic / nondeterministic /

@@ -304,6 +304,44 @@ jobs:
         working-directory: bindings/rust
         run: cargo build --tests -p diluvium-sys --features lua --target x86_64-pc-windows-gnu
 
+  # The ego-cli spike: a prompt built on diluvium-sys' `lua` feature. Its own
+  # job because it is its own workspace -- `cargo test --all` above does not
+  # reach it, deliberately, since it pulls two git dependencies and about a
+  # hundred transitive crates that the shipping crates should not pay for.
+  #
+  # Blocking rather than advisory: ego_cli is pinned by revision and
+  # ego_platform by the committed lockfile, so a break here is this
+  # repository's to explain.
+  repl-spike:
+    name: REPL spike (ego-cli)
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # MemTerminal, so the completer and the highlighter are exercised
+      # without a tty -- which is the only way this runs on a CI runner at
+      # all, and the reason ego-cli ships that backend in the library.
+      - name: Test the prompt
+        working-directory: bindings/rust/diluvium-repl
+        run: cargo test
+
+      - name: Lint
+        working-directory: bindings/rust/diluvium-repl
+        run: cargo clippy --all-targets -- -D warnings
+
+      # Size is the open question the spike exists to answer, so it is
+      # measured on every run rather than remembered from one.
+      - name: Build and measure
+        working-directory: bindings/rust/diluvium-repl
+        run: |
+          cargo build --release
+          size=$(stat -c%s target/release/dv-repl)
+          echo "dv-repl: $size bytes" | tee -a "$GITHUB_STEP_SUMMARY"
+
   wasmtime-binding:
     name: wasmtime binding
     needs: resolve

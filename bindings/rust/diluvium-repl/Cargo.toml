@@ -1,0 +1,67 @@
+# A spike: ego-cli's line editing over drepl.c's REPL intelligence.
+#
+# Deliberately NOT a workspace member. The workspace's crates are what
+# Diluvium ships, and `cargo test --all` in bindings/rust is what CI runs
+# against them; this pulls two git dependencies and about a hundred
+# transitive crates for tokio and crossterm, and taxing the shipping crates'
+# build with that is the wrong trade for a spike. It has its own lockfile
+# and its own CI job. ego-cli keeps `ego_shell/` outside its workspace for
+# the same reason.
+#
+# What it is for: answering whether the seam fits, and what a Rust prompt
+# costs. See doc/ROADMAP.md, "A cross-platform prompt".
+
+# Its own workspace root, so it has its own lockfile and pins its own
+# git dependencies independently of the crates that ship.
+[workspace]
+
+[package]
+name = "diluvium-repl"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "An interactive Diluvium prompt: cross-platform line editing over drepl.c"
+publish = false
+
+[[bin]]
+name = "dv-repl"
+path = "src/main.rs"
+
+[lib]
+name = "diluvium_repl"
+path = "src/lib.rs"
+
+[dependencies]
+# The Lua C API, which is what drepl.c's two functions take. Off by default
+# in that crate on purpose; see its src/lua.rs.
+diluvium-sys = { path = "../diluvium-sys", features = ["lua"] }
+
+# Pinned by revision, not by branch. ego-cli's own manifest tracks
+# ego_platform's main branch, so the only thing holding that still is this
+# crate's lockfile -- which is why the lockfile is committed even though
+# this builds a binary and a library rather than shipping either.
+ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "3e45e9129d5c0fa6399405d866ac37cc5fbb751a" }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt"] }
+
+# Size is the open question this spike exists to answer, so the answer is a
+# property of the crate rather than of flags someone has to remember. These
+# four take the binary from 1.5 MB to 1.0 MB against a 518 KB C interpreter.
+#
+# 'panic = "abort"' is the one with a cost: no unwinding, so a Rust panic
+# ends the process rather than being caught. That suits a prompt (and the
+# FFI here must not unwind into C anyway), and would want revisiting if this
+# ever became a library something else embeds.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
