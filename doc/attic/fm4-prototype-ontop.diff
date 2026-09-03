@@ -1,0 +1,249 @@
+diff -ruN a/src/dlibs.c b/src/dlibs.c
+--- a/src/dlibs.c
++++ b/src/dlibs.c
+@@ -20,6 +20,7 @@
+ #include "djson.h"
+ #include "dtime.h"
+ #include "dhostlib.h"
++#include "dshim.h"
+ 
+ 
+ static const luaL_Reg diluvium_libs[] = {
+@@ -232,6 +233,96 @@
+ }
+ 
+ 
++/* ======================================================================
++** Past the budget, nothing catches
++** ====================================================================== */
++
++/*
++** The count hook raises an ordinary Lua error, and Lua has no other kind. A
++** program that catches it in a loop -- 'while true do pcall(spin) end' --
++** buys DV_HOOK_STEP instructions per catch forever and never returns to the
++** host. So the three same-thread catch sites a guest can reach are replaced
++** here: 'pcall' and 'xpcall' as lbaselib.c writes them but with a
++** continuation that re-raises once the instance is past its budget, and
++** 'load' wrapped so a reader that tripped the budget cannot hand back
++** nil-plus-message. 'coroutine.resume' and 'coroutine.close' need nothing:
++** the catch is on another thread, and the resuming thread trips its own hook
++** outside it (measured: ~110 firings of overrun, then DV_ERROR).
++**
++** The flag is a registry boolean the hook sets on the exceeded path. Written
++** at creation so that setting it never allocates.
++*/
++extern const char diluvium_nocatch_key;   /* real change: declared in lua.h */
++
++static int guest_nocatch (lua_State *L) {
++  int r;
++  lua_rawgetp(L, LUA_REGISTRYINDEX, &diluvium_nocatch_key);
++  r = lua_toboolean(L, -1);
++  lua_pop(L, 1);
++  return r;
++}
++
++static int guest_finishpcall (lua_State *L, int status, lua_KContext extra) {
++  if (l_unlikely(status != LUA_OK && status != LUA_YIELD)) {  /* error? */
++    if (guest_nocatch(L))
++      return lua_error(L);  /* refuse: the error object is on top */
++    lua_pushboolean(L, 0);  /* first result (false) */
++    lua_pushvalue(L, -2);  /* error message */
++    return 2;  /* return false, msg */
++  }
++  else
++    return lua_gettop(L) - (int)extra;  /* return all results */
++}
++
++static int guest_pcall (lua_State *L) {
++  int status;
++  luaL_checkany(L, 1);
++  lua_pushboolean(L, 1);  /* first result if no errors */
++  lua_insert(L, 1);  /* put it in place */
++  status = lua_pcallk(L, lua_gettop(L) - 2, LUA_MULTRET, 0, 0, guest_finishpcall);
++  return guest_finishpcall(L, status, 0);
++}
++
++static int guest_xpcall (lua_State *L) {
++  int status;
++  int n = lua_gettop(L);
++  luaL_checktype(L, 2, LUA_TFUNCTION);  /* check error function */
++  lua_pushboolean(L, 1);  /* first result */
++  lua_pushvalue(L, 1);  /* function */
++  lua_rotate(L, 3, 2);  /* move them below function's arguments */
++  status = lua_pcallk(L, n - 2, LUA_MULTRET, 2, 2, guest_finishpcall);
++  return guest_finishpcall(L, status, 2);
++}
++
++/* The stock 'load' as an upvalue; its fail result is re-raised once past budget. */
++static int guest_load (lua_State *L) {
++  int n;
++  lua_pushvalue(L, lua_upvalueindex(1));
++  lua_insert(L, 1);
++  lua_call(L, lua_gettop(L) - 1, LUA_MULTRET);
++  n = lua_gettop(L);
++  if (n >= 2 && lua_isnil(L, 1) && guest_nocatch(L)) {
++    lua_settop(L, 2);
++    return lua_error(L);
++  }
++  return n;
++}
++
++static void install_nocatch (lua_State *L) {
++  lua_pushboolean(L, 0);
++  lua_rawsetp(L, LUA_REGISTRYINDEX, &diluvium_nocatch_key);
++  lua_pushcfunction(L, guest_pcall);
++  lua_setglobal(L, "pcall");
++  lua_pushcfunction(L, guest_xpcall);
++  lua_setglobal(L, "xpcall");
++  lua_getglobal(L, "load");
++  lua_pushcclosure(L, guest_load, 1);
++  lua_setglobal(L, "load");
++  /* Named directly, unlike lbaselib.c's, whose address is only discoverable. */
++  diluvium_shim_addcont("dlibs.pcall", guest_finishpcall);
++}
++
++
+ LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags) {
+   int load = ~0;
+   if (!(flags & DILUVIUM_GUEST_UNSAFE_STDLIB))
+@@ -251,5 +342,6 @@
+   }
+   if (!(flags & DILUVIUM_GUEST_UNSAFE_STDLIB))
+     seal_base(L);
++  install_nocatch(L);
+   diluvium_openlibs(L);
+ }
+diff -ruN a/src/dshim.c b/src/dshim.c
+--- a/src/dshim.c
++++ b/src/dshim.c
+@@ -37,6 +37,7 @@
+ 
+ #include "lua.h"
+ 
++#include "ldo.h"
+ #include "lfunc.h"
+ #include "lgc.h"
+ #include "lobject.h"
+@@ -835,3 +836,17 @@
+   dsync_lock_release(&dshim_contlock);
+   return found;
+ }
++
++
++/*
++** Raise the value on top of 'L' as an error without running any message
++** handler. 'lua_error' goes through 'luaG_errormsg', which calls the handler
++** installed by the innermost 'xpcall' -- and a hook raises with 'allowhook'
++** off, so a handler that spins there runs unbudgeted. The budget's raise has
++** no business consulting a handler at all: nothing may catch it, so nothing
++** gets to decorate it.
++*/
++LUA_API void diluvium_shim_throw (lua_State *L) {
++  lua_lock(L);   /* as 'lua_error' does: the catcher unlocks */
++  luaD_throw(L, LUA_ERRRUN);
++}
+diff -ruN a/src/dshim.h b/src/dshim.h
+--- a/src/dshim.h
++++ b/src/dshim.h
+@@ -275,6 +275,8 @@
+ ** Returns 1 on success, 0 if the table is full or the name is already bound to a
+ ** different function. Idempotent.
+ */
++LUA_API void diluvium_shim_throw (lua_State *L);
++
+ LUA_API int diluvium_shim_addcont (const char *name, lua_KFunction k);
+ 
+ /* The name bound to 'k', or NULL. */
+diff -ruN a/src/dv.c b/src/dv.c
+--- a/src/dv.c
++++ b/src/dv.c
+@@ -30,6 +30,8 @@
+ #include "dtask.h"
+ #include "dv.h"
+ 
++extern const char diluvium_nocatch_key;
++
+ 
+ struct dv_instance {
+   lua_State *L;
+@@ -258,8 +260,15 @@
+     ** so an allowlist decision) or a process-level watchdog. See the tests in
+     ** test/dv_check.c that fence this in.
+     */
+-    luaL_error(L, "instruction budget of %I exceeded",
+-               (lua_Integer)inst->insn_limit);
++    lua_pushboolean(L, 1);
++    lua_rawsetp(L, LUA_REGISTRYINDEX, &diluvium_nocatch_key);
++    luaL_where(L, 0);
++    lua_pushfstring(L, "instruction budget of %I exceeded",
++                    (lua_Integer)inst->insn_limit);
++    lua_concat(L, 2);
++    luaL_traceback(L, L, lua_tostring(L, -1), 0);
++    lua_remove(L, -2);
++    diluvium_shim_throw(L);   /* no handler: a handler could spin, unhooked */
+   }
+ }
+ 
+@@ -359,8 +368,13 @@
+ void dv_free (dv_instance *inst) {
+   if (inst == NULL)
+     return;
+-  if (inst->L != NULL)
++  if (inst->L != NULL) {
++    /* 'lua_close' runs every pending finalizer on the main state, which has
++       never had the hook; a '__gc' that spins would hang the host here. */
++    if (inst->insn_limit != 0)
++      lua_sethook(inst->L, dv_insn_hook, LUA_MASKCOUNT, DV_HOOK_STEP);
+     lua_close(inst->L);   /* closes the thread and releases every message */
++  }
+   free(inst->error);
+   free(inst);
+ }
+diff -ruN a/src/lgc.c b/src/lgc.c
+--- a/src/lgc.c
++++ b/src/lgc.c
+@@ -965,6 +965,20 @@
+ }
+ 
+ 
++/* Diluvium: registry["diluvium.nocatch"], read without the API or the lock. */
++/* The kill flag's registry key: its address is the key. */
++const char diluvium_nocatch_key = 0;
++
++static int lgc_nocatch (lua_State *L) {
++  /* No allocation, no lock, no API: the conformance suite's simulated
++     allocation failures found the interning version throwing ERRMEM
++     out of the collector with no handler above it. */
++  TValue k, res;
++  setpvalue(&k, cast_voidp(&diluvium_nocatch_key));
++  return luaH_get(hvalue(&G(L)->l_registry), &k, &res) == LUA_VTRUE;
++}
++
++
+ static void GCTM (lua_State *L) {
+   global_State *g = G(L);
+   const TValue *tm;
+@@ -977,7 +991,10 @@
+     lu_byte oldah = L->allowhook;
+     lu_byte oldgcstp  = g->gcstp;
+     g->gcstp |= GCSTPGC;  /* avoid GC steps */
+-    L->allowhook = 0;  /* stop debug hooks during GC metamethod */
++    /* Diluvium: only debug hooks stop here. A count hook is a budget, and a
++       budget with a gap in it is not a budget. */
++    if (L->hookmask & ~LUA_MASKCOUNT)
++      L->allowhook = 0;  /* stop debug hooks during GC metamethod */
+     setobj2s(L, L->top.p++, tm);  /* push finalizer... */
+     setobj2s(L, L->top.p++, &v);  /* ... and its argument */
+     L->ci->callstatus |= CIST_FIN;  /* will run a finalizer */
+@@ -986,6 +1003,11 @@
+     L->allowhook = oldah;  /* restore hooks */
+     g->gcstp = oldgcstp;  /* restore state */
+     if (l_unlikely(status != LUA_OK)) {  /* error while running __gc? */
++      /* Diluvium: past the budget nothing swallows an error, this included;
++         'lua_close' has no handler above, and there the finalizer is simply
++         bounded by the hook. */
++      if (L->errorJmp != NULL && lgc_nocatch(L))
++        luaD_throw(L, status);
+       luaE_warnerror(L, "__gc");
+       L->top.p--;  /* pops error object */
+     }
