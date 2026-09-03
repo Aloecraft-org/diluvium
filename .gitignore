@@ -35,3 +35,9 @@ __pycache__/
 
 # Built by examples/discofetch/Makefile
 examples/discofetch/swarmd
+
+# The landing page (site/): build output, the smoke test's dependencies and
+# its screenshots. See site/README.md.
+site/_out/
+site/node_modules/
+site/test/.out/

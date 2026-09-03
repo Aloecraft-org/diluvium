@@ -1,29 +1,14 @@
 {
-  "name": "diluvium-www",
-  "version": "2.0.0",
-  "description": "diluvium.aloecraft.org",
+  "name": "diluvium-site",
   "private": true,
-  "scripts": {
-    "build": "webpack --mode production",
-    "start": "webpack serve --mode development",
-    "watch": "webpack --mode development --watch",
-    "test": "node test/smoke.mjs",
-    "stage-mirror": "node test/stage-mirror.mjs"
-  },
+  "description": "The browser smoke test for diluvium.aloecraft.org. The page itself has no build step and no npm dependency: see build.sh.",
   "license": "Apache-2.0",
-  "devDependencies": {
-    "copy-webpack-plugin": "^13.0.1",
-    "css-loader": "^7.1.2",
-    "html-webpack-plugin": "^5.6.6",
-    "playwright": "~1.56.0",
-    "style-loader": "^4.0.0",
-    "webpack": "^5.104.1",
-    "webpack-cli": "^6.0.1",
-    "webpack-dev-server": "^5.2.2"
+  "scripts": {
+    "test": "node test/smoke.mjs",
+    "stage-mirror": "node test/stage-mirror.mjs",
+    "serve": "python3 -m http.server --directory _out 8081"
   },
-  "dependencies": {
-    "@xterm/addon-fit": "^0.10.0",
-    "@xterm/xterm": "^5.5.0",
-    "prismjs": "^1.30.0"
+  "devDependencies": {
+    "playwright": "~1.56.0"
   }
 }

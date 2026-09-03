@@ -177,7 +177,7 @@ The entire runtime is less than 1 MiB. Compiles to WebAssembly, x86_64, ARM64, a
 
 🏃🏽‍♀️‍➡️ **Try Diluvium in Your Browser**
 
-See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#terminal)
+See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#repl)
 
 🐝 **Thousands of Isolated Agents, In One Process**
 
@@ -296,6 +296,10 @@ terminal, and the reference for driving the WASM build: load
 `libdiluvium_wasi.wasm`, call `__wasm_call_ctors`, then `repl_eval` for
 evaluation (it reports whether input is merely unfinished) and
 `repl_complete` for completion.
+
+[diluvium.aloecraft.org](https://diluvium.aloecraft.org) drives that build
+in the page. The site lives in `site/` and is built by `./site/build.sh`;
+`site/README.md` says how, and how it shares the page with DRT.
 
 **What the artifact contains changed at `5.5.1_build3`, and nothing said
 so.** `src/onelua.c` gained `dqueue.c`, `dendpoint.c`, `dmsgpack.c` and

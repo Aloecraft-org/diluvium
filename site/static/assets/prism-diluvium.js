@@ -1,13 +1,18 @@
-// Prism's Lua grammar, extended for what Diluvium adds.
+// Prism's Lua grammar, extended for what Diluvium adds, plus a small shell
+// grammar for the install and DRT samples.
 //
-// The interpolated-string and null-coalescing rules are carried over from the
-// previous site; the rest track the 5.5 language work. Contextual keywords
-// (switch, case, default, defer, with) are matched only where they open a
-// statement, because they are still valid identifiers -- highlighting
-// `local switch = 1` as a keyword would be a lie about the language.
-
-import Prism from 'prismjs';
-import 'prismjs/components/prism-lua';
+// Prism is the global the classic scripts in index.html define
+// (vendor/prism-core.min.js, then vendor/prism-lua.min.js); this module runs
+// after both. The interpolated-string and null-coalescing rules are carried
+// over from the previous site; the rest track the 5.5 language work.
+// Contextual keywords (switch, case, default, defer, with) are matched only
+// where they open a statement, because they are still valid identifiers --
+// highlighting `local switch = 1` as a keyword would be a lie about the
+// language.
+//
+// Surface:
+//   installDiluviumGrammar()   extends Prism.languages.lua in place
+//   installShellGrammar()      defines Prism.languages.sh
 
 export function installDiluviumGrammar() {
   Prism.languages.insertBefore('lua', 'operator', {
@@ -65,4 +70,17 @@ export function installDiluviumGrammar() {
   });
 }
 
-export { Prism };
+// Just enough shell for the samples on this page: the command at the start
+// of a line, its flags, strings, comments and variables. Not Prism's bash
+// grammar, which is nine kilobytes for the sake of heredocs and arithmetic
+// the samples never use.
+export function installShellGrammar() {
+  Prism.languages.sh = {
+    'comment': /#.*/,
+    'string': { pattern: /"(?:\\.|[^"\\])*"|'[^']*'/, greedy: true },
+    'command': { pattern: /^[ \t]*[a-z][\w.-]*/m },
+    'flag': { pattern: /(\s)--?[a-z][\w-]*/, lookbehind: true },
+    'variable': /\$\w+|\$\{[^}]+\}/,
+    'operator': /\|\||&&|\||>|</,
+  };
+}

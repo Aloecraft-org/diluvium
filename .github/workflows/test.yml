@@ -346,6 +346,46 @@ jobs:
         working-directory: bindings/js
         run: node test/instance.integration.mjs ../../dist/diluvium_wasi.wasm
 
+  site:
+    name: Landing page
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # site/ is diluvium.aloecraft.org, built by the Aloecraft site contract:
+      # ./site/build.sh --out DIR, offline, hermetic, idempotent, and it never
+      # deploys. check.py runs inside the build, but first and on its own:
+      # when the template loses a load-bearing detail, that is the message
+      # worth reading, not a downstream render error.
+      - name: Check the template's invariants
+        run: python3 site/check.py
+
+      # This job has no secrets and installs nothing, so a build that grew a
+      # network fetch or a credential fails here rather than on the laptop
+      # that happens to have one. It is the whole reason the webpack build
+      # went away.
+      - name: Build
+        run: ./site/build.sh --out "$RUNNER_TEMP/out"
+
+      - name: The build produced the page, the installer, and stamped its assets
+        run: |
+          set -eu
+          test -s "$RUNNER_TEMP/out/index.html"
+          test -s "$RUNNER_TEMP/out/start"
+          grep -q 'src="assets/app.js?v=' "$RUNNER_TEMP/out/index.html"
+          grep -q "from './repl/terminal.js?v=" "$RUNNER_TEMP/out/assets/app.js"
+
+      # Idempotence is what lets lk_web's stage.py and deploy.py rsync
+      # --checksum without shipping the whole tree on every run.
+      - name: Build again and require identical bytes
+        run: |
+          ./site/build.sh --out "$RUNNER_TEMP/out2"
+          diff -r "$RUNNER_TEMP/out" "$RUNNER_TEMP/out2"
+
   patch-guard:
     name: Core patch guard
     needs: resolve

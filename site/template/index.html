@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diluvium — a small language that runs anywhere</title>
+<meta name="description" content="Diluvium is a small, sealed, portable language. DRT is the runtime around it, and dollup installs the programs. Modern syntax, one portable bytecode, under 1 MiB — and running in your browser right now.">
+<meta property="og:title" content="Diluvium — a small language that runs anywhere">
+<meta property="og:description" content="A small, sealed, portable language and the runtime around it. Try it in the browser, no install.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://diluvium.aloecraft.org/">
+<link rel="icon" href="favicon.ico">
+<!-- Applies a stored theme before first paint. In <head> deliberately: run
+     this later and a light-mode visitor sees a flash of dark on every load.
+     prefers-color-scheme is intentionally not consulted: the ask is a dark
+     default, not a system-following one, matching dollup and the portal. -->
+<script>
+try {
+    var t = localStorage.getItem("aloecraft-theme");
+    if (t === "light" || t === "dark") document.documentElement.dataset.theme = t;
+} catch (e) { /* private mode: keep the dark default */ }
+</script>
+<!-- Every byte from this origin. render.py stamps each of these with the
+     file's content hash at build time (assets/app.js?v=...), which is what
+     lets nginx cache assets/ hard and index.html not at all. -->
+<link rel="stylesheet" href="assets/vendor/xterm.css">
+<link rel="stylesheet" href="assets/styles.css">
+<!-- Classic scripts, in this order: xterm.js and addon-fit.js define the
+     Terminal and FitAddon globals app.js reaches for; Prism's core must load
+     before its Lua grammar, and data-manual stops it highlighting on
+     DOMContentLoaded before app.js has extended that grammar. app.js is a
+     module, so it runs after all four whatever its position. -->
+<script src="assets/vendor/xterm.js"></script>
+<script src="assets/vendor/addon-fit.js"></script>
+<script src="assets/vendor/prism-core.min.js" data-manual></script>
+<script src="assets/vendor/prism-lua.min.js"></script>
+<script type="module" src="assets/app.js"></script>
+</head>
+<body>
+
+<a class="skip" href="#repl">Skip to the interpreter</a>
+
+<header class="site">
+  <a class="brand" href="/">
+    <span class="mark" aria-hidden="true">~</span>
+    <span>Diluvium</span>
+  </a>
+  <span class="badges">
+    <span class="version" id="version-badge" title="Latest Diluvium release on the mirror"></span>
+    <span class="version" id="drt-version-badge" title="Latest DRT release on the mirror"></span>
+  </span>
+  <nav>
+    <a href="#repl">Try</a>
+    <a href="#install">Install</a>
+    <a href="#drt">DRT</a>
+    <a href="#dollup">dollup</a>
+    <a href="/lab/">Lab</a>
+    <a href="/release/">Releases</a>
+    <a href="https://github.com/Aloecraft-org/diluvium/blob/main/doc/Guide.md" rel="noopener">Guide</a>
+    <a href="https://github.com/Aloecraft-org/diluvium" rel="noopener">GitHub</a>
+  </nav>
+  <button id="theme" type="button" aria-label="Switch to the light theme">Light</button>
+</header>
+
+<main>
+
+  <section class="hero">
+    <div class="hero-copy">
+      <h1>Small language. Sealed runtime. Runs anywhere.</h1>
+      <p class="lede">
+        Diluvium is a general-purpose language and the runtime underneath it.
+        Modern syntax — string interpolation, <code>switch</code>,
+        <code>defer</code>, safe navigation — compiled to
+        <strong>one portable bytecode</strong> that behaves the same in a browser
+        tab, on a server, or on hardware with a few hundred kilobytes to spare.
+        The whole runtime is under a megabyte, and a program can reach nothing
+        you did not hand it.
+      </p>
+      <p class="lede-note">
+        The syntax is a compatible superset of Lua 5.5, so existing Lua code runs
+        unmodified. If you have never written Lua, there is nothing to catch up on.
+      </p>
+      <div class="cta">
+        <div class="oneliner">
+          <code id="install-cmd">curl -fsSL https://diluvium.aloecraft.org/start | sh</code>
+          <button id="copy-install" class="copy" type="button" aria-label="Copy install command">Copy</button>
+        </div>
+        <p class="cta-sub">
+          or <a href="#repl">try it below</a> — it runs in the page, nothing to install.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- The three projects, so a reader arriving for any one of them can see
+       the other two. DRT shares this page; dollup has its own. -->
+  <section class="family" aria-label="The Diluvium projects">
+    <a class="tile current" href="#language">
+      <span class="tile-name">Diluvium</span>
+      <span class="tile-what">The language and its core: compiler, portable bytecode, the
+        instance ABI. Under a megabyte, and running in this page.</span>
+      <span class="tile-where">this page</span>
+    </a>
+    <a class="tile" href="#drt">
+      <span class="tile-name">DRT</span>
+      <span class="tile-what">The Diluvium RunTime: one binary that embeds the language and
+        runs a deployment — swarm, host, connectors, relay, REPL.</span>
+      <span class="tile-where">below · artifacts at <span class="mono">/drt/</span></span>
+    </a>
+    <a class="tile" href="https://dollup.aloecraft.org/">
+      <span class="tile-name">dollup</span>
+      <span class="tile-what">Installs Diluvium programs and the capabilities they run on,
+        from indexes the publisher signs. Nothing executes during an install.</span>
+      <span class="tile-where">dollup.aloecraft.org</span>
+    </a>
+  </section>
+
+  <!-- The interpreter. This is the real runtime, not a simulation: the page
+       fetches libdiluvium_wasi.wasm from the release mirror and drives it
+       through repl_eval, the same entry point the native REPL uses. -->
+  <section id="repl" class="repl-section">
+    <div class="panel">
+      <div class="panel-bar">
+        <span class="dots" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="panel-title">diluvium</span>
+        <span class="panel-status" id="repl-status">loading…</span>
+        <button id="repl-reset" class="ghost" type="button">Restart</button>
+      </div>
+      <div id="term" class="term"></div>
+      <div class="panel-foot">
+        <span class="hint">Tab completes · ↑↓ history · ^C cancels · ^L clears</span>
+        <span class="examples" id="examples"></span>
+      </div>
+    </div>
+  </section>
+
+  <section class="features" id="language">
+    <h2>The language</h2>
+    <p class="section-lede">
+      Small, plain, and readable on sight. Everything below compiles straight to
+      bytecode and none of it takes a reserved word, so existing code keeps
+      working and adoption is as gradual as you want it.
+    </p>
+
+    <div class="grid">
+
+      <article class="feature">
+        <h3>String interpolation</h3>
+        <pre><code class="language-lua">local name = "world"
+local pi = 3.14159
+
+print($"Hello, {name}!")
+
+-- pi is 3.14
+print($"pi is {pi::%.2f}")
+-- [   42]
+print($"[{42::%5d}]")</code></pre>
+        <p>Everything after <code>::</code> goes to <code>string.format</code>.
+        It is <code>::</code> and not <code>:</code> because <code>:</code>
+        already means a method call.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Null coalescing &amp; safe navigation</h3>
+        <pre><code class="language-lua">local cfg = user_cfg ?? defaults
+
+local city = user?.address?.city
+local port = cfg?.server?.port ?? 8080
+
+-- not called when nil
+handler?.on_event(payload)
+
+-- assign only if nil
+port ??= 8080</code></pre>
+        <p>Once a value is nil the rest of the chain is skipped entirely.
+        It tests nil, not falsiness, so <code>false?.x</code> still raises.</p>
+      </article>
+
+      <article class="feature">
+        <h3>switch</h3>
+        <pre><code class="language-lua">switch code do
+    case 200, 201, 204 then
+        print("ok")
+    case 301, 302 then
+        print("redirected")
+    default
+        print($"odd: {code}")
+end</code></pre>
+        <p>The subject is evaluated once, a case can list several values, and
+        there is no fallthrough. A contextual keyword, so
+        <code>local switch = 1</code> still works.</p>
+      </article>
+
+      <article class="feature">
+        <h3>defer &amp; with</h3>
+        <pre><code class="language-lua">local f = io.open("data.txt")
+defer f:close()   -- however we exit
+
+with g = assert(io.open("o.txt")) do
+    g:write("done")
+end               -- closed, always</code></pre>
+        <p>Both desugar to Lua's to-be-closed variables, so unwinding is
+        inherited rather than invented: they run on <code>break</code>,
+        <code>goto</code>, <code>return</code>, an error, and
+        <code>coroutine.close</code>.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Compound assignment</h3>
+        <pre><code class="language-lua">total += 10    -- -= *= /= //= %= ^=
+name  ..= "uvium"
+flags |= 0x04  -- &amp;= &lt;&lt;= &gt;&gt;=
+port  ??= 8080</code></pre>
+        <p>The target's prefix is evaluated once, so
+        <code>t[next_key()] += 1</code> calls <code>next_key</code> a single
+        time. There is no <code>~=</code> form — that already means
+        "not equal".</p>
+      </article>
+
+      <article class="feature">
+        <h3>Secure functions</h3>
+        <pre><code class="language-lua">~function check()
+    local key = "not-in-the-clear"
+    return $"key is {key}"
+end</code></pre>
+        <p>Names and string constants are scrambled at rest, so
+        <code>strings</code> on the bytecode does not turn them up.
+        <strong>Cryptographically weak</strong> — obfuscation, not
+        protection.</p>
+      </article>
+
+    </div>
+  </section>
+
+  <section class="features" id="core">
+    <h2>The core</h2>
+    <p class="section-lede">
+      The syntax is the part you see. Underneath it is a machine built to be
+      small, portable, and sealed — the one running in the panel above, and the
+      one DRT embeds.
+    </p>
+
+    <div class="grid">
+
+      <article class="feature">
+        <h3>One bytecode, every target</h3>
+        <p>Source compiles to a single portable bytecode with one set of
+        semantics behind it. The same file runs under WebAssembly in this page,
+        on x86_64 and ARM64 natively, and on hardware smaller than either.
+        Natively it is one static binary under a megabyte, with nothing to
+        install alongside it.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Sealed by default</h3>
+        <p>A program starts with no ambient authority. It cannot open a socket,
+        read a file, or reach the process it lives in, because there is nothing
+        in the runtime to call. Everything it can touch is handed in from
+        outside, nothing can pass on more than it was given, and the trusted
+        base enforcing that is small enough to read end to end.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Freeze and resume</h3>
+        <p>A running program can be snapshotted mid-execution into a flat string
+        of bytes and brought back later at the exact instruction it left — in
+        another process, or on another machine. A program does not have to be
+        running to exist.</p>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- DRT. It shares this page: the language is what you write, DRT is what
+       runs it in production, and its artifacts live at /drt/ on this host. -->
+  <section class="features" id="drt">
+    <h2>DRT — the Diluvium RunTime</h2>
+    <p class="section-lede">
+      Diluvium is purely the language. <strong>DRT</strong> is everything around
+      a running program: the swarm, a transparent host with root config,
+      hostcall connectors, orchestration, transport, observability, and a REPL.
+      The two are concentric, not parallel — DRT embeds the language core, so
+      there is never a second runtime with different behaviour for the same
+      program, and installing DRT gets you everything.
+    </p>
+
+    <div class="grid">
+
+      <article class="feature">
+        <h3>One binary, three verbs</h3>
+        <pre><code class="language-sh">drt run prog.dlua                 # one program, to completion
+drt repl                          # a REPL, which is an instance
+drt --config app.host.lua start   # a deployment: swarm, listeners, relay</code></pre>
+        <p>A static binary with no runtime dependencies, and a
+        <code>tunnel</code> verb that carries ssh to anything from anywhere
+        through the relay. <code>drt start</code> reads a
+        <code>diluvium-host</code> config unchanged, so a deployment moves to
+        DRT by swapping the binary and editing no files.</p>
+      </article>
+
+      <article class="feature">
+        <h3>A config grants; a program names</h3>
+        <pre><code class="language-lua">print(host.time())         -- the clock costs a grant
+host.fs.read("note.txt")   -- inside the granted directory
+host.call("sql/exec", {sql = "..."})</code></pre>
+        <p>A deployment is a config plus a program. The config names the
+        ceiling and wires each connector to a <em>place</em>; the program names
+        resources inside those places, through the <code>host</code> library.
+        An ill-scoped grant fails at startup, by name — never as a mystifying
+        <code>denied</code> at first call.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Two profiles, and the facts travel with the bytes</h3>
+        <p>Every release ships <code>full</code> — the connectors, listeners,
+        the relay and tunnel — and <code>slim</code>, the distribution-size
+        profile. Which connectors each carries, which diluvium revision is
+        inside and which dv ABI it speaks are recorded in
+        <code>BUILDINFO.txt</code> beside the binaries, and
+        <code>drt buildinfo</code> reads the same facts back off the binary
+        itself. DRT versions independently of Diluvium; the coupling is
+        recorded, not encoded.</p>
+        <p class="note" id="drt-buildinfo">The current list is in
+        <a href="/drt/">BUILDINFO.txt on the mirror</a>.</p>
+      </article>
+
+    </div>
+    <p class="section-foot">
+      <a href="https://github.com/Aloecraft-org/diluvium-drt" rel="noopener">Source</a> ·
+      <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/SPEC.md" rel="noopener">Spec</a> ·
+      <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/GUARANTEES.md" rel="noopener">Guarantees</a> ·
+      <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/doc/Relay.md" rel="noopener">The relay</a> ·
+      <a href="/drt/">Releases</a>
+    </p>
+  </section>
+
+  <!-- dollup has its own page; this is the pointer, and enough of the idea
+       that a reader knows whether to follow it. -->
+  <section class="features" id="dollup">
+    <h2>dollup — programs, installed</h2>
+    <p class="section-lede">
+      <a href="https://dollup.aloecraft.org/">dollup</a> installs Diluvium
+      programs and the capabilities they run on, and moves hibernated instances
+      between machines. It fetches programs into an <strong>app</strong> — one
+      directory holding the code, the sources it came from, and a lockfile
+      pinning every version and hash — so the same app rebuilds byte for byte
+      anywhere. A DRT app is a config plus a program; dollup brings the program
+      half and never writes the config.
+    </p>
+
+    <div class="grid">
+
+      <article class="feature">
+        <h3>Nothing executes during an install</h3>
+        <p>A manifest is data, so there is no setup script to audit. Packages
+        are named by the hash of their contents and listed in an index the
+        publisher signs, which is what lets a mirror, a git remote and an
+        offline copy be the same artifact rather than three you have to trust
+        separately.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Installing never grants</h3>
+        <p>What a program may do lives in your config, not in the package. And
+        DRT never fetches, so the trust boundary is the directory dollup
+        writes rather than dollup itself.</p>
+      </article>
+
+      <article class="feature">
+        <h3>An app is a directory</h3>
+        <pre><code class="language-sh">dollup init                # start an app here
+$EDITOR dollup.json        # add a source; pin its key
+dollup add telemetry@^1    # fetch, hash-check, lock, populate code/
+dollup get drt             # the runtime, hash-checked, dropped beside it</code></pre>
+        <p>Pre-release: the format is settling and the standard package repo
+        is not published yet. When it is, its signing key appears on
+        <a href="https://dollup.aloecraft.org/">dollup's page</a>, and you pin
+        it in a file you own.</p>
+      </article>
+
+    </div>
+    <p class="section-foot">
+      <a href="https://dollup.aloecraft.org/">dollup.aloecraft.org</a> ·
+      <a href="https://github.com/Aloecraft-org/dollup" rel="noopener">Source</a> ·
+      <a href="https://github.com/Aloecraft-org/dollup/blob/main/SPEC.md" rel="noopener">Spec</a> ·
+      <a href="https://github.com/Aloecraft-org/dollup/blob/main/THREAT-NOTES.md" rel="noopener">Threat notes</a>
+    </p>
+  </section>
+
+  <section class="install" id="install">
+    <h2>Install</h2>
+    <p class="section-lede">
+      Three things, and you may want only the first. Each is a single static
+      binary with no runtime dependencies, verified against the checksums its
+      release published.
+    </p>
+
+    <div class="install-grid">
+      <div class="install-main">
+        <h3>The language <span class="what">— <code>diluvium</code>, the interpreter</span></h3>
+        <div class="oneliner wide">
+          <code id="install-cmd-2">curl -fsSL https://diluvium.aloecraft.org/start | sh</code>
+          <button id="copy-install-2" class="copy" type="button" aria-label="Copy install command">Copy</button>
+        </div>
+        <p class="note">
+          Detects your platform, downloads from the
+          <a href="/release/">mirror</a>, and verifies the binary against the
+          <code>SHA256SUMS.txt</code> the release workflow published. Installs to
+          <code>/usr/local/bin</code>, or <code>~/.local/bin</code> when that is
+          not writable.
+        </p>
+        <details>
+          <summary>Read it before you pipe it to a shell</summary>
+          <p>
+            Sensible. It is a single POSIX <code>sh</code> script with no
+            dependencies beyond <code>curl</code> or <code>wget</code>:
+          </p>
+          <div class="oneliner wide">
+            <code>curl -fsSL https://diluvium.aloecraft.org/start | less</code>
+          </div>
+          <p>
+            Options: <code>--prefix DIR</code>, <code>--version TAG</code>,
+            <code>--compiler</code> to also install the bytecode compiler.
+          </p>
+        </details>
+      </div>
+
+      <div class="install-side">
+        <h3>Direct download</h3>
+        <p class="note">Single static binary, no runtime dependencies.</p>
+        <ul class="downloads" id="downloads"></ul>
+        <p class="note" id="release-note"></p>
+      </div>
+    </div>
+
+    <div class="install-grid">
+      <div class="install-main">
+        <h3>The runtime <span class="what">— <code>drt</code>, which embeds the language</span></h3>
+        <div class="oneliner wide">
+          <code id="install-drt">curl -fsSL https://diluvium.aloecraft.org/drt/latest/install.sh | sh</code>
+          <button id="copy-install-drt" class="copy" type="button" aria-label="Copy DRT install command">Copy</button>
+        </div>
+        <p class="note">
+          Same shape: platform detection, a download from the
+          <a href="/drt/">DRT mirror</a>, a check against
+          <code>SHA256SUMS.txt</code>, and <code>drt buildinfo</code> printed at
+          the end so you can see which diluvium revision is inside.
+          <code>DRT_SLIM=1</code> takes the size profile;
+          <code>DRT_VERSION=vX.Y.Z</code> pins a release. Linux x86-64 and macOS
+          today; Linux ARM64 and Windows are not built yet.
+        </p>
+      </div>
+
+      <div class="install-side">
+        <h3>Direct download</h3>
+        <p class="note">The <code>full</code> profile; <code>slim</code> is the same name with <code>drt_slim_</code>.</p>
+        <ul class="downloads" id="drt-downloads"></ul>
+        <p class="note" id="drt-release-note"></p>
+      </div>
+    </div>
+
+    <div class="install-grid single">
+      <div class="install-main">
+        <h3>The programs <span class="what">— <code>dollup</code>, which installs them</span></h3>
+        <div class="oneliner wide">
+          <code id="install-dollup">curl -fsSL https://github.com/Aloecraft-org/dollup/releases/latest/download/install.sh | sh</code>
+          <button id="copy-install-dollup" class="copy" type="button" aria-label="Copy dollup install command">Copy</button>
+        </div>
+        <p class="note">
+          Every release carries <code>SHA256SUMS.txt</code> and a
+          <code>BUILDINFO.txt</code> naming the commit it was built from.
+          <code>DOLLUP_VERSION=vX.Y.Z</code> pins a release,
+          <code>DOLLUP_PREFIX=</code> chooses the directory. Or skip the
+          install entirely: <code>dollup get drt</code> is how an app fetches
+          the runtime, and needs no config at all.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section class="portal" id="more">
+    <h2>Everything else</h2>
+    <div class="cards">
+      <a class="card" href="/lab/">
+        <h3>Lab <span aria-hidden="true">→</span></h3>
+        <p>Notebooks in the browser. Cells and a console over one live kernel,
+        stored as <code>.ipynb</code>, running whichever release you pick.</p>
+      </a>
+      <a class="card" href="/release/">
+        <h3>Releases <span aria-hidden="true">→</span></h3>
+        <p>Every Diluvium build for every platform, with checksums and notes,
+        and stable paths under <code>/release/latest/</code>. DRT's mirror is
+        beside it at <code>/drt/</code>.</p>
+      </a>
+      <a class="card" href="https://github.com/Aloecraft-org/diluvium/blob/main/doc/Guide.md" rel="noopener">
+        <h3>Programmer's guide <span aria-hidden="true">→</span></h3>
+        <p>What the language adds, the <code>msgpack</code>, <code>queue</code>,
+        <code>endpoint</code>, <code>bytes</code>, <code>json</code> and
+        <code>time</code> libraries, embedding an instance from C, and running
+        a swarm. The Lua 5.5 manual covers the rest.</p>
+      </a>
+      <a class="card" href="https://software.aloecraft.org/">
+        <h3>Aloecraft software <span aria-hidden="true">→</span></h3>
+        <p>Every project we publish, where its landing page lives, and how to
+        get a build.</p>
+      </a>
+    </div>
+  </section>
+
+</main>
+
+<footer class="site">
+  <p>
+    <a href="https://github.com/Aloecraft-org/diluvium" rel="noopener">diluvium</a>
+    · <a href="https://github.com/Aloecraft-org/diluvium-drt" rel="noopener">diluvium-drt</a>
+    · <a href="https://github.com/Aloecraft-org/dollup" rel="noopener">dollup</a>
+    · Apache-2.0
+    · <span id="footer-version"></span>
+  </p>
+  <p class="muted">
+    Diluvium's syntax builds on <a href="https://www.lua.org/" rel="noopener">Lua</a>,
+    which is a trademark-free MIT-licensed language by PUC-Rio.
+  </p>
+</footer>
+
+<script>
+// Theme toggle. Writes the choice so the head script can apply it next load.
+// The button names the theme it switches TO, which is what a viewer reads.
+(function () {
+    var btn = document.getElementById("theme");
+    if (!btn) return;
+    var root = document.documentElement;
+    function sync() {
+        var light = root.dataset.theme === "light";
+        btn.textContent = light ? "Dark" : "Light";
+        btn.setAttribute("aria-label", light ? "Switch to the dark theme" : "Switch to the light theme");
+    }
+    btn.addEventListener("click", function () {
+        var next = root.dataset.theme === "light" ? "dark" : "light";
+        root.dataset.theme = next;
+        try { localStorage.setItem("aloecraft-theme", next); } catch (e) {}
+        sync();
+    });
+    sync();
+})();
+</script>
+
+</body>
+</html>

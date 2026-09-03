@@ -1,0 +1,13 @@
+{
+  "name":    "diluvium",
+  "title":   "Diluvium",
+  "tagline": "Lua for modern development: a 100% backward-compatible extension of Lua 5.5 with string interpolation, null coalescing, switch, defer and secure functions -- blazing fast, under 1 MiB, and running just about everywhere. DRT, the runtime, shares this page.",
+  "vhost":   "diluvium.aloecraft.org",
+  "path":    "/",
+  "source":  "https://github.com/Aloecraft-org/diluvium",
+  "channels": [
+    {"title": "Release mirror", "url": "https://diluvium.aloecraft.org/release/", "status": "live"},
+    {"title": "Installer",      "url": "https://diluvium.aloecraft.org/start",    "status": "live"},
+    {"title": "DRT mirror",     "url": "https://diluvium.aloecraft.org/drt/",     "status": "live"}
+  ]
+}

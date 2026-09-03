@@ -1,0 +1,67 @@
+name: Site smoke test
+
+# Drives diluvium.aloecraft.org's page in a real browser against the real
+# kernel: builds site/, stages the deployed release mirrors into the build,
+# serves it, and runs site/test/smoke.mjs.
+#
+# Separate from test.yml on purpose. That workflow's `site` job is hermetic
+# and always runs; this one needs the network -- the mirrors on
+# diluvium.aloecraft.org, Playwright's browser download -- so it runs only
+# when the site changes, or on demand. A red run here is about the page or
+# the mirror, never about the runtime.
+
+on:
+  push:
+    paths:
+      - 'site/**'
+      - '.github/workflows/site-smoke.yml'
+  workflow_dispatch:
+    inputs:
+      site:
+        description: 'Test a deployed site instead of the build (e.g. https://diluvium.aloecraft.org)'
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    name: Drive the REPL in Chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build the site
+        run: ./site/build.sh
+
+      - name: Install the test's one dependency
+        working-directory: site
+        run: |
+          npm ci --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Stage the deployed mirrors into the build
+        if: inputs.site == ''
+        working-directory: site
+        run: npm run stage-mirror
+
+      - name: Smoke test
+        working-directory: site
+        env:
+          SITE: ${{ inputs.site }}
+        run: npm test
+
+      - name: Keep the screenshot and the terminal transcript
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: site-smoke
+          path: site/test/.out/
+          if-no-files-found: ignore

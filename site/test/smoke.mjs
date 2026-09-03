@@ -1,13 +1,16 @@
-// Smoke test: build the site, serve it, and drive the real REPL in a real
+// Smoke test: serve the built site, and drive the real REPL in a real
 // browser.
 //
-//   npm test                         against a locally staged mirror
+//   cd site && npm test                      against a locally staged mirror
 //   SITE=https://diluvium.aloecraft.org npm test    against the deployed site
 //
+// Needs `../site/build.sh` to have run (it serves _out/) and, for the local
+// case, `npm run stage-mirror` to have copied the kernel into _out/release/.
 // It asserts on behaviour that has actually broken: doubled output (the
 // runtime's onOutput callback firing twice), continuation prompts not opening
-// on unfinished input, and an error killing the session instead of being
-// caught. A screenshot is written to test/.out/site.png either way.
+// on unfinished input, an error killing the session instead of being caught
+// -- and, since the page grew a second mirror, that both indexes are read.
+// A screenshot is written to test/.out/site.png either way.
 
 import { chromium } from 'playwright';
 import { createServer } from 'node:http';
@@ -15,9 +18,9 @@ import { readFile, mkdir, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { extname, join, normalize } from 'node:path';
 
-const ROOT = new URL('..', import.meta.url).pathname;
-const DIST = join(ROOT, 'dist');
-const OUT = join(ROOT, 'test', '.out');
+const SITE_DIR = new URL('..', import.meta.url).pathname;
+const OUT_DIR = join(SITE_DIR, '_out');
+const REPORT = join(SITE_DIR, 'test', '.out');
 const PORT = 8099;
 
 const TYPES = {
@@ -26,12 +29,14 @@ const TYPES = {
   '.ico': 'image/x-icon', '.txt': 'text/plain', '.md': 'text/markdown',
 };
 
+// A static server that, like nginx, ignores the ?v= query render.py stamps
+// onto every asset URL.
 function serve() {
   const server = createServer(async (req, res) => {
     let p = normalize(decodeURIComponent(req.url.split('?')[0]));
     if (p.endsWith('/')) p += 'index.html';
-    const file = join(DIST, p);
-    if (!file.startsWith(DIST) || !existsSync(file)) {
+    const file = join(OUT_DIR, p);
+    if (!file.startsWith(OUT_DIR) || !existsSync(file)) {
       res.writeHead(404).end('not found');
       return;
     }
@@ -49,7 +54,7 @@ const check = (name, cond, detail = '') => {
 
 const base = process.env.SITE || `http://127.0.0.1:${PORT}`;
 const server = process.env.SITE ? null : await serve();
-await mkdir(OUT, { recursive: true });
+await mkdir(REPORT, { recursive: true });
 
 const browser = await chromium.launch();
 const page = await browser.newPage({ viewport: { width: 1280, height: 1400 } });
@@ -62,11 +67,27 @@ await page.waitForFunction(
   () => /ready|unavailable/.test(document.getElementById('repl-status')?.textContent || ''),
   { timeout: 60000 },
 );
+// The mirror reads race the kernel load; give them a moment to land.
+await page.waitForFunction(
+  () => document.getElementById('footer-version')?.textContent.trim() !== '',
+  { timeout: 15000 },
+).catch(() => {});
 
 const status = await page.textContent('#repl-status');
 check('kernel loads', status.startsWith('ready'), `status was "${status}"`);
-check('release index read', (await page.textContent('#version-badge')).trim() !== '');
-check('downloads listed', (await page.$$('#downloads li')).length >= 6);
+check('diluvium release index read', (await page.textContent('#version-badge')).trim() !== '');
+check('diluvium downloads listed', (await page.$$('#downloads li')).length >= 6);
+check('drt release index read', (await page.textContent('#drt-version-badge')).trim() !== '');
+check('drt downloads listed', (await page.$$('#drt-downloads li')).length >= 3);
+check('drt buildinfo read', /full/.test(await page.textContent('#drt-buildinfo')));
+check('code samples highlighted', (await page.$$('pre code .token')).length > 0);
+
+// The theme toggle: dark by default, light after a click, remembered.
+check('dark by default', (await page.getAttribute('html', 'data-theme')) === 'dark');
+await page.click('#theme');
+check('toggle switches to light', (await page.getAttribute('html', 'data-theme')) === 'light');
+check('choice is stored', (await page.evaluate(() => localStorage.getItem('aloecraft-theme'))) === 'light');
+await page.click('#theme');
 
 const type = async (s) => { await page.keyboard.type(s); await page.keyboard.press('Enter'); await page.waitForTimeout(400); };
 const screen = () => page.evaluate(() => document.querySelector('.xterm-rows')?.innerText || '');
@@ -100,8 +121,8 @@ if (status.startsWith('ready')) {
 
 check('no console errors', consoleErrors.length === 0, consoleErrors.join(' | '));
 
-await page.screenshot({ path: join(OUT, 'site.png'), fullPage: true });
-await writeFile(join(OUT, 'terminal.txt'), await screen());
+await page.screenshot({ path: join(REPORT, 'site.png'), fullPage: true });
+await writeFile(join(REPORT, 'terminal.txt'), await screen());
 await browser.close();
 server?.close();
 
