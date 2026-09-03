@@ -376,6 +376,22 @@ dsnap_check: _build_step0
 	  $(CURDIR)/test/dsnap_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dsnap_check
 
+# The bytecode header is the platform contract: Diluvium pins lua_Integer and
+# lua_Number so a compiled chunk loads on every target, and the header records
+# both sizes so a build that disagrees is refused rather than misled. This
+# checks the header a dump actually produces, byte for byte.
+#
+# The cross-load -- one build dumping and a differently configured build
+# refusing -- is test/dump_cross_check.sh, which needs two binaries.
+dump_check: _build_step0
+	gcc $(TEST_CFLAGS) -DMAKE_LIB -I$(CURDIR)/.data \
+	  -o $(CURDIR)/dist/dump_check \
+	  $(CURDIR)/test/dump_check.c $(CURDIR)/.data/onelua.c -lm
+	@$(CURDIR)/dist/dump_check
+
+dump_cross_check: _build_step0
+	@$(CURDIR)/test/dump_cross_check.sh
+
 # The snapshot fuzzer's target: a snapshot in, a verdict out, as a subprocess --
 # because the thing being checked is that a malformed snapshot does not crash,
 # and a crash cannot be asserted from inside the process it happens in.
@@ -775,6 +791,7 @@ test_one: test_build
 
 .PHONY: test_build test_cases test_ci test_one failing_test_cases \
         dv_check dtask_check dhash_check dsnap_check dshim_check dvs_check \
+        dump_check dump_cross_check \
         host_check build_plugin_rest build_plugin_rest_notls \
         build_plugin_rest_musl \
         snap_fuzz sanitize_checks mp_cursor_fuzz test_libs build_swarm_lib \

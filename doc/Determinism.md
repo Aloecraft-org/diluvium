@@ -19,6 +19,26 @@ The prototype is kept at `doc/attic/swarm-prototype.lua` and still runs:
 It is self-checking: it runs a small map-reduce swarm twice and asserts the delivery
 traces are identical, failing loudly if not. 242 lines, no C.
 
+## Three guarantees, not one
+
+Easy to conflate, so: this file is about the third of these, and only it is
+still open.
+
+1. **A portable artifact.** A chunk compiled anywhere loads everywhere.
+   Settled -- the numeric types are pinned and the dump header refuses a
+   build that disagrees. See `doc/ROADMAP.md`, "Numeric types and portable
+   bytecode", whose closing section lists what is still ambient at run time
+   (libm's transcendentals above all, which differ between platforms for
+   the same bytecode with no host call involved).
+2. **A deterministic process.** One program, given the same inputs,
+   producing the same result. That is the analyzer's verdict, and a host
+   call is what makes it `indeterminate`.
+3. **A replayable swarm.** Many processes, given the same message log,
+   interleaving the same way. That needs a scheduler, and is what follows.
+
+(1) is a precondition for the other two rather than a component of them: a
+chunk that will not load elsewhere cannot be replayed elsewhere either.
+
 ## What Messaging.md leaves out, on purpose
 
 §9.1.2 gives the swarm layer six jobs and a scheduler is not among them: "there is no

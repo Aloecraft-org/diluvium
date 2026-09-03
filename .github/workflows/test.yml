@@ -186,6 +186,21 @@ jobs:
       - name: Check that the runtime fingerprint separates builds
         run: ./test/fingerprint_check.sh
 
+      # A compiled chunk has to load on every target, which is a promise about
+      # the numeric types: the dump header records sizeof(lua_Integer) and
+      # sizeof(lua_Number), so a build that disagrees is refused. This is the
+      # header a dump actually produces, byte for byte.
+      - name: Check the bytecode header
+        run: make dump_check
+
+      # And the two halves the header check cannot cover from one binary: that
+      # no build flag moves the numeric types any more (the bug that made the
+      # browser build 32-bit is invisible on an LP64 host, so this reads the
+      # macro rather than a sizeof), and that a build which really does
+      # disagree gets a refusal rather than a misread.
+      - name: Check that bytecode crosses builds
+        run: ./test/dump_cross_check.sh
+
       # 10.10's acceptance criterion: structure-aware mutation of a real
       # snapshot, asserting a refusal and never a crash. It found the two
       # validation gaps it now guards, and it found them because it loads in a

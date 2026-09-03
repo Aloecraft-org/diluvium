@@ -155,6 +155,46 @@
 #endif
 
 
+/*
+@@ LUA_INT_TYPE / LUA_FLOAT_TYPE (Diluvium) are pinned rather than
+** inferred from the platform, so every Diluvium build has the same
+** numeric types and a compiled chunk loads wherever it is carried.
+** Same motivation as 'luai_makeseed' below: a contract runtime whose
+** nodes disagree about what an integer is has no consensus to reach.
+**
+** Stock Lua chooses these per platform, and one of the choices is a
+** trap. LUA_C89_NUMBERS is on whenever LUA_USE_C89 is set and the
+** platform is not Windows, and it takes 'long' for the integer -- but
+** LUA_USE_C89 is a statement about the *library* a target has, and the
+** browser build sets it for the wasm shim's sake. Two unrelated
+** decisions rode on one switch, so wasm32-unknown-unknown was a 32-bit
+** integer build: 'math.maxinteger' 2147483647, '3000000000 + 1' a float
+** rather than an integer, 'math.tointeger(2^40)' nil, and a chunk dumped
+** on any other target refused at load with "Lua integer size mismatch".
+**
+** So: 'long long' and 'double' everywhere, whatever LUA_USE_C89 says.
+** Both exist on every target Diluvium builds for, wasm included, where
+** i64 is a core value type and not an emulated pair -- this costs
+** nothing. ldump.c asserts the two sizes at compile time, so a future
+** flag cannot quietly move them again.
+**
+** This does not make execution reproducible; it makes the *artifact*
+** portable. See doc/ROADMAP.md, "Numeric types and portable bytecode",
+** for what is still ambient.
+**
+** DILUVIUM_NUMBERS_UNPINNED restores the stock inference, and with it a
+** build whose chunks every other build refuses. Nothing in this
+** repository sets it; it exists so this stays a wrapper around upstream's
+** block rather than a deletion of it, and so the cross-load check in
+** test/dump_check.c has a mismatching build to test against.
+*/
+#if !defined(DILUVIUM_NUMBERS_UNPINNED)		/* { */
+
+#define LUA_INT_TYPE	LUA_INT_LONGLONG
+#define LUA_FLOAT_TYPE	LUA_FLOAT_DOUBLE
+
+#else		/* }{ stock inference, unchanged */
+
 #if defined(LUA_32BITS)	/* { */
 /*
 ** 32-bit integers and 'float'
@@ -178,6 +218,8 @@
 
 #define LUA_INT_TYPE	LUA_INT_DEFAULT
 #define LUA_FLOAT_TYPE	LUA_FLOAT_DEFAULT
+
+#endif				/* } */
 
 #endif				/* } */
 
