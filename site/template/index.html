@@ -55,7 +55,7 @@ try {
     <a href="#drt">DRT</a>
     <a href="#dollup">dollup</a>
     <a href="/lab/">Lab</a>
-    <a href="/release/">Releases</a>
+    <a href="https://software.aloecraft.org/releases/diluvium/">Releases</a>
     <a href="https://github.com/Aloecraft-org/diluvium/blob/main/doc/Guide.md" rel="noopener">Guide</a>
     <a href="https://github.com/Aloecraft-org/diluvium" rel="noopener">GitHub</a>
   </nav>
@@ -105,7 +105,7 @@ try {
       <span class="tile-name">DRT</span>
       <span class="tile-what">The Diluvium RunTime: one binary that embeds the language and
         runs a deployment — swarm, host, connectors, relay, REPL.</span>
-      <span class="tile-where">below · artifacts at <span class="mono">/drt/</span></span>
+      <span class="tile-where">below · releases on software.aloecraft.org</span>
     </a>
     <a class="tile" href="https://dollup.aloecraft.org/">
       <span class="tile-name">dollup</span>
@@ -272,7 +272,9 @@ end</code></pre>
   </section>
 
   <!-- DRT. It shares this page: the language is what you write, DRT is what
-       runs it in production, and its artifacts live at /drt/ on this host. -->
+       runs it in production. Its artifacts live with every other mirror at
+       software.aloecraft.org/releases/diluvium-drt/; /drt/ on this host is
+       reserved for a page of DRT's own, the day it has one. -->
   <section class="features" id="drt">
     <h2>DRT — the Diluvium RunTime</h2>
     <p class="section-lede">
@@ -321,7 +323,7 @@ host.call("sql/exec", {sql = "..."})</code></pre>
         itself. DRT versions independently of Diluvium; the coupling is
         recorded, not encoded.</p>
         <p class="note" id="drt-buildinfo">The current list is in
-        <a href="/drt/">BUILDINFO.txt on the mirror</a>.</p>
+        <a href="https://software.aloecraft.org/releases/diluvium-drt/">BUILDINFO.txt on the mirror</a>.</p>
       </article>
 
     </div>
@@ -330,7 +332,7 @@ host.call("sql/exec", {sql = "..."})</code></pre>
       <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/SPEC.md" rel="noopener">Spec</a> ·
       <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/GUARANTEES.md" rel="noopener">Guarantees</a> ·
       <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/doc/Relay.md" rel="noopener">The relay</a> ·
-      <a href="/drt/">Releases</a>
+      <a href="https://software.aloecraft.org/releases/diluvium-drt/">Releases</a>
     </p>
   </section>
 
@@ -404,7 +406,7 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
         </div>
         <p class="note">
           Detects your platform, downloads from the
-          <a href="/release/">mirror</a>, and verifies the binary against the
+          <a href="https://software.aloecraft.org/releases/diluvium/">mirror</a>, and verifies the binary against the
           <code>SHA256SUMS.txt</code> the release workflow published. Installs to
           <code>/usr/local/bin</code>, or <code>~/.local/bin</code> when that is
           not writable.
@@ -437,12 +439,12 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
       <div class="install-main">
         <h3>The runtime <span class="what">— <code>drt</code>, which embeds the language</span></h3>
         <div class="oneliner wide">
-          <code id="install-drt">curl -fsSL https://diluvium.aloecraft.org/drt/latest/install.sh | sh</code>
+          <code id="install-drt">curl -fsSL https://software.aloecraft.org/releases/diluvium-drt/latest/install.sh | sh</code>
           <button id="copy-install-drt" class="copy" type="button" aria-label="Copy DRT install command">Copy</button>
         </div>
         <p class="note">
           Same shape: platform detection, a download from the
-          <a href="/drt/">DRT mirror</a>, a check against
+          <a href="https://software.aloecraft.org/releases/diluvium-drt/">DRT mirror</a>, a check against
           <code>SHA256SUMS.txt</code>, and <code>drt buildinfo</code> printed at
           the end so you can see which diluvium revision is inside.
           <code>DRT_SLIM=1</code> takes the size profile;
@@ -486,11 +488,11 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
         <p>Notebooks in the browser. Cells and a console over one live kernel,
         stored as <code>.ipynb</code>, running whichever release you pick.</p>
       </a>
-      <a class="card" href="/release/">
+      <a class="card" href="https://software.aloecraft.org/releases/">
         <h3>Releases <span aria-hidden="true">→</span></h3>
-        <p>Every Diluvium build for every platform, with checksums and notes,
-        and stable paths under <code>/release/latest/</code>. DRT's mirror is
-        beside it at <code>/drt/</code>.</p>
+        <p>Every Aloecraft release mirror in one tree: Diluvium, DRT and dollup
+        builds for every platform, verified against the checksums each release
+        published, with stable paths under <code>latest/</code>.</p>
       </a>
       <a class="card" href="https://github.com/Aloecraft-org/diluvium/blob/main/doc/Guide.md" rel="noopener">
         <h3>Programmer's guide <span aria-hidden="true">→</span></h3>

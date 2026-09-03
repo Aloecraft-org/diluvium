@@ -6,8 +6,7 @@
   "path":    "/",
   "source":  "https://github.com/Aloecraft-org/diluvium",
   "channels": [
-    {"title": "Release mirror", "url": "https://diluvium.aloecraft.org/release/", "status": "live"},
-    {"title": "Installer",      "url": "https://diluvium.aloecraft.org/start",    "status": "live"},
-    {"title": "DRT mirror",     "url": "https://diluvium.aloecraft.org/drt/",     "status": "live"}
+    {"title": "Release mirror", "url": "https://software.aloecraft.org/releases/diluvium/", "status": "live"},
+    {"title": "Installer",      "url": "https://diluvium.aloecraft.org/start",              "status": "live"}
   ]
 }

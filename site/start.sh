@@ -13,14 +13,14 @@
 # `local` outside functions, no bashisms.
 #
 # Env:
-#   DILUVIUM_BASE     mirror root      (default https://diluvium.aloecraft.org/release)
+#   DILUVIUM_BASE     mirror root      (default https://software.aloecraft.org/releases/diluvium)
 #   DILUVIUM_VERSION  tag to install   (default the mirror's `latest`)
 #   DILUVIUM_PREFIX   install prefix   (default /usr/local, or ~/.local unwritable)
 #   DILUVIUM_COMPILER set to 1 to also install the bytecode compiler (luac)
 
 set -eu
 
-BASE="${DILUVIUM_BASE:-https://diluvium.aloecraft.org/release}"
+BASE="${DILUVIUM_BASE:-https://software.aloecraft.org/releases/diluvium}"
 VERSION="${DILUVIUM_VERSION:-}"
 PREFIX="${DILUVIUM_PREFIX:-}"
 WANT_COMPILER="${DILUVIUM_COMPILER:-0}"
