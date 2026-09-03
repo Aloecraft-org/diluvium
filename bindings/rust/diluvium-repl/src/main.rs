@@ -45,3 +45,48 @@ async fn main() {
 
 #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 fn main() {}
+
+/// Take over `terminal` and run the prompt. From a page:
+///
+/// ```js
+/// import init, { start } from './dv_repl.js';
+/// await init();
+/// const term = new Terminal();
+/// term.open(document.getElementById('terminal'));
+/// await start(term);
+/// ```
+///
+/// Returns nothing, deliberately. A `#[wasm_bindgen]` export that returns
+/// `Result<_, JsValue>` makes wasm-bindgen generate a *catch wrapper*, and
+/// it refuses to generate one for this module: the C core is compiled with
+/// the wasm exception-handling proposal, so Lua's setjmp/longjmp -- and
+/// therefore `pcall` -- work rather than trapping, which leaves a `tag`
+/// section in the module. wasm-bindgen sees that, takes its exception-aware
+/// path, and asks for an `__instance_terminated` global that only a
+/// Rust-side EH build emits. "failed to generate catch wrappers" is what
+/// that looks like.
+///
+/// Nothing is lost. A prompt that cannot start has one useful place to say
+/// so, and it is the terminal the caller just handed over.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+#[wasm_bindgen::prelude::wasm_bindgen]
+pub fn start(terminal: wasm_bindgen::JsValue) {
+    wasm_bindgen_futures::spawn_local(run_prompt(terminal));
+}
+
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+async fn run_prompt(terminal: wasm_bindgen::JsValue) {
+    use ego_cli::term::browser::XtermTerminal;
+
+    let terminal = XtermTerminal::attach(terminal);
+    // Lua's own output goes through C stdio, which lands in the WASI floor
+    // in `diluvium_repl::browser`; point that at the same terminal before
+    // anything can print.
+    diluvium_repl::browser::set_stdout(terminal.handle().clone());
+    if let Err(error) = diluvium_repl::run(terminal).await {
+        // `run` owns the terminal, so there is nothing left to print on.
+        // Throwing is not a catch wrapper -- that is a property of the
+        // return type -- so this stays out of the trouble described above.
+        wasm_bindgen::throw_str(&format!("dv-repl: {error}"));
+    }
+}

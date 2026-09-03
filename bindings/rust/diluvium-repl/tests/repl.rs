@@ -20,6 +20,14 @@ use ego_cli::term::mem::MemTerminal;
 use ego_cli::{ReadOutcome, Session, Size};
 use futures_executor::block_on;
 
+// In a browser the harness is wasm-bindgen's, so `#[test]` means something
+// else there. Same test bodies either way: `MemTerminal` is the same on
+// every target, which is the point of it.
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+use wasm_bindgen_test::wasm_bindgen_test as test;
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
 fn state() -> Rc<State> {
     Rc::new(State::new().expect("a Diluvium state"))
 }

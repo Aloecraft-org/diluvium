@@ -12,9 +12,17 @@
 runner = ["wasmtime", "run", "--wasm", "exceptions", "--dir=.", "--"]
 
 [target.wasm32-unknown-unknown]
-# The browser target has no runner here. It builds -- see doc/ROADMAP.md,
-# "A cross-platform prompt" -- but the module imports its libc from the
-# embedder, so there is nothing to run it against until a page supplies
-# those. `cargo build --target wasm32-unknown-unknown` is the check.
+# The runner for when this works. It does not yet: wasm-bindgen cannot
+# post-process a module carrying wasm exception-handling tags, which this
+# one does because that is what makes Lua's pcall catch rather than trap.
+# doc/ROADMAP.md, "A cross-platform prompt", has the diagnosis. Until then
+# `cargo build --target wasm32-unknown-unknown` is the check, and the tests
+# here would run unchanged the moment it lifts -- `MemTerminal` needs no
+# terminal, so nothing about them is browser-specific.
+#
+# When it does: name the driver in GECKODRIVER or CHROMEDRIVER rather than
+# letting the runner pick whichever it finds first on PATH, or the
+# environment decides which engine ran without saying so.
+runner = "wasm-bindgen-test-runner"
 
 # No [build] target on purpose: a bare `cargo test` builds for the host.

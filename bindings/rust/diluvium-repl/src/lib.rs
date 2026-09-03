@@ -32,6 +32,8 @@
 //! meanings of Ctrl+C land in the two places that want them without either
 //! side arranging it.
 
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
+pub mod browser;
 pub mod extend;
 pub mod state;
 

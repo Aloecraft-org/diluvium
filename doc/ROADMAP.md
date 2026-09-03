@@ -818,30 +818,67 @@ It is not `src/lua.c`. No argument handling, no script running, no
 question -- whether Rust should own the whole CLI or only the interactive
 front end -- and this spike deliberately does not answer it.
 
-- **The browser**, which is implementation rather than testing, and less
-  of it than it looks. The module compiles and links, and asks its embedder
-  for **56 `env` imports**. Fifty-three of them are already defined, in C,
-  in this tree: `src/wasm_stubs_unknown.c`, which the Makefile's
-  `_wasm_unknown_build` compiles into the browser archive and which
-  `bindings/rust/diluvium-sys/build.rs` does not. Teaching build.rs to
-  compile it for `Platform::Browser` is the first step and a small one.
+- **The browser.** Two findings, one good and one blocking.
 
-  Three are left over -- `snprintf`, `clock_gettime`, `strtoll` -- plus the
-  `strlen`/`memcpy`/`memset`/`vsnprintf` that stub file's own header names
-  as the consumer's. `memcpy` and friends come from Rust's
-  `compiler_builtins`; the formatter is the only real work, and
-  `wasm_stubs_unknown.c` deliberately refuses to fake it ("a silent refusal
-  is the failure mode this tree exists to avoid").
+  The good one: `diluvium-sys` now links **wasi-libc** into the browser
+  build. The obvious reading of "libc from the embedder" was that a page
+  supplies 56 functions; it does not have to. Most of what Lua asks for --
+  `snprintf`, `strtod`, `strftime`, the string family -- is pure
+  computation referencing no syscall, so the linker takes wasi-libc's
+  implementations and leaves only seventeen `wasi_snapshot_preview1` calls.
+  `diluvium-repl`'s `browser` module answers those in Rust (`fd_write` onto
+  the terminal, so Lua's `print` arrives there; everything facing a
+  filesystem returns `ENOTCAPABLE`, which is the truth for a sealed
+  instance), and the module then imports **nothing** but wasm-bindgen's own
+  glue. `--allow-undefined` is gone with it, so an undefined symbol in the
+  browser build is a link error again rather than an import nobody notices.
 
-  Then a `#[wasm_bindgen]` entry point taking the page's xterm.js
-  `Terminal`, which `XtermTerminal::attach` already accepts.
+  What was *not* the answer, and is worth recording because it looks like
+  it should be: compiling `src/wasm_stubs_unknown.c` into the Rust build.
+  That file is not a shim library, it is the JavaScript artifact's whole
+  embedder, and its semantics are wrong for this consumer -- `sprintf`
+  returns an empty string, `printf` prints nothing, `malloc` is a
+  fixed-size bump allocator, `setjmp`/`longjmp` trap, and it defines its
+  own `global_L` and exports a competing REPL. Right names, wrong meanings.
 
-  Testing it is nearly free once that links: `MemTerminal` needs no
-  terminal, so the tests here run unchanged in a browser, and ego-cli's CI
-  already drives `wasm-bindgen-test-runner` against Firefox and geckodriver
-  -- installed and named explicitly rather than taken from the runner
-  image, because wasm-bindgen opens a Chrome session with a JSON Wire shape
-  modern chromedriver no longer honours. Copy that job.
+  The blocking one: **wasm-bindgen cannot post-process this module.** It
+  fails with "`__instance_terminated` global required for catch wrappers".
+  The cause is a genuine conflict rather than a misconfiguration:
+
+  1. The core is compiled with the wasm exception-handling proposal, which
+     is what makes Lua's `setjmp`/`longjmp` -- and therefore `pcall` --
+     catch rather than trap. `bindings/rust/WASM-SPIKE.md` records that as
+     a deliberate departure from the JavaScript artifact, which stubs
+     `setjmp` and accepts that a Lua error kills the module.
+  2. That leaves a `tag` section in the wasm. ego-cli's own browser
+     modules have none, which is why they post-process fine and this does
+     not -- the section is the whole difference.
+  3. wasm-bindgen sees the tags, takes its exception-aware path for catch
+     wrappers, and wants a global only a Rust build with exception-handling
+     enabled emits.
+  4. Catch wrappers cannot be avoided from this side. Removing the
+     `Result<_, JsValue>` return, making `start` synchronous, and dropping
+     `ego_platform` and web-sys from the browser build were each tried;
+     `wasm_bindgen_futures` and `js_sys` generate them regardless.
+
+  Three ways out, cheapest first. Try a newer wasm-bindgen: the pin is
+  `=0.2.114` only because `ego_platform` pins it, and this may already be
+  fixed. Failing that, build Rust itself with exception-handling
+  (`-C target-feature=+exception-handling` over `-Z build-std`, so the
+  global exists) -- nightly, but principled. The third is to give up wasm
+  EH in the browser and take the trapping `setjmp`, which is what the
+  JavaScript artifact does today and is wrong for a prompt: every Lua error
+  would kill the module instead of printing a message.
+
+  Everything else is ready. `run` is generic over the terminal,
+  `XtermTerminal::attach` takes the page's xterm.js object, and the tests
+  need no browser-specific code at all -- `MemTerminal` is the same on
+  every target, so the moment the module post-processes, the same fourteen
+  run in a browser. ego-cli's `c038187` is the CI job to copy: it installs
+  Firefox and geckodriver explicitly and names them, because the runner
+  otherwise picks whichever driver is first on PATH, and it documents why
+  Chrome needs a driver no newer than 141.
+
 - **`ego_platform`.** `ego_cli` is pinned by revision here, but its own
   manifest tracks `ego_platform`'s main branch, so the committed lockfile
   is the only thing holding that still. Before anything shipping depends on

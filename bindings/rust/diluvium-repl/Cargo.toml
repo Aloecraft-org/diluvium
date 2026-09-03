@@ -53,12 +53,27 @@ diluvium-sys = { path = "../diluvium-sys", features = ["lua"] }
 # cooperative scheduler of its own.
 ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", default-features = false }
 
-# ...but wasm needs the runtime feature back: `CookedStdio`, which is what
-# `term::platform()` returns on WASI, is behind it. Cargo unions features
-# per target, so this adds it there and nowhere else.
-[target.'cfg(target_arch = "wasm32")'.dependencies]
+# ...but WASI needs the runtime feature back: `CookedStdio`, which is what
+# `term::platform()` returns there, is behind it. Cargo unions features per
+# target, so this adds it on wasip2 and nowhere else -- deliberately not on
+# the browser, whose `XtermTerminal` is available unconditionally and needs
+# no ego_platform. Keeping it off there also keeps web-sys out of the
+# module, which matters more than it sounds: see src/main.rs on catch
+# wrappers.
+[target.'cfg(all(target_arch = "wasm32", target_env = "p2"))'.dependencies]
 ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "e5bd70d", features = ["runtime"] }
 tokio = { version = "1", features = ["macros", "rt"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# Pinned to match ego_cli and ego_platform: the wasm-bindgen ABI must agree
+# with the wasm-bindgen-cli that post-processes the module.
+wasm-bindgen = "=0.2.114"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+futures-executor = "0.3"
 
 # The whole executor this needs on native: a poll loop.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
