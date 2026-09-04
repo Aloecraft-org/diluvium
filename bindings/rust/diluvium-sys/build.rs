@@ -139,26 +139,39 @@ fn main() {
                 std::fs::copy(&from, &to).unwrap_or_else(|e| {
                     panic!("cannot copy {} from the wasi sysroot: {e}", from.display())
                 });
-                let name = archive
-                    .trim_start_matches("lib")
-                    .trim_end_matches(".a");
+                let name = archive.trim_start_matches("lib").trim_end_matches(".a");
                 println!("cargo:rustc-link-lib=static={name}");
             }
         }
         Platform::Browser => {
-            let from = toolchain.sysroot_lib().join("libsetjmp.a");
-            let to = out.join("libsetjmp.a");
-            std::fs::copy(&from, &to).unwrap_or_else(|e| {
-                panic!("cannot copy {} from the wasi sysroot: {e}", from.display())
-            });
+            // wasi-libc, in a target that has no libc of its own.
+            //
+            // The core compiles against the wasi headers here, and the
+            // obvious reading of "libc from the embedder" is that the
+            // embedder writes one. It does not have to: most of what Lua
+            // asks for is pure computation -- snprintf, strtod, strftime,
+            // the string family -- and wasi-libc's implementations of those
+            // reference no syscall at all. The linker takes what is used, so
+            // linking it here leaves only the handful of genuinely OS-facing
+            // imports for a page to answer, instead of all 56.
+            //
+            // Rust's own symbols do not collide: its allocator is
+            // `__rust_alloc`, not `malloc`, and compiler_builtins' mem*
+            // family is weak, so wasi-libc's strong definitions win.
+            for archive in ["libsetjmp.a", "libc.a"] {
+                let from = toolchain.sysroot_lib().join(archive);
+                let to = out.join(archive);
+                std::fs::copy(&from, &to).unwrap_or_else(|e| {
+                    panic!("cannot copy {} from the wasi sysroot: {e}", from.display())
+                });
+            }
             println!("cargo:rustc-link-lib=static=setjmp");
-            // The browser build takes its libc from the embedder at
-            // instantiation -- see the "browser contract" section of
-            // WASM-SPIKE.md for the symbol list -- so the references stay
-            // undefined here and become `env::` imports. This covers this
-            // crate's own linked targets (its tests); a downstream binary
-            // must pass the same flag itself.
-            println!("cargo:rustc-link-arg=--allow-undefined");
+            println!("cargo:rustc-link-lib=static=c");
+            // No --allow-undefined any more. It was here because the libc
+            // references had to survive as `env::` imports for an embedder
+            // to answer; wasi-libc above answers them instead, so an
+            // undefined symbol is now a real mistake and should fail the
+            // link rather than become an import nobody notices.
         }
     }
 
@@ -226,10 +239,14 @@ impl ObjectFormat {
 
 /// What the *target* is, as opposed to whatever machine is doing the building.
 enum Platform {
-    Native { os: String },
+    Native {
+        os: String,
+    },
     /// wasm32-wasip1 / wasm32-wasip2 (`p2` distinguishes them: see the clocks
     /// archive above).
-    Wasi { p2: bool },
+    Wasi {
+        p2: bool,
+    },
     /// wasm32-unknown-unknown: no WASI, libc from the embedder.
     Browser,
 }
@@ -300,7 +317,10 @@ impl Platform {
     /// question it asks is now "is this the format the target wants".
     fn assert_object_format(&self, obj: &Path) {
         let bytes = std::fs::read(obj).unwrap_or_else(|e| {
-            panic!("the compiler reported success but {} is unreadable: {e}", obj.display())
+            panic!(
+                "the compiler reported success but {} is unreadable: {e}",
+                obj.display()
+            )
         });
         let want = self.object_format();
         let got = ObjectFormat::of(&bytes);

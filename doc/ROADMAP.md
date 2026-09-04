@@ -724,6 +724,161 @@ Not done: `-r` on the main binary. Emitting the analysis report there
 needs `analyze.c` in the amalgamation, since the debug build is a single
 translation unit that does not link it. `luac` still has it.
 
+## A cross-platform prompt
+
+`bindings/rust/diluvium-repl` is a spike: `ego_cli`'s line editing driving
+`drepl.c`'s REPL intelligence. It exists to answer two questions before
+anything is committed to, and it answers both.
+
+**Does the seam fit?** Better than expected: it needs no adapter at all.
+`ego_cli::extend::Completion` is `{ start, end, candidates }`, and
+`diluvium_repl_complete` returns the offset a replacement starts at with the
+candidates on the stack -- so the completer is one call and a range. An
+earlier draft added keywords and sorted the result on top, which was both
+redundant and wrong: `drepl.c` already offers the keywords, already gates
+them to a bare word, and already sorts, so the draft offered `for` as a
+completion of `string.fo`. The test caught it and the fix was deletion.
+
+Highlighting ports across as a classifier, `dline.c`'s `classify` arm for
+arm, including the Diluvium syntax it colours separately (`$"`, `??`, `?.`,
+`?[`, `~function`). One thing does not port: `dline.c` classifies and
+reassembles by byte, which is safe there because it writes bytes back out.
+Reassembling by byte in Rust turns `héllo` into `hÃ©llo`, and the invariant
+`ego_cli` asks of a highlighter -- same printable characters, escapes added
+-- is what caught it.
+
+**What does Ctrl+C do?** It resolves itself, which was not obvious in
+advance. `Session::read_line` sets raw mode on entry and restores it before
+returning, the error path included, so evaluation always happens in cooked
+mode: a real SIGINT is delivered during a chunk, where `lua.c`'s hook
+interrupts it, and Lua's own `print` reaches a terminal whose line
+discipline is on. At the prompt, in raw mode, Ctrl+C is a key press and
+arrives as `ReadOutcome::Interrupted`. Both meanings land where they belong
+without either side arranging it.
+
+**Does it actually run anywhere but here?** Three of the four targets, and
+run rather than only built -- the same fourteen tests, and the prompt itself
+driven through a pipe on each:
+
+| target | how | state |
+| :--- | :--- | :--- |
+| `x86_64-unknown-linux-gnu` | natively | 14/14, prompt runs |
+| `x86_64-pc-windows-gnu` | mingw-w64, under wine | 14/14, prompt runs |
+| `wasm32-wasip2` | wasi-sdk 27, under wasmtime | 14/14, prompt runs |
+| `wasm32-unknown-unknown` | wasi-sdk 27 | builds; see below |
+
+Windows is the one that matters most, because it is the platform Diluvium
+has shipped to since `build.yml` grew its MSYS2 job and never had an editor
+on: `dline.c` needs a termios and degrades to `fgets` there. This is arrow
+keys, word motions, history and Tab completion on Windows, from the same
+source as everywhere else.
+
+WASI has no raw mode -- a component cannot reach the host's termios -- so
+`Session` takes its line-at-a-time path there and the conveniences are
+absent by construction, which is the platform's answer and not this
+crate's.
+
+**What does it cost?** Stripped, at the crate's release profile
+(`opt-level = "z"`, LTO, `panic = "abort"`):
+
+| | C interpreter | `dv-repl` |
+| :--- | ---: | ---: |
+| linux-gnu | 518 KB (`-O2`) | 928 KB |
+| windows-gnu | -- | 851 KB |
+| wasm | 572 KB (`-O2`), 340 KB (`-Oz`) | 759 KB |
+
+Between 1.3x and 2.7x the C binary depending on which C build you compare
+against, for the whole runtime plus an editor that works on three
+platforms. An earlier estimate in this discussion said 4.5x, extrapolated
+from `ego_cli`'s demo binary; that was wrong, because cross-crate LTO
+removes most of what the demo's dependency graph carries.
+
+There is no async runtime on native. `ego_cli`'s `runtime` feature is off
+here, which takes `term::platform()` to `BlockingNative` -- crossterm's
+blocking `read` and `std::io` for writes, so no future ever pends and
+`futures_executor::block_on` drives the whole session. The native
+dependency tree is 37 crates. That also answers a worry from when this was
+still a proposal: an interpreter running `--task` already has a
+cooperative scheduler, and there is no second one in the process now. WASI
+keeps the feature, because `CookedStdio` is behind it.
+
+**Two writers, one file descriptor.** Lua's `print` and `io.write` go
+through C stdio; the session writes through Rust. On a tty C stdio is line
+buffered and the two interleave correctly by luck; on a pipe it is fully
+buffered, so an `io.write` with no newline stayed in C's buffer until exit
+and came out after everything Rust had written since. `State::eval` flushes
+C's streams before returning, and a test spawns the real binary with a real
+pipe to keep it that way. Worth knowing generally: anything that puts Rust
+and the C core on the same descriptor has this shape.
+
+### What it is not, and what is still open
+
+It is not `src/lua.c`. No argument handling, no script running, no
+`--task`, no `LUA_INIT`, no history file. Those are the second half of the
+question -- whether Rust should own the whole CLI or only the interactive
+front end -- and this spike deliberately does not answer it.
+
+- **The browser.** Two findings, one good and one blocking.
+
+  The good one: `diluvium-sys` now links **wasi-libc** into the browser
+  build. The obvious reading of "libc from the embedder" was that a page
+  supplies 56 functions; it does not have to. Most of what Lua asks for --
+  `snprintf`, `strtod`, `strftime`, the string family -- is pure
+  computation referencing no syscall, so the linker takes wasi-libc's
+  implementations and leaves only seventeen `wasi_snapshot_preview1` calls.
+  `diluvium-repl`'s `browser` module answers those in Rust (`fd_write` onto
+  the terminal, so Lua's `print` arrives there; everything facing a
+  filesystem returns `ENOTCAPABLE`, which is the truth for a sealed
+  instance), and the module then imports **nothing** but wasm-bindgen's own
+  glue. `--allow-undefined` is gone with it, so an undefined symbol in the
+  browser build is a link error again rather than an import nobody notices.
+
+  What was *not* the answer, and is worth recording because it looks like
+  it should be: compiling `src/wasm_stubs_unknown.c` into the Rust build.
+  That file is not a shim library, it is the JavaScript artifact's whole
+  embedder, and its semantics are wrong for this consumer -- `sprintf`
+  returns an empty string, `printf` prints nothing, `malloc` is a
+  fixed-size bump allocator, `setjmp`/`longjmp` trap, and it defines its
+  own `global_L` and exports a competing REPL. Right names, wrong meanings.
+
+  The blocker was a version number, and it is gone. wasm-bindgen
+  **0.2.114** could not post-process this module -- "`__instance_terminated`
+  global required for catch wrappers" -- and **0.2.115 onwards can**;
+  bisected 0.2.114 / .115 / .118 / .122 / .127. `ego_cli` and
+  `ego_platform` have both moved to 0.2.127, and this crate pins
+  `ego_cli` at the first commit carrying it. The browser now runs the same
+  fourteen tests as every other target, in CI.
+
+  Worth keeping, because the shape recurs: the core is compiled with the
+  wasm exception-handling proposal, which is what makes Lua's
+  `setjmp`/`longjmp` -- and therefore `pcall` -- catch rather than trap
+  (`bindings/rust/WASM-SPIKE.md` records that as a deliberate departure
+  from the JavaScript artifact, which stubs `setjmp` and lets a Lua error
+  kill the module). That leaves a `tag` section in the wasm. ego-cli's own
+  browser modules have none, and that section was the entire difference
+  between a module 0.2.114 would post-process and one it would not.
+  Nothing on this side avoided it: dropping the `Result<_, JsValue>`
+  return, making `start` synchronous, and dropping `ego_platform` and
+  web-sys from the browser build were each tried, and
+  `wasm_bindgen_futures` generates catch wrappers regardless.
+
+  A real bug surfaced on the way, and only there: these bindings still
+  declared `lua_Integer` as 32 bits on `wasm32-unknown-unknown`, left over
+  from before `luaconf.h` pinned the numeric types. `luaL_checkversion`
+  caught it, in a browser, which is exactly the job it was wired up for.
+
+  The commit before each bump is tagged `pre-wasm-bindgen-0.2.127` in both
+  repositories, which is the boundary to reach for if the browser ever
+  needs bisecting across it.
+
+- **`ego_platform`.** `ego_cli` is pinned by revision here, but its own
+  manifest tracks `ego_platform`'s main branch, so the committed lockfile
+  is the only thing holding that still. Before anything shipping depends on
+  this, that crate wants a release rather than a branch.
+- **MSVC.** `diluvium-sys` builds for `*-pc-windows-gnu` and refuses MSVC by
+  name; a Windows binary from this crate inherits that. The artifact
+  `build.yml` already ships is MSYS2/MINGW64, so this is the same ABI.
+
 ## Analyzer
 
 The determinism verdict (three-valued: deterministic / nondeterministic /

@@ -1,2 +1,7 @@
 target/
 Cargo.lock
+
+# ...except the spike's. diluvium-repl is a binary, and its lockfile is the
+# only thing pinning ego_platform: ego-cli's manifest tracks that crate's
+# main branch, so without this the build is not reproducible.
+!diluvium-repl/Cargo.lock

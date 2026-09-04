@@ -239,11 +239,8 @@ fn a_park_for_space_asks_to_be_drained() {
 
 #[test]
 fn running_a_parked_program_is_refused() {
-    let mut inst = Instance::from_source(
-        "local q = queue.lookup('inbox') queue.wait({q})",
-        "parked",
-    )
-    .unwrap();
+    let mut inst =
+        Instance::from_source("local q = queue.lookup('inbox') queue.wait({q})", "parked").unwrap();
     assert!(matches!(inst.run().unwrap(), Step::Parked(_)));
     match inst.run() {
         Err(Error::Busy(_)) => {}
@@ -317,7 +314,10 @@ fn unsafe_stdlib_puts_the_libraries_back() {
     // The escape hatch, and it is the only way a Rust host gets `os` at all.
     let mut inst = diluvium::Config::new()
         .unsafe_stdlib(true)
-        .load_source("assert(os.execute and io.popen and package.loadlib) return 1", "legacy")
+        .load_source(
+            "assert(os.execute and io.popen and package.loadlib) return 1",
+            "legacy",
+        )
         .unwrap();
     assert!(matches!(inst.run().unwrap(), Step::Done));
 }
@@ -357,14 +357,16 @@ fn a_sealed_instance_still_has_the_language_and_its_queues() {
 fn the_debug_library_is_narrowed_unless_a_host_asks() {
     // Narrowed by default: the forgery route of audit finding 6 is shut.
     let mut inst =
-        Instance::from_source("assert(not pcall(debug.getregistry)) return 1", "narrow")
-            .unwrap();
+        Instance::from_source("assert(not pcall(debug.getregistry)) return 1", "narrow").unwrap();
     assert!(matches!(inst.run().unwrap(), Step::Done));
 
     // And a host that wants it back can say so, which is profile A.
     let mut open = diluvium::Config::new()
         .unsafe_debug(true)
-        .load_source("assert(type(debug.getregistry()) == 'table') return 1", "wide")
+        .load_source(
+            "assert(type(debug.getregistry()) == 'table') return 1",
+            "wide",
+        )
         .unwrap();
     assert!(matches!(open.run().unwrap(), Step::Done));
 }

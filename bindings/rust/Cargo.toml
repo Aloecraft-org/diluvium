@@ -4,3 +4,11 @@
 [workspace]
 members = ["diluvium-sys", "diluvium", "diluvium-wasmtime"]
 resolver = "2"
+
+# diluvium-repl is the ego-cli spike: a prompt built on diluvium-sys' `lua`
+# feature. Excluded because the members above are what Diluvium ships and
+# `cargo test --all` is what CI runs against them -- the spike pulls two git
+# dependencies and about a hundred transitive crates for tokio and
+# crossterm, and that is the wrong tax to put on the shipping crates. It is
+# its own workspace, with its own lockfile and its own CI job.
+exclude = ["diluvium-repl"]

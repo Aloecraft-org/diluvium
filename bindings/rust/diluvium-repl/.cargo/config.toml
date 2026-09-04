@@ -1,0 +1,28 @@
+# Running the wasm targets, so `cargo test --target ...` works without
+# remembering the incantation.
+
+[target.wasm32-wasip2]
+# Without a runner cargo tries to exec the .wasm directly and gets EACCES.
+#
+# '--wasm exceptions' is load-bearing rather than cautious: Lua's error
+# handling is setjmp/longjmp, the wasi-sdk lowers that onto the exception
+# -handling proposal, and an engine without the feature enabled refuses the
+# module outright. Same flag .github/workflows/build.yml passes to run the
+# WASI artifact.
+runner = ["wasmtime", "run", "--wasm", "exceptions", "--dir=.", "--"]
+
+[target.wasm32-unknown-unknown]
+# The runner for when this works. It does not yet: wasm-bindgen cannot
+# post-process a module carrying wasm exception-handling tags, which this
+# one does because that is what makes Lua's pcall catch rather than trap.
+# doc/ROADMAP.md, "A cross-platform prompt", has the diagnosis. Until then
+# `cargo build --target wasm32-unknown-unknown` is the check, and the tests
+# here would run unchanged the moment it lifts -- `MemTerminal` needs no
+# terminal, so nothing about them is browser-specific.
+#
+# When it does: name the driver in GECKODRIVER or CHROMEDRIVER rather than
+# letting the runner pick whichever it finds first on PATH, or the
+# environment decides which engine ran without saying so.
+runner = "wasm-bindgen-test-runner"
+
+# No [build] target on purpose: a bare `cargo test` builds for the host.

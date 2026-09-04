@@ -1,0 +1,107 @@
+# A spike: ego-cli's line editing over drepl.c's REPL intelligence.
+#
+# Deliberately NOT a workspace member. The workspace's crates are what
+# Diluvium ships, and `cargo test --all` in bindings/rust is what CI runs
+# against them; this pulls two git dependencies and about a hundred
+# transitive crates for tokio and crossterm, and taxing the shipping crates'
+# build with that is the wrong trade for a spike. It has its own lockfile
+# and its own CI job. ego-cli keeps `ego_shell/` outside its workspace for
+# the same reason.
+#
+# What it is for: answering whether the seam fits, what a Rust prompt costs,
+# and whether it runs anywhere but the machine it was written on. It runs on
+# three of the four targets -- linux-gnu, windows-gnu and wasip2 -- and builds
+# for the fourth. See doc/ROADMAP.md, "A cross-platform prompt".
+
+# Its own workspace root, so it has its own lockfile and pins its own
+# git dependencies independently of the crates that ship.
+[workspace]
+
+[package]
+name = "diluvium-repl"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "An interactive Diluvium prompt: cross-platform line editing over drepl.c"
+publish = false
+
+[[bin]]
+name = "dv-repl"
+path = "src/main.rs"
+
+[lib]
+name = "diluvium_repl"
+path = "src/lib.rs"
+
+[dependencies]
+# The Lua C API, which is what drepl.c's two functions take. Off by default
+# in that crate on purpose; see its src/lua.rs.
+diluvium-sys = { path = "../diluvium-sys", features = ["lua"] }
+
+# Pinned by revision, not by branch. ego-cli's own manifest tracks
+# ego_platform's main branch, so the only thing holding that still is this
+# crate's lockfile -- which is why the lockfile is committed even though
+# this builds a binary and a library rather than shipping either.
+#
+# a48cf47 is ego-cli's first commit carrying wasm-bindgen 0.2.127. The
+# commit before it is tagged `pre-wasm-bindgen-0.2.127` (also `v0.1.0`) and
+# is what this pinned until now -- 0.2.114 was the one version that could
+# not post-process the browser module, so that tag is exactly the boundary
+# between "the browser does not work" and "it does".
+#
+# default-features = false takes ego-cli's runtime-free native backend:
+# `BlockingNative` blocks on crossterm::event::read and writes with
+# std::io, so no future it returns ever pends and `Session::read_line`
+# completes on the first poll under a plain executor. An interpreter is a
+# straight-line program that wants a line at exactly one point; taking on
+# tokio for that was the wrong shape, and it was the "two schedulers in one
+# process" worry when this was still a proposal -- `--task` already has a
+# cooperative scheduler of its own.
+ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "a48cf47", default-features = false }
+
+# ...but WASI needs the runtime feature back: `CookedStdio`, which is what
+# `term::platform()` returns there, is behind it. Cargo unions features per
+# target, so this adds it on wasip2 and nowhere else -- deliberately not on
+# the browser, whose `XtermTerminal` is available unconditionally and needs
+# no ego_platform. Keeping it off there also keeps web-sys out of the
+# module, which matters more than it sounds: see src/main.rs on catch
+# wrappers.
+[target.'cfg(all(target_arch = "wasm32", target_env = "p2"))'.dependencies]
+ego_cli = { git = "https://github.com/aloecraft-org/ego-cli", rev = "a48cf47", features = ["runtime"] }
+tokio = { version = "1", features = ["macros", "rt"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
+# Deliberately unpinned. ego_cli and ego_platform both pin `=0.2.114`, which
+# binds the whole graph, so naming a version here would only add a second
+# constraint to keep in step -- and 0.2.114 is the one version that cannot
+# post-process this module. See src/main.rs and doc/ROADMAP.md: 0.2.115
+# fixes it, and this follows whatever those two settle on.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+futures-executor = "0.3"
+
+# The whole executor this needs on native: a poll loop.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+futures-executor = "0.3"
+
+[dev-dependencies]
+futures-executor = "0.3"
+
+# Size is the open question this spike exists to answer, so the answer is a
+# property of the crate rather than of flags someone has to remember. These
+# four take the binary from 1.5 MB to 1.0 MB against a 518 KB C interpreter.
+#
+# 'panic = "abort"' is the one with a cost: no unwinding, so a Rust panic
+# ends the process rather than being caught. That suits a prompt (and the
+# FFI here must not unwind into C anyway), and would want revisiting if this
+# ever became a library something else embeds.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

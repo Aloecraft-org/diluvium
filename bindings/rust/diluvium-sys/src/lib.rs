@@ -218,12 +218,18 @@ extern "C" {
     pub fn dv_set_budget(inst: *mut dv_instance, instructions: u64, memory_kb: u64) -> dv_status;
     /// What the instance has spent. `memory_kb` is the high-water mark. Either
     /// pointer may be NULL.
-    pub fn dv_usage(inst: *mut dv_instance, instructions: *mut u64, memory_kb: *mut u64)
-        -> dv_status;
+    pub fn dv_usage(
+        inst: *mut dv_instance,
+        instructions: *mut u64,
+        memory_kb: *mut u64,
+    ) -> dv_status;
     /// What the instance holds *now*, in bytes, beside the same peak before it
     /// is divided into kilobytes. Either pointer may be NULL.
-    pub fn dv_memory(inst: *mut dv_instance, bytes_now: *mut u64, bytes_peak: *mut u64)
-        -> dv_status;
+    pub fn dv_memory(
+        inst: *mut dv_instance,
+        bytes_now: *mut u64,
+        bytes_peak: *mut u64,
+    ) -> dv_status;
     /// Did this instance stop because it ran out of budget?
     pub fn dv_exceeded(inst: *mut dv_instance) -> c_int;
 
@@ -288,15 +294,27 @@ mod tests {
         assert_eq!(n, DV_LAYOUT_COUNT, "the library knows entries we do not");
 
         assert_eq!(out[DV_LAYOUT_CONFIG_SIZE] as usize, size_of::<dv_config>());
-        assert_eq!(out[DV_LAYOUT_CONFIG_ABI] as usize, offset_of!(dv_config, abi_version));
-        assert_eq!(out[DV_LAYOUT_CONFIG_FLAGS] as usize, offset_of!(dv_config, flags));
+        assert_eq!(
+            out[DV_LAYOUT_CONFIG_ABI] as usize,
+            offset_of!(dv_config, abi_version)
+        );
+        assert_eq!(
+            out[DV_LAYOUT_CONFIG_FLAGS] as usize,
+            offset_of!(dv_config, flags)
+        );
 
-        assert_eq!(out[DV_LAYOUT_QUEUE_INFO_SIZE] as usize, size_of::<dv_queue_info>());
+        assert_eq!(
+            out[DV_LAYOUT_QUEUE_INFO_SIZE] as usize,
+            size_of::<dv_queue_info>()
+        );
         assert_eq!(
             out[DV_LAYOUT_QUEUE_INFO_CAPACITY] as usize,
             offset_of!(dv_queue_info, capacity)
         );
-        assert_eq!(out[DV_LAYOUT_QUEUE_INFO_LEN] as usize, offset_of!(dv_queue_info, len));
+        assert_eq!(
+            out[DV_LAYOUT_QUEUE_INFO_LEN] as usize,
+            offset_of!(dv_queue_info, len)
+        );
         assert_eq!(
             out[DV_LAYOUT_QUEUE_INFO_ENABLED] as usize,
             offset_of!(dv_queue_info, enabled)
@@ -314,10 +332,19 @@ mod tests {
             offset_of!(dv_queue_info, on_full)
         );
 
-        assert_eq!(out[DV_LAYOUT_WAITSET_SIZE] as usize, size_of::<dv_waitset>());
+        assert_eq!(
+            out[DV_LAYOUT_WAITSET_SIZE] as usize,
+            size_of::<dv_waitset>()
+        );
         assert_eq!(out[DV_LAYOUT_WAITSET_N] as usize, offset_of!(dv_waitset, n));
-        assert_eq!(out[DV_LAYOUT_WAITSET_IDS] as usize, offset_of!(dv_waitset, ids));
-        assert_eq!(out[DV_LAYOUT_WAITSET_TIMEOUT] as usize, offset_of!(dv_waitset, timeout_ms));
+        assert_eq!(
+            out[DV_LAYOUT_WAITSET_IDS] as usize,
+            offset_of!(dv_waitset, ids)
+        );
+        assert_eq!(
+            out[DV_LAYOUT_WAITSET_TIMEOUT] as usize,
+            offset_of!(dv_waitset, timeout_ms)
+        );
         assert_eq!(
             out[DV_LAYOUT_WAITSET_FOR_WRITE] as usize,
             offset_of!(dv_waitset, for_write)
