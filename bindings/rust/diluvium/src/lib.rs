@@ -316,8 +316,9 @@ impl Config {
     /// the payload did not survive reading.
     pub fn restore(self, snapshot: &[u8], host: Option<&str>) -> Result<Instance, Error> {
         let inst = Instance::fresh(self)?;
-        let chost =
-            host.map(|h| CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap()));
+        let chost = host.map(|h| {
+            CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap())
+        });
         let st = unsafe {
             sys::dv_restore(
                 inst.raw,
@@ -661,8 +662,9 @@ impl Instance {
     /// snapshot with no stamp restores anywhere, a stamped one only under the
     /// same string.
     pub fn snapshot(&mut self, host: Option<&str>) -> Result<Vec<u8>, Error> {
-        let chost =
-            host.map(|h| CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap()));
+        let chost = host.map(|h| {
+            CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap())
+        });
         let hostp = chost.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
         let mut len: usize = 0;
         let st = unsafe { sys::dv_snapshot(self.raw, hostp, std::ptr::null_mut(), 0, &mut len) };
@@ -672,8 +674,7 @@ impl Instance {
             return Err(Error::Program(self.last_error()));
         }
         let mut buf = vec![0u8; len];
-        let st =
-            unsafe { sys::dv_snapshot(self.raw, hostp, buf.as_mut_ptr(), buf.len(), &mut len) };
+        let st = unsafe { sys::dv_snapshot(self.raw, hostp, buf.as_mut_ptr(), buf.len(), &mut len) };
         if st != sys::DV_OK {
             return Err(Error::Program(self.last_error()));
         }

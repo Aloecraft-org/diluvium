@@ -17,10 +17,7 @@ fn a_runaway_loop_is_stopped_by_its_instruction_budget() {
         Err(Error::Program(_)) => {}
         other => panic!("expected the budget to abort the program, got {other:?}"),
     }
-    assert!(
-        inst.exceeded(),
-        "the stop must be attributable to the budget"
-    );
+    assert!(inst.exceeded(), "the stop must be attributable to the budget");
     let used = inst.usage();
     assert!(
         used.instructions >= 50_000,
@@ -42,9 +39,11 @@ fn a_failing_program_is_not_reported_as_over_budget() {
 
 #[test]
 fn a_budget_cannot_change_mid_flight() {
-    let mut inst =
-        Instance::from_source("local q = queue.lookup('inbox') queue.wait({q})", "started")
-            .unwrap();
+    let mut inst = Instance::from_source(
+        "local q = queue.lookup('inbox') queue.wait({q})",
+        "started",
+    )
+    .unwrap();
     assert!(inst.set_budget(1000, 0).is_ok(), "not started yet");
     assert!(matches!(inst.run().unwrap(), Step::Parked(_)));
     match inst.set_budget(2000, 0) {
@@ -223,10 +222,7 @@ fn a_budget_spans_residencies() {
     let bytes = inst.snapshot(None).unwrap();
     drop(inst);
 
-    let woken = Config::new()
-        .budget(1_000_000, 0)
-        .restore(&bytes, None)
-        .unwrap();
+    let woken = Config::new().budget(1_000_000, 0).restore(&bytes, None).unwrap();
     assert!(
         woken.usage().instructions >= spent_before,
         "the count continued from where the snapshot left it: {} then {}",

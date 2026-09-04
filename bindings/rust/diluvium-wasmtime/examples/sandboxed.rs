@@ -9,9 +9,9 @@
 use diluvium_wasmtime::{Endpoints, Runtime, Step};
 
 fn main() -> anyhow::Result<()> {
-    let path = std::env::args()
-        .nth(1)
-        .ok_or_else(|| anyhow::anyhow!("usage: sandboxed <diluvium.wasm>"))?;
+    let path = std::env::args().nth(1).ok_or_else(|| {
+        anyhow::anyhow!("usage: sandboxed <diluvium.wasm>")
+    })?;
     let wasm = std::fs::read(&path)?;
     let rt = Runtime::new(&wasm)?;
 
