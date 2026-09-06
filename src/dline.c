@@ -314,6 +314,23 @@ static void classify (const char *s, size_t len, unsigned char *cls) {
         if (s[i++] == q) break;             /* closing quote */
       }
     }
+    else if (s[i] == '`') {                 /* Diluvium: a regex literal */
+      /* All of it in Diluvium's colour rather than a string's: the point of
+         the notation is that its contents are a pattern and not text, and
+         seeing it as neither a string nor bare source is the whole cue. */
+      cls[i++] = HL_DILUVIUM;
+      while (i < len) {
+        if (s[i] == '`') {
+          cls[i++] = HL_DILUVIUM;
+          if (i < len && s[i] == '`') {     /* '``' is one backtick */
+            cls[i++] = HL_DILUVIUM;
+            continue;
+          }
+          break;                            /* the closing delimiter */
+        }
+        cls[i++] = HL_DILUVIUM;
+      }
+    }
     else if (s[i] == '$' && i + 1 < len && (s[i+1] == '"' || s[i+1] == '\'')) {
       cls[i++] = HL_DILUVIUM;               /* the '$' is Diluvium's */
     }

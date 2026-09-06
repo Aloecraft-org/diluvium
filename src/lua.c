@@ -288,6 +288,7 @@ static int diluvium_help (lua_State *L) {
   static const char msg[] =
     "Diluvium extends Lua with:\n"
     "  $\"text {expr}\"       string interpolation, {x::%.2f} to format\n"
+    "  `\\d+`                a regular expression: find, match, gmatch, gsub\n"
     "  a ?? b               b when a is nil\n"
     "  a?.b   a?[k]         nil when a is nil, skipping the rest\n"
     "  x += 1               and -= *= /= //= %= ^= ..= |= &= <<= >>= ?\?=\n"

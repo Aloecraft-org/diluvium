@@ -49,7 +49,8 @@ static const char *const luaX_tokens [] = {
     "return", "then", "true", "until", "while",
     "//", "..", "...", "==", ">=", "<=", "~=",
     "<<", ">>", "::", "<eof>",
-    "<number>", "<integer>", "<name>", "<string>", "??", "<f-string>"
+    "<number>", "<integer>", "<name>", "<string>", "??", "<f-string>",
+    "<regex>"
 };
 
 
@@ -572,6 +573,43 @@ void luaX_read_fspec (LexState *ls) {
                                         luaZ_bufflen(ls->buff));
 }
 
+/*
+** Diluvium: read a regex literal, `\d+`.
+**
+** Raw, which is the whole point of giving it its own delimiter: a regular
+** expression is written the way every other language writes it, and a
+** backslash means what the regex engine says it means rather than being
+** consumed by Lua's own string escapes first.  '``' is the one exception,
+** and stands for a single backtick -- doubling rather than backslashing,
+** so that no reader has to work out which layer an escape belongs to.
+**
+** A newline ends it with an error rather than continuing, so an unclosed
+** literal is reported at the line it opened on instead of swallowing the
+** rest of the file.
+*/
+static void read_regex (LexState *ls, SemInfo *seminfo) {
+  luaZ_resetbuffer(ls->buff);
+  next(ls);  /* skip the opening '`' */
+  for (;;) {
+    if (ls->current == EOZ)
+      lexerror(ls, "unfinished regex literal", TK_EOS);
+    else if (currIsNewline(ls))
+      lexerror(ls, "unfinished regex literal", TK_REGEX);
+    else if (ls->current == '`') {
+      next(ls);
+      if (ls->current != '`')
+        break;  /* that was the closing delimiter */
+      save(ls, '`');  /* '``' is one backtick */
+      next(ls);
+    }
+    else
+      save_and_next(ls);
+  }
+  seminfo->ts = luaX_newstring(ls, luaZ_buffer(ls->buff),
+                                   luaZ_bufflen(ls->buff));
+}
+
+
 static int llex (LexState *ls, SemInfo *seminfo) {
   luaZ_resetbuffer(ls->buff);
   for (;;) {
@@ -583,6 +621,10 @@ static int llex (LexState *ls, SemInfo *seminfo) {
           return TK_2Q;
         }
         return '?'; 
+      }
+      case '`': {  /* Diluvium: a regex literal */
+        read_regex(ls, seminfo);
+        return TK_REGEX;
       }
       case '$': {
           next(ls);  /* skip '$' */

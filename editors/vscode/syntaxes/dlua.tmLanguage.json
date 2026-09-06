@@ -11,6 +11,7 @@
       "patterns": [
         { "include": "#comment" },
         { "include": "#fstring" },
+        { "include": "#regex-literal" },
         { "include": "#string" },
         { "include": "#number" },
         { "include": "#label" },
@@ -126,6 +127,22 @@
         }
       ]
     },
+    "regex-literal": {
+      "comment": "A Diluvium regex literal, `\\d+`. Raw: no string escapes, and '``' is one backtick, so the doubled form is matched inside and the end pattern is applied last.",
+      "begin": "`",
+      "end": "`",
+      "name": "string.regexp.dlua",
+      "applyEndPatternLast": true,
+      "beginCaptures": {
+        "0": { "name": "punctuation.definition.string.begin.dlua" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.definition.string.end.dlua" }
+      },
+      "patterns": [
+        { "match": "``", "name": "constant.character.escape.dlua" }
+      ]
+    },
     "string": {
       "patterns": [
         {
@@ -239,7 +256,7 @@
       "name": "constant.language.dlua"
     },
     "support-library": {
-      "match": "\\b(queue|json|msgpack|endpoint|bytes|time|host|string|table|math|io|os|coroutine|utf8|debug|package)(?=[.:])",
+      "match": "\\b(queue|json|msgpack|endpoint|bytes|regex|time|host|string|table|math|io|os|coroutine|utf8|debug|package)(?=[.:])",
       "name": "support.class.library.dlua"
     },
     "support-function": {

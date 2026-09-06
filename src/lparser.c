@@ -1205,9 +1205,22 @@ static void funcargs (LexState *ls, expdesc *f) {
 */
 
 
+static void regexliteral (LexState *ls, expdesc *v);
+
+/*
+** Diluvium: a regex literal is a primary expression and not a simple one,
+** so that `\d+`:match(s) parses without parentheses.  A string literal
+** needs them ("x":upper() is a syntax error in Lua and stays one), but a
+** regex exists to have a method called on it -- requiring ( ) around every
+** use would make the literal notation cost more than it saves.
+*/
 static void primaryexp (LexState *ls, expdesc *v) {
-  /* primaryexp -> NAME | '(' expr ')' */
+  /* primaryexp -> NAME | '(' expr ')' | REGEX */
   switch (ls->t.token) {
+    case TK_REGEX: {  /* Diluvium: regex literal */
+      regexliteral(ls, v);
+      return;
+    }
     case '(': {
       int line = ls->linenumber;
       luaX_next(ls);
@@ -1399,6 +1412,50 @@ static void fstring (LexState *ls, expdesc *v) {
   }
   init_exp(v, VNONRELOC, base);
   luaX_next(ls);  /* skip the final piece */
+}
+
+
+/*
+** Diluvium: regex literal, `\d+`.
+**
+** It desugars to _ENV.regex.compile("<the raw text>"), which is the same
+** shape 'defer' uses for _ENV.setmetatable and for the same reason:
+** generated code can only reach a library through _ENV, and keeping the
+** feature inside this file is worth one global lookup.  Through _ENV
+** rather than the enclosing scope on purpose -- a local named 'regex'
+** must not silently change what a literal means, while a sandbox that
+** installs its own _ENV should.
+**
+** Compiling the pattern once, rather than once per evaluation of the
+** literal, is 'regex.compile''s job: it keeps a bounded cache keyed by the
+** pattern text, so a literal inside a loop costs a table lookup after the
+** first turn.  Doing it here instead would mean either a compiled value in
+** the constant table -- which a dump cannot carry, since it is not one of
+** Lua's constant types -- or a hidden upvalue per literal.
+**
+** The consequence worth stating: a malformed pattern is an error where the
+** literal is *evaluated*, not where it is compiled.  Catching it at compile
+** time would put the regex compiler into the luac-only build, which is the
+** one place dregex.c is deliberately not linked.
+*/
+static void regexliteral (LexState *ls, expdesc *v) {
+  FuncState *fs = ls->fs;
+  expdesc call, key, arg;
+  int line = ls->linenumber;
+  int base = fs->freereg;
+  buildglobal(ls, luaX_newstring(ls, "regex", 5), &call);
+  luaK_exp2anyregup(fs, &call);
+  codestring(&key, luaX_newstring(ls, "compile", 7));
+  luaK_indexed(fs, &call, &key);
+  luaK_exp2nextreg(fs, &call);  /* the function, at 'base' */
+  codestring(&arg, ls->t.seminfo.ts);
+  luaK_exp2nextreg(fs, &arg);  /* the pattern text, at 'base + 1' */
+  init_exp(&call, VCALL, luaK_codeABC(fs, OP_CALL, base, 2, 2));
+  luaK_fixline(fs, line);
+  fs->freereg = cast_byte(base + 1);  /* the call leaves one result */
+  luaK_exp2nextreg(fs, &call);
+  init_exp(v, VNONRELOC, base);
+  luaX_next(ls);  /* skip the literal */
 }
 
 

@@ -17,7 +17,7 @@
 
 ## What is Diluvium?
 
-The Diluvium Programming Language is a **100% backward-compatible** extension of Lua with modern features like string interpolation, null coalescing, security enhancements, and more, without breaking legacy code. It's blazing fast, tiny (~1MiB runtime), and runs just about everywhere.
+The Diluvium Programming Language is a **100% backward-compatible** extension of Lua with modern features like string interpolation, regular expressions, null coalescing, security enhancements, and more, without breaking legacy code. It's blazing fast, tiny (~1MiB runtime), and runs just about everywhere.
 
 ## Language Features
 
@@ -143,15 +143,57 @@ local port = config?.server?.port ?? 8080
 **Format Specifications**
 
 ``` lua
-local pi, items = 3.14159, 42
+local pi, items, total, name = 3.14159, 42, 1234.5, "widget"
 print($"pi is {pi::%.2f}")           -- pi is 3.14
 print($"[{items::%5d}]")             -- [   42]
 print($"{items::%#x}")               -- 0x2a
+print($"total: ${total::%.2f}")      -- total: $1234.50
+print($"[{name::%-10s}]")            -- [widget    ]
 ```
 
-Everything after `::` is handed to `string.format`. It is `::` rather
-than `:` because `:` already means a method call, and `$"{obj:method()}"`
-keeps meaning exactly that.
+Everything after `::` is handed to `string.format`, so every directive it
+has is available -- width, precision, alignment, `%q`, `%x`, `%e`. It is
+`::` rather than `:` because `:` already means a method call, and
+`$"{obj:method()}"` keeps meaning exactly that. Without a spec the value
+goes through `tostring`, so `nil`, booleans and tables interpolate rather
+than raising.
+
+**Regular Expressions**
+
+``` lua
+-- a backtick literal is a compiled regular expression, and it is raw:
+-- '\d' is the regex escape, not a Lua one
+local ymd = `(\d{4})-(\d{2})-(\d{2})`
+
+local y, m, d = ymd:match("shipped 2026-09-06 ok")   -- 2026  09  06
+print(ymd:find(line))                                -- span, then captures
+
+-- the library behind it, for a pattern that is not a literal
+local re = regex.compile("(\\w+)@(\\w+\\.\\w+)", "i")
+print(re:gsub(text, "%2!%1"))
+for user, host in re:gmatch(text) do print(user, host) end
+```
+
+`find`, `match`, `gmatch`, `gsub` and `split`, shaped like their
+`string.*` counterparts and scanning by exactly the same rule, plus
+`regex.compile`, `regex.escape`, and `re.source` / `re.flags` /
+`re.ngroups` / `re.names`.
+
+The syntax is the RE2/Go subset of PCRE: classes, alternation, greedy and
+lazy quantifiers, `{n,m}`, capturing, plain and named groups, anchors,
+word boundaries and the `(?i)` `(?s)` `(?m)` flags. Backreferences and
+lookaround are **refused by name**, because the engine is a Thompson NFA
+simulated with Pike's submatch tracking -- **every match is O(length x
+pattern), with no backtracking**. `(a+)+b` against sixty `a`s takes sixty
+steps here; a backtracking engine takes longer than the universe has
+existed. That is a correctness property in this runtime and not a
+performance one: a match runs inside a single C call, so time spent
+backtracking is time an agent's instruction budget cannot see.
+
+Matching is byte-oriented, like the rest of Lua's string library, and a
+compiled regex is an ordinary table, so an agent can be hibernated while
+holding one. [`doc/Guide.md`](doc/Guide.md) has the syntax table, the
+limits, and the two places this deliberately differs from Perl.
 
 **With**
 

@@ -72,6 +72,7 @@
 #include "dlibs.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
+#include "dregex.h"
 #include "dshim.h"
 #include "dtask.h"
 #include "dsnap.h"
@@ -1506,6 +1507,54 @@ static void a_library_table_is_named_not_copied (lua_State *L) {
 }
 
 
+/*
+** A compiled regex is a table, deliberately: dsnap refuses to capture a
+** userdata (10.7 item 2), so an engine that put its compiled program in one
+** would make any agent holding a regex uncapturable -- the exact shape
+** hibernation exists for. This is the test that says so, and it also pins the
+** other half: the shared metatable has to be a *named* permanent, or the copy
+** that comes back fails the identity check every method makes and a restored
+** regex is a table that will not match anything.
+*/
+static void a_compiled_regex_round_trips (lua_State *L) {
+  int base = lua_gettop(L);
+  int copy;
+  /* '[0-9]' rather than '\\d' only to keep the backslashes out of a C string
+     that is Lua source that is a pattern; they mean the same thing. */
+  if (!build(L, "return {re = regex.compile('([0-9]+)-([0-9]+)'),"
+                " f = regex.find}"))
+    return;
+  copy = roundtrip_named(L, __func__);
+  if (copy == 0) return;
+  at(L, copy, "f");
+  lua_getglobal(L, "regex");
+  lua_getfield(L, -1, "find");
+  ok(lua_topointer(L, -3) == lua_topointer(L, -1),
+     "'regex.find' is named, not copied");
+  lua_pop(L, 3);
+  at(L, copy, "re");
+  ok(lua_istable(L, -1), "a compiled regex crosses a snapshot at all");
+  if (lua_getmetatable(L, -1)) {
+    diluvium_regex_pushmt(L);
+    ok(lua_rawequal(L, -2, -1),
+       "and wears the same metatable, so it is still a regex");
+    lua_pop(L, 2);
+  }
+  else {
+    ok(0, "and wears the same metatable, so it is still a regex");
+  }
+  /* The one that matters to a program: does it still work? */
+  lua_setglobal(L, "restored_re");
+  if (build(L, "local a, b, x, y = restored_re:find('order 12-34')\n"
+                "return a == 7 and b == 11 and x == '12' and y == '34'")) {
+    ok(lua_toboolean(L, -1),
+       "and matches after the restore, captures and all");
+    lua_pop(L, 1);
+  }
+  lua_settop(L, base);
+}
+
+
 static void a_snapshot_of_a_global_closure_is_small (lua_State *L) {
   int base = lua_gettop(L);
   size_t len = 0;
@@ -2465,6 +2514,7 @@ int main (void) {
   a_closure_using_globals_survives(L);
   a_c_function_is_named_not_copied(L);
   a_library_table_is_named_not_copied(L);
+  a_compiled_regex_round_trips(L);
   a_snapshot_of_a_global_closure_is_small(L);
 
   printf("\n=== suspended threads (10.3, 10.7) ===\n");

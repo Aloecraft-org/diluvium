@@ -135,6 +135,7 @@
 #include "dendpoint.c"
 #include "dbytes.c"
 #include "djson.c"
+#include "dregex.c"
 #include "dtime.c"
 #include "dhostlib.c"
 #include "dshim.c"
