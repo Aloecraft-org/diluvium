@@ -374,6 +374,9 @@ The prices, stated rather than discovered:
 capability, and reaches nothing outside the instance. A compiled regex is an
 ordinary table holding an ordinary string, so an agent can park while holding one
 and be hibernated — see `doc/Messaging.md` §10.7 for why a userdata could not.
+Every instance is handed it whether it uses it or not, which costs about a
+kilobyte of the per-agent figure in `doc/Benchmarks.md`; a compiled pattern costs
+its own program on top, a few hundred bytes for an ordinary one.
 
 ### Time, in UTC: `time`
 

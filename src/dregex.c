@@ -65,11 +65,22 @@ static int dre_l_gsub    (lua_State *L);   /* re:gsub(s, repl [, n])       */
 static int dre_l_split   (lua_State *L);   /* re:split(s [, limit])        */
 
 /*
-** The module and the methods hold the *same* C functions, which is why
-** 'regex.find(re, s)' and 're:find(s)' are one call with one argument order:
-** the pattern is always the first argument. That costs one divergence from
-** 'string.find', where the subject comes first, and buys a library with a
-** single shape to remember.
+** One table, which is both the module and the method set: a compiled regex
+** wears a metatable whose '__index' *is* this table.
+**
+** That works because the pattern is the first argument of every function, so
+** 'regex.find(re, s)' and 're:find(s)' are the same call -- and making the
+** method set the module table turns that from a coincidence into the
+** implementation. It costs one divergence from 'string.find', where the
+** subject comes first, and buys a library with a single shape to remember.
+**
+** The alternative, a second table holding a second set of closures over the
+** same C functions, cost every instance in the swarm a table and five
+** closures for nothing: an instance that never compiles a pattern still pays
+** for the library it was given, and doc/Benchmarks.md counts that memory per
+** agent. The visible consequence is that 're:compile()' and 're:escape()'
+** parse; the first is a no-op that returns 're' and the second is an error,
+** and neither is worth a table to prevent.
 */
 static const luaL_Reg dre_module[] = {
   {"compile", dre_l_compile},
@@ -79,15 +90,6 @@ static const luaL_Reg dre_module[] = {
   {"gmatch",  dre_l_gmatch},
   {"gsub",    dre_l_gsub},
   {"split",   dre_l_split},
-  {NULL, NULL}
-};
-
-static const luaL_Reg dre_methods[] = {
-  {"find",   dre_l_find},
-  {"match",  dre_l_match},
-  {"gmatch", dre_l_gmatch},
-  {"gsub",   dre_l_gsub},
-  {"split",  dre_l_split},
   {NULL, NULL}
 };
 
@@ -1413,6 +1415,7 @@ static int dre_search (dre_vm *V, size_t startpos, int anchored, int *out) {
 ** ====================================================================== */
 
 static const char DRE_MT = 0;       /* registry: the shared metatable      */
+static const char DRE_MOD = 0;      /* registry: the module table          */
 static const char DRE_CACHE = 0;    /* registry: pattern -> compiled regex */
 static const char DRE_CACHEN = 0;   /* registry: how many are in it        */
 
@@ -1422,11 +1425,22 @@ static int dre_l_tostring (lua_State *L) {
   return 1;
 }
 
+/* The module table: built on first ask, and the same table every time, so the
+   metatable below can point '__index' straight at it. */
+static void dre_pushmodule (lua_State *L) {
+  if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DRE_MOD) != LUA_TTABLE) {
+    lua_pop(L, 1);
+    luaL_newlib(L, dre_module);
+    lua_pushvalue(L, -1);
+    lua_rawsetp(L, LUA_REGISTRYINDEX, &DRE_MOD);
+  }
+}
+
 LUA_API void diluvium_regex_pushmt (lua_State *L) {
   if (lua_rawgetp(L, LUA_REGISTRYINDEX, &DRE_MT) != LUA_TTABLE) {
     lua_pop(L, 1);
     lua_createtable(L, 0, 3);
-    luaL_newlib(L, dre_methods);
+    dre_pushmodule(L);
     lua_setfield(L, -2, "__index");
     lua_pushliteral(L, "regex");
     lua_setfield(L, -2, "__name");
@@ -2003,9 +2017,20 @@ static int dre_l_escape (lua_State *L) {
 
 /* ---- registration ---------------------------------------------------- */
 
+/*
+** Opening the library builds one table and nothing else. The metatable is
+** built on first ask -- by 'regex.compile', or by dsnap.c's permanents walk,
+** whichever comes first -- so an instance that is handed the library and never
+** compiles a pattern pays for the module table alone.
+**
+** Lazily, and safely so, which is not true of every lazy registration in this
+** runtime: dv.c records that naming a permanent on first use made the
+** permanents *fingerprint* depend on whether an instance had run yet, and 10.4
+** requires that set to be identical on save and restore. This is not that,
+** because the permanents builder calls 'diluvium_regex_pushmt' itself -- the
+** name is in the set whether or not a pattern was ever compiled.
+*/
 LUAMOD_API int luaopen_dregex (lua_State *L) {
-  luaL_newlib(L, dre_module);
-  diluvium_regex_pushmt(L);                   /* built before any object is */
-  lua_pop(L, 1);
+  dre_pushmodule(L);
   return 1;
 }

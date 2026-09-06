@@ -655,6 +655,30 @@ simulator reads that program back out of a Lua string, so it bounds-checks
 every operand it reads and a forged program fails to match rather than
 reaching memory.
 
+**What it costs an instance, and what that cost broke.** Every guest gets
+the library whether it uses it or not, and doc/Benchmarks.md counts memory
+per agent, so this is a number rather than a shrug: **about a kilobyte**,
+measured with `make footprint` (a parked instance moves from 82 KB to 83
+KB). It was two, until the method set stopped being a second table of
+closures over the same C functions and became the module table itself --
+which the argument order already made possible, since `re:find(s)` and
+`regex.find(re, s)` are one call. The metatable is built on first ask
+rather than at `luaopen`, so an instance handed the library and never
+compiling a pattern pays for one table.
+
+That is also what `dvs_check`'s flat-budget test found, and the finding is
+worth more than the kilobyte. It spawned a child under `memory_kb = 77` --
+which reads like a tight budget and is in fact *below what an instance
+already holds* at that moment, some 87 KB of uncollected library setup. It
+passed because a collection happened to run inside `dv_load` and brought
+the figure under the cap mid-load. So the number pinned the collector's
+timing, not the budget form the test is named for; one more library moved
+it by a kilobyte and the test went red for an unrelated reason. It now
+uses a budget with headroom, and says why in the file. The edge underneath
+it is real and is recorded there too: `dv_set_budget` accepts a memory
+limit below current usage, and the failure surfaces later, as "not enough
+memory" from whatever allocates next.
+
 **The literal is `` ` `` and not `r"..."`**, which is what was asked for,
 because `r"..."` is a *function call* in stock Lua and source compatibility
 is not negotiable. The backtick appears nowhere in upstream's lexer, so it

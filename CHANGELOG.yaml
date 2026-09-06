@@ -147,6 +147,27 @@ releases:
         Lua program could have written, and bounds-checks every operand: a
         forged program fails to match rather than reaching memory.
       - |
+        **What it costs an instance: about a kilobyte.** Every guest is handed
+        the library whether it uses it or not, and doc/Benchmarks.md counts
+        memory per agent, so the number is measured rather than waved at: a
+        parked instance moves from 82 KB to 83 KB under `make footprint`. The
+        method set is the module table itself rather than a second table of
+        closures over the same C functions -- which the argument order already
+        allowed, since `re:find(s)` and `regex.find(re, s)` are one call -- and
+        the metatable is built on first use rather than at `luaopen`.
+      - |
+        **`dvs_check`'s flat-budget test no longer pins the collector's
+        timing.** It spawned a child under `memory_kb = 77`, which reads like a
+        tight budget and is below what an instance already holds when the
+        budget is set -- some 87 KB of uncollected library setup. It passed
+        because a collection happened to run inside `dv_load`. One more library
+        moved that by a kilobyte and the test went red for a reason unrelated
+        to the budget *form* it is named for. It now uses a budget with
+        headroom and records why, along with the edge underneath it:
+        `dv_set_budget` accepts a memory limit below current usage, and the
+        failure surfaces later as "not enough memory" from whatever allocates
+        next.
+      - |
         **F-string format specifications are documented properly.** No code
         change -- `$"total: ${total::%.2f}"` has worked since the specs landed
         -- but the README and `doc/Guide.md` showed one example and left width,
