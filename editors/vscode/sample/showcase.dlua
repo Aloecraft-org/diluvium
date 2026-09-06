@@ -7,6 +7,12 @@ local pi = 3.14159
 print($'pi is {pi::%.2f}, brace literals: \{not interpolated\}')
 print($"nested: {("inner" .. $"deep {name}")}")
 
+-- Regex literals: raw text between backticks, `` for a literal backtick
+local ymd = `(\d{4})-(\d{2})-(\d{2})`
+local tick = `a``b`
+if ymd:find(greeting) then print(ymd:match(greeting)) end
+print(regex.gsub("\\s+", "a  b", "-"))
+
 -- Null coalescing and safe navigation
 local config = nil
 local port = config?.server?.port ?? 8080

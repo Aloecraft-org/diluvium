@@ -69,8 +69,8 @@ try {
       <h1>Small language. Sealed runtime. Runs anywhere.</h1>
       <p class="lede">
         Diluvium is a general-purpose language and the runtime underneath it.
-        Modern syntax — string interpolation, <code>switch</code>,
-        <code>defer</code>, safe navigation — compiled to
+        Modern syntax — string interpolation, regular expressions,
+        <code>switch</code>, <code>defer</code>, safe navigation — compiled to
         <strong>one portable bytecode</strong> that behaves the same in a browser
         tab, on a server, or on hardware with a few hundred kilobytes to spare.
         The whole runtime is under a megabyte, and a program can reach nothing
@@ -158,6 +158,20 @@ print($"[{42::%5d}]")</code></pre>
         <p>Everything after <code>::</code> goes to <code>string.format</code>.
         It is <code>::</code> and not <code>:</code> because <code>:</code>
         already means a method call.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Regular expressions</h3>
+        <pre><code class="language-lua">local ymd = `(\d{4})-(\d{2})-(\d{2})`
+
+-- 2026  09  06
+print(ymd:match("on 2026-09-06"))
+
+print(regex.gsub("\\s+", text, " "))</code></pre>
+        <p>A backtick literal is a compiled regex, taken raw, so a pattern is
+        written the way every other language writes it. The engine is a
+        Thompson NFA: <strong>every match is linear</strong> and nothing
+        backtracks, so no input makes it hang.</p>
       </article>
 
       <article class="feature">
@@ -497,9 +511,10 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
       <a class="card" href="https://github.com/Aloecraft-org/diluvium/blob/main/doc/Guide.md" rel="noopener">
         <h3>Programmer's guide <span aria-hidden="true">→</span></h3>
         <p>What the language adds, the <code>msgpack</code>, <code>queue</code>,
-        <code>endpoint</code>, <code>bytes</code>, <code>json</code> and
-        <code>time</code> libraries, embedding an instance from C, and running
-        a swarm. The Lua 5.5 manual covers the rest.</p>
+        <code>endpoint</code>, <code>bytes</code>, <code>json</code>,
+        <code>regex</code> and <code>time</code> libraries, embedding an
+        instance from C, and running a swarm. The Lua 5.5 manual covers the
+        rest.</p>
       </a>
       <a class="card" href="https://software.aloecraft.org/">
         <h3>Aloecraft software <span aria-hidden="true">→</span></h3>

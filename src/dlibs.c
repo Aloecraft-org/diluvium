@@ -18,6 +18,7 @@
 #include "dendpoint.h"
 #include "dbytes.h"
 #include "djson.h"
+#include "dregex.h"
 #include "dtime.h"
 #include "dhostlib.h"
 
@@ -28,6 +29,7 @@ static const luaL_Reg diluvium_libs[] = {
   {"endpoint", luaopen_dendpoint},
   {"bytes", luaopen_dbytes},
   {"json", luaopen_djson},
+  {"regex", luaopen_dregex},
   {"time", luaopen_dtime},
   {"host", luaopen_dhostlib},
   {NULL, NULL}

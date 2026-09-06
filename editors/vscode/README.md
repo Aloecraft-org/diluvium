@@ -2,8 +2,8 @@
 
 Syntax highlighting and editing support for the
 [Diluvium](https://github.com/Aloecraft-org/diluvium) programming language —
-Lua with string interpolation, null coalescing, `switch`, `defer`, `with`,
-safe navigation, compound assignment and secure functions.
+Lua with string interpolation, regular expressions, null coalescing, `switch`,
+`defer`, `with`, safe navigation, compound assignment and secure functions.
 
 Files with the `.dlua` extension (and `*.host.lua` host configurations) are
 recognised automatically. Because `.dlua` is its own language ID, generic Lua
@@ -16,13 +16,15 @@ language servers no longer attach to these files, so Diluvium syntax such as
   numbers (including hex floats), labels, `goto`
 - Interpolated strings `$"..."` / `$'...'` with full highlighting of the
   embedded expressions, `\{` `\}` escapes, and `::%fmt` format specifications
+- Regex literals `` `\d+` ``, coloured as a pattern rather than as a string,
+  with the doubled backtick that stands for one
 - `??` and `??=` null coalescing, `?.` and `?[` safe navigation
 - Compound assignment: `+=`, `-=`, `*=`, `/=`, `//=`, `%=`, `^=`, `..=`,
   `&=`, `|=`, `<<=`, `>>=`, `??=`
 - Contextual keywords: `switch` / `case` / `default`, `defer`, `with`
 - The `global` keyword and `~function` secure functions
 - The Diluvium standard libraries: `queue`, `json`, `msgpack`, `endpoint`,
-  `bytes`, `time` alongside the stock Lua ones
+  `bytes`, `regex`, `time` alongside the stock Lua ones
 
 Bracket matching, auto-closing pairs, `--` line and `--[[ ]]` block comment
 toggling, and indentation rules for `then`/`do`/`end` blocks (including

@@ -1643,6 +1643,20 @@ static void a_documented_budget_reaches_the_child (void) {
 
 /*
 ** The flat form still works, because it is what this layer understood until now.
+**
+** The memory number is deliberately generous, and that is a correction rather
+** than a loosening. It was 77 KB, which reads like a tight budget and was in
+** fact *below what an instance already holds* when 'spawn' sets it -- some 87 KB
+** of not-yet-collected library setup. The spawn succeeded anyway only because a
+** collection happened to run inside 'dv_load' and brought the figure under the
+** cap mid-load, so what the number actually pinned was the collector's timing.
+** Adding one guest library moved that by a kilobyte and the test went red for a
+** reason that had nothing to do with the budget *form* it exists to check.
+**
+** Worth recording while it is in view, because it is a real edge and not this
+** test's problem: 'dv_set_budget' accepts a memory limit below the instance's
+** current usage, and the failure surfaces later and elsewhere, as "not enough
+** memory" from whatever allocates next.
 */
 static void the_flat_budget_form_is_still_accepted (void) {
   static const char SUP[] =
@@ -1651,7 +1665,7 @@ static void the_flat_budget_form_is_still_accepted (void) {
     "local hold = queue.declare('hold', {capacity = 2})\n"
     "queue.push(sys, {op = 'spawn', code = \"local q = \"\n"
     "  .. \"queue.declare('hold', {capacity = 2}) queue.wait({q})\", caps = {},\n"
-    "  instructions = 123456, memory_kb = 77})\n"
+    "  instructions = 123456, memory_kb = 7777})\n"
     "queue.wait({hold})\n";
   dvs_swarm *sw = swarm_with(4);
   dvs_id root = 0, kid = 0;
@@ -1670,7 +1684,7 @@ static void the_flat_budget_form_is_still_accepted (void) {
   ok(kid != 0, "a child spawned with a flat budget");
   dvs_budget(sw, kid, &insns, &mem);
   okf(insns == 123456, "carries the flat instruction budget", (long)insns, 123456);
-  okf(mem == 77, "and the flat memory limit", (long)mem, 77);
+  okf(mem == 7777, "and the flat memory limit", (long)mem, 7777);
   dvs_free(sw);
 }
 

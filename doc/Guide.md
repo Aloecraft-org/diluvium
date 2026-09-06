@@ -53,7 +53,60 @@ print($"hello {name}, pi is {pi::%.2f}")   --> hello world, pi is 3.14
 ```
 
 The `$` prefix is required. `{expr}` takes any expression; `{expr::spec}` passes the
-value through `string.format` with that spec, so `%.2f`, `%5d`, `%q` all work.
+value through `string.format` with that spec, and everything after the `::` is handed
+to it unchanged, so every directive `string.format` has is available:
+
+```lua
+local total, qty, name = 1234.5, 42, "widget"
+
+$"total: ${total::%.2f}"      --> total: $1234.50      -- money, two places
+$"[{qty::%5d}]"               --> [   42]              -- right-aligned in five
+$"[{name::%-10s}]"            --> [widget    ]         -- left-aligned in ten
+$"{qty::%#x}"                 --> 0x2a                 -- hex, with the prefix
+$"{total::%08.2f}"            --> 01234.50             -- zero-padded
+$"{name::%q}"                 --> "widget"             -- quoted for re-reading
+$"{qty::%.3e}"                --> 4.200e+01
+```
+
+It is `::` and not the single `:` other languages use because `:` already introduces
+a method call, and `$"{obj:method()}"` has to keep meaning that. The `$` immediately
+before `{total::%.2f}` in the first line is an ordinary dollar sign in the literal
+text — only `$` *before the quote* opens an interpolated string.
+
+Without a spec the value goes through `tostring`, so `nil`, booleans, tables and
+anything with a `__tostring` interpolate rather than raising. Both the `tostring`
+and the `string.format` are looked up in `_ENV` rather than in the enclosing scope,
+so a local named `tostring` cannot silently change what an f-string means, while a
+sandbox that installs its own `_ENV` can.
+
+Write a literal brace as `\{` or `\}`. Every other escape means exactly what it means
+in an ordinary string.
+
+### Regular expressions
+
+A backtick literal is a compiled regular expression:
+
+```lua
+local ymd = `(\d{4})-(\d{2})-(\d{2})`
+
+if ymd:find(line) then ... end
+local y, m, d = ymd:match("shipped 2026-09-06 ok")   --> 2026  09  06
+```
+
+The text between the backticks is **raw** — `\d` is the regex escape, not a Lua one,
+which is the reason the literal exists rather than `regex.compile("\\d")` everywhere.
+Write a backtick inside one by doubling it (`` `a``b` `` is the pattern ``a`b``), and
+note that a literal may not cross a line. Because it is a primary expression, calling
+a method on one needs no parentheses, unlike a string literal.
+
+The literal is exactly `regex.compile("...")`, so everything below about the library
+applies to it, and a pattern is compiled once however often the literal is evaluated
+— the compiler keeps a bounded cache keyed by the pattern text. The one consequence
+of that desugaring: a malformed pattern is an error where the literal is *evaluated*,
+not where the file is compiled.
+
+The engine, the syntax it accepts, and what it refuses are in
+[§2, `regex`](#regular-expressions-regex).
 
 ### Null coalescing and safe navigation
 
@@ -226,6 +279,104 @@ distinct from absent should check before decoding, or carry that data in
 outside, so it is strict — a malformed number, a control byte in a string,
 trailing bytes, or nesting past a fixed depth are each refused, not accepted into
 a wrong value.
+
+### Regular expressions: `regex`
+
+Lua patterns are not regular expressions and were never meant to be: no alternation,
+no grouping of a quantified subexpression, and `%b` and `%f` are not regular at all.
+They stay the right tool for `%b()` and for a fixed literal. `regex` is for the other
+case — a log line, a header, a route, a config value somebody else wrote, which
+usually arrives with a regular expression already written for it.
+
+```lua
+local re = regex.compile("(\\w+)@(\\w+\\.\\w+)")   -- or the literal: `(\w+)@(\w+\.\w+)`
+
+re:find("mail bob@example.com now")  --> 6  20  bob  example.com
+re:match("mail bob@example.com now") --> bob  example.com
+re:gsub("a@b.c and d@e.f", "%2!%1")  --> "b.c!a and e.f!d"   2
+re:split("x")                        --> { "x" }
+for user, host in re:gmatch(text) do ... end
+```
+
+Every function takes the pattern first, so `re:find(s)` and `regex.find(re, s)` are
+the same call — and where a pattern is a string rather than a compiled regex, it is
+compiled through the same cache, so `regex.find("\\d+", s)` in a loop compiles once.
+The result shapes are `string.find`'s and `string.match`'s deliberately: `find`
+returns the span and then the captures, `match` returns the captures, or the whole
+match when the pattern has none. A group that did not take part — the other side of
+an alternation — is `false` rather than `nil`, so `{re:match(s)}` keeps its shape.
+
+`gsub` is `string.gsub`: a replacement string using `%1`..`%9` and `%0`, or a table
+indexed by the first capture, or a function called with the captures, and it returns
+the count. Its scanning rule is `string.gsub`'s too, to the letter, including the
+one that catches people out — a match that ends where the last one ended is not a
+match, which is why `regex.gsub("a*", "aaa", "<%0>")` is `<aaa>` and not `<aaa><>`.
+That is measured rather than asserted: 67,200 pattern/subject pairs written both
+ways agree on `find`, `gsub` and `gmatch`, output and count alike, and
+`test/test_regex.lua` keeps a table of the cases that mattered.
+
+The one place the two deliberately part company is `^` in `gmatch`. Lua's manual
+says a caret there "does not work as an anchor, as this would prevent the
+iteration", so `string.gmatch` treats it as a literal `^`; here it is an anchor
+like everywhere else, and a literal caret is `\^`. An anchored `gmatch` therefore
+yields at most one match rather than none.
+
+The syntax is the RE2/Go subset of PCRE:
+
+```
+literals            .  any byte, and '\n' too under (?s)
+[abc] [^a-z]        a byte class; \d \w \s and [:alpha:] work inside it
+\d \D \w \W \s \S   digit, word, space, and the complements (ASCII)
+\b \B              a word boundary, and not one
+\A \z              the start and the end of the subject
+^ $                 the same, or a line boundary under (?m)
+( ) (?: )           a capturing group, and a plain one
+(?<name> )          a named group; (?P<name> ) is the same
+|                   alternation, preferring the left branch
+* + ? {n} {n,} {n,m}   greedy; a trailing '?' makes it lazy
+(?i) (?s) (?m)      ignore case, '.' crosses lines, '^'/'$' per line
+\n \t \xHH \.       the usual escapes, and '\<punctuation>' for itself
+```
+
+A compiled regex reports what it is: `re.source`, `re.flags`, `re.ngroups`, and
+`re.names` (a name-to-number table, when the pattern has named groups).
+`regex.escape(s)` quotes a string so it matches literally.
+
+**What it will not do, and why.** Backreferences (`\1`), lookahead (`(?=`), lookbehind
+(`(?<=`) and Unicode property classes (`\p{...}`) are refused by name, with the
+reason in the message. The first three are not regular languages, and having them
+means backtracking; this engine is a Thompson NFA simulated with Pike's submatch
+tracking, so **every match is O(length × pattern)** with no backtracking anywhere.
+That is not a performance footnote in this runtime. A match runs inside one C call,
+and §7's instruction budget charges VM instructions — so an agent that spent four
+minutes inside a backtracking matcher would report having spent nothing, and the
+budget would be a number that stops meaning anything. `(a+)+b` against sixty `a`s
+takes sixty steps here and longer than the universe has existed in PCRE.
+
+The prices, stated rather than discovered:
+
+* **Bytes, not codepoints.** `.` is one byte and `\w` is ASCII, exactly as everything
+  else in Lua's string library is. A literal `é` in a pattern still matches, because
+  its UTF-8 bytes are matched as bytes; what is not offered is `.` counting one
+  character or `\w` meaning a letter in another script.
+* **`$` is the end of the subject**, not "the end, or before a final newline" as in
+  Perl. Write `\n?\z` for Perl's meaning. Under `(?m)` it is the end of a line.
+* **A repeated group that can match nothing** may report a different capture than
+  PCRE would — `((?:\s)*)*` over `"  "` leaves group 1 holding `"  "` here and `""`
+  in Perl. The overall match is identical; it is the submatch that differs, and RE2
+  has the same divergence for the same reason. Such a pattern means the same as
+  `(\s*)` anyway.
+* **Everything is bounded**, because a pattern is input too: 1024 bytes of pattern,
+  512 instructions, 24 capture groups, 48 levels of nesting, `{n,m}` up to 255. Each
+  is a refusal with a message, never a truncation.
+
+`regex` is a library and not a hostcall: it is a function of its input, needs no
+capability, and reaches nothing outside the instance. A compiled regex is an
+ordinary table holding an ordinary string, so an agent can park while holding one
+and be hibernated — see `doc/Messaging.md` §10.7 for why a userdata could not.
+Every instance is handed it whether it uses it or not, which costs about a
+kilobyte of the per-agent figure in `doc/Benchmarks.md`; a compiled pattern costs
+its own program on top, a few hundred bytes for an ordinary one.
 
 ### Time, in UTC: `time`
 

@@ -37,6 +37,7 @@ out of upstream Lua's version space: upstream will never ship a
 | `match` (switch as an expression) | **dropped** -- see below |
 | `defer` / `with` | done |
 | F-string format specs `{x::%.2f}` | done |
+| Regular expressions: `` `\d+` `` and the `regex` library | done |
 | Literal suffix registry (`1.23d`) | not started; gated on decQuad semantics |
 
 ### Review findings
@@ -491,6 +492,10 @@ Also unscheduled:
   type and precision, decimal being the first entry, not the reason.
 - **`match`** -- switch in expression position. Dropped for now; the
   statement form carries the README promise on its own.
+- **Compile-time regex validation** -- a malformed pattern in a literal is
+  caught where it is evaluated rather than where it is compiled. See the
+  regex section below for what it would take, which is a validation entry
+  point outside the `MAKE_LUAC` guard rather than a parser change.
 - The analyzer work below.
 
 Every new construct needs analyzer support and a test in `test/`, and must
@@ -589,6 +594,121 @@ scratch register on every constant past the second. It caught this; a
 release build would only have shown it in a function with enough
 constants. Anything that emits code into a reserved slot should be tested
 under the debug binary for that reason.
+
+### Regular expressions
+
+Two decisions, and the second is the one with consequences.
+
+**The engine is a Thompson NFA with Pike's submatch tracking** -- RE2's
+construction, and Go's -- rather than the backtracker every scripting
+language ships. The general argument (a backtracker is exponential on
+inputs that look ordinary) is not the local one. The local one is that a
+match runs inside a single C call, and 9.4's instruction budget is a count
+hook on VM instructions: an agent that spends four minutes inside a
+matcher spends *zero* instructions and `dv_usage` reports zero. A budget a
+feature can step around silently is the defect the M0-M7 audit found
+twice; a third would have been a choice. The same call is what
+doc/Determinism.md's replay model has no account of, since a matcher whose
+cost depends on the *shape* rather than the size of a message is exactly
+the input-dependent stall that model assumes away.
+
+The price is paid in notation and is stated rather than hidden:
+backreferences and lookaround are not regular, cannot be had at O(len ×
+prog), and are refused by name with the reason in the message. Two smaller
+divergences from PCRE are recorded in `doc/Guide.md` -- `$` means `\z`
+rather than "the end, or before a final newline", and a repeated group
+whose body can match nothing may report a different capture (RE2 has the
+same divergence, for the same reason: the NFA state is a program counter,
+so two threads at one position with different captures are merged).
+
+What is *not* a divergence, and was measured rather than assumed: the
+overall match, and the scan. Two differential corpora, both random and
+both run against this tree. 12,800 pattern/subject pairs compared
+span-for-span and capture-for-capture against another PCRE-semantics
+engine -- zero span differences, and the capture differences are exactly
+the empty-loop class above. Then 67,200 pairs written twice, once as a Lua
+pattern and once as the regex that means the same thing, compared through
+`find`, `gsub` and `gmatch` -- output and count alike, zero differences,
+with the single exception of `^` in `gmatch`, where Lua's manual says a
+caret is not an anchor "as this would prevent the iteration" and a regex
+anchor is an anchor. The first bug was empty-loop semantics (Perl
+allows one empty iteration and then leaves the loop; a plain Pike VM cuts
+that path, and the fix is the `DRE_LOOP` back edge, one hidden slot per
+empty-capable repetition). The second was the scan rule in `gsub` and
+`gmatch`, which now matches `lstrlib.c`'s to the letter -- a match ending
+where the last one ended is not a match -- because the sibling API is
+`string.gsub` and a Lua programmer's habits have to carry over. The suite
+is at 53 passed / 0 failed / 3 skipped with the new file, and the library
+is clean under ASan and UBSan on random patterns and on deliberately
+corrupted programs.
+
+**A compiled regex is a table, not a userdata**, and the compiled program
+is a byte string inside it. That is forced rather than chosen: `dsnap.c`
+refuses to capture a userdata (10.7 item 2), so an engine that put its
+program in one would make any agent holding a regex uncapturable -- the
+exact shape hibernation exists for. `test/dsnap_check.c` asserts the round
+trip. It costs a metatable in the permanents (`dregex.mt`, for the same
+identity reason as `dendpoint.refmt`) and an entry in `DS_MODULES`, which
+between them change the permanents fingerprint: a snapshot taken by a
+build without `regex` is refused by one with it, cleanly and by name. The
+simulator reads that program back out of a Lua string, so it bounds-checks
+every operand it reads and a forged program fails to match rather than
+reaching memory.
+
+**What it costs an instance, and what that cost broke.** Every guest gets
+the library whether it uses it or not, and doc/Benchmarks.md counts memory
+per agent, so this is a number rather than a shrug: **about a kilobyte**,
+measured with `make footprint` (a parked instance moves from 82 KB to 83
+KB). It was two, until the method set stopped being a second table of
+closures over the same C functions and became the module table itself --
+which the argument order already made possible, since `re:find(s)` and
+`regex.find(re, s)` are one call. The metatable is built on first ask
+rather than at `luaopen`, so an instance handed the library and never
+compiling a pattern pays for one table.
+
+That is also what `dvs_check`'s flat-budget test found, and the finding is
+worth more than the kilobyte. It spawned a child under `memory_kb = 77` --
+which reads like a tight budget and is in fact *below what an instance
+already holds* at that moment, some 87 KB of uncollected library setup. It
+passed because a collection happened to run inside `dv_load` and brought
+the figure under the cap mid-load. So the number pinned the collector's
+timing, not the budget form the test is named for; one more library moved
+it by a kilobyte and the test went red for an unrelated reason. It now
+uses a budget with headroom, and says why in the file. The edge underneath
+it is real and is recorded there too: `dv_set_budget` accepts a memory
+limit below current usage, and the failure surfaces later, as "not enough
+memory" from whatever allocates next.
+
+**The literal is `` ` `` and not `r"..."`**, which is what was asked for,
+because `r"..."` is a *function call* in stock Lua and source compatibility
+is not negotiable. The backtick appears nowhere in upstream's lexer, so it
+is a syntax error there, and it lets the content be raw -- which is the
+whole value of the notation, since `\d` in a Lua string is already an
+error. `` `` `` is one backtick; a newline ends the literal with an error
+rather than swallowing the file.
+
+It desugars to `_ENV.regex.compile("...")`, the shape `defer` already uses
+for `_ENV.setmetatable`, so the feature is two lexer cases and one
+expression form and nothing in `dregex.c` is reachable from the parser.
+Compiling once rather than once per evaluation is `regex.compile`'s job: a
+bounded cache keyed by the pattern text, which is why a literal in a loop
+costs a hash lookup. The alternative -- a compiled value in the constant
+table -- is not one of Lua's constant types and could not be dumped.
+
+It is a *primary* expression rather than a simple one, so `` `\d+`:match(s) ``
+parses without parentheses. A string literal needs them and keeps needing
+them; a regex exists to have a method called on it, and requiring `( )`
+around every use would make the notation cost more than it saves.
+
+**Open, and deliberately not done here.** A malformed pattern is an error
+where the literal is evaluated, not where the file is compiled, because
+catching it at compile time means putting the regex compiler into the
+`luac`-only build -- the one place `dregex.c` is deliberately not linked.
+Doing it properly is a separate change: a validation entry point outside
+the `MAKE_LUAC` guard, and a parser that can call it. The other open item
+is `string.find(s, re)` accepting a compiled regex, which would put
+`lstrlib.c` into the core patch series for a convenience the `re:find(s)`
+shape already covers.
 
 ### Compound assignment
 

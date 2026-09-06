@@ -10,6 +10,117 @@ Note that tags carry suffixes (`_release`, `_build1`) because this
 repository also holds upstream Lua's tags, and a bare `v5.4.7` is
 Lua's rather than Diluvium's.
 
+## [5.5.1_build13] - unreleased (prerelease)
+
+`v5.5.1_build13` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**Regular expressions, at the language level and as a library.**
+A backtick literal is a compiled regular expression -- `` `(\d+)-(\d+)` ``
+-- and `regex` is the library behind it, with `find`, `match`, `gmatch`,
+`gsub` and `split` shaped like their `string.*` counterparts. The engine
+is a Thompson NFA with Pike's submatch tracking, so every match is
+linear in the subject and nothing backtracks: `(a+)+b` against sixty
+`a`s takes sixty steps rather than longer than the universe has existed.
+That is a correctness property here and not a performance one -- a match
+runs inside one C call, where the instruction budget cannot see it.
+
+### Added
+
+- **The `regex` library.** Compiled regular expressions as ordinary Lua
+  values:
+
+  ```lua
+  local re = regex.compile("(\\w+)@(\\w+\\.\\w+)")
+  re:find("mail bob@example.com now")   --> 6  20  bob  example.com
+  re:gsub(text, "%2!%1")
+  for user, host in re:gmatch(text) do ... end
+  ```
+
+  The pattern comes first in every function, so `re:find(s)` and
+  `regex.find(re, s)` are one call, and a string pattern is compiled
+  through a bounded cache rather than on every call. Result shapes are
+  `string.find`'s and `string.match`'s, and the scanning rule is
+  `string.gsub`'s to the letter -- a match that ends where the last one
+  ended is not a match -- so `regex.gsub("a*", "aaa", "<%0>")` is
+  `<aaa>`, exactly as the Lua-pattern version is.
+
+  Syntax is the RE2/Go subset of PCRE: classes, alternation, greedy and
+  lazy quantifiers, `{n,m}`, capturing, plain and named groups, anchors,
+  word boundaries, and the `(?i)` `(?s)` `(?m)` flags. Backreferences,
+  lookahead, lookbehind and `\p{...}` are refused **by name, with the
+  reason**, because none of them can be had at O(length x pattern).
+  `doc/Guide.md` has the syntax table, the limits (all refusals, never
+  truncations) and the two places this deliberately differs from Perl.
+- **A regex literal.** `` `\d+` `` is `regex.compile("\d+")`, with the
+  text taken raw -- which is the point, since `"\d"` is not a valid Lua
+  string escape and every pattern would otherwise be written doubled.
+  Double a backtick to include one; a literal may not cross a line.
+
+  It is a *primary* expression, so `` `\d+`:match(s) `` needs no
+  parentheses. It is a backtick and not `r"..."` because `r"..."` is a
+  function call in stock Lua, and every construct this fork adds has to
+  be a syntax error there.
+- **`test/test_regex.lua`**, 112 checks, in `test/run_tests.sh`. It pins
+  the two properties that are easy to lose: that the scanning rule still
+  agrees with `string.gsub` and `string.gmatch` case by case, and that
+  the patterns which make a backtracker explode still return in
+  microseconds. `test/dsnap_check.c` gains the round trip that says a
+  compiled regex survives hibernation.
+
+### Changed
+
+- **The snapshot permanents set gained `regex`.** `DS_MODULES` names its
+  module functions, and `dregex.mt` names the shared metatable -- for the
+  same reason `dendpoint.refmt` is named: a regex is recognised by
+  rawequal against that table, so a copy restored by content would be a
+  regex every method refused to run. The consequence for existing
+  snapshots is under "upgrading".
+- **A compiled regex is a table holding a byte string**, not a userdata,
+  and that is forced rather than chosen: `dsnap.c` refuses to capture a
+  userdata (10.7 item 2), so an engine that put its compiled program in
+  one would have made any agent holding a regex uncapturable -- the exact
+  shape hibernation exists for. The simulator therefore reads a program a
+  Lua program could have written, and bounds-checks every operand: a
+  forged program fails to match rather than reaching memory.
+- **What it costs an instance: about a kilobyte.** Every guest is handed
+  the library whether it uses it or not, and doc/Benchmarks.md counts
+  memory per agent, so the number is measured rather than waved at: a
+  parked instance moves from 82 KB to 83 KB under `make footprint`. The
+  method set is the module table itself rather than a second table of
+  closures over the same C functions -- which the argument order already
+  allowed, since `re:find(s)` and `regex.find(re, s)` are one call -- and
+  the metatable is built on first use rather than at `luaopen`.
+- **`dvs_check`'s flat-budget test no longer pins the collector's
+  timing.** It spawned a child under `memory_kb = 77`, which reads like a
+  tight budget and is below what an instance already holds when the
+  budget is set -- some 87 KB of uncollected library setup. It passed
+  because a collection happened to run inside `dv_load`. One more library
+  moved that by a kilobyte and the test went red for a reason unrelated
+  to the budget *form* it is named for. It now uses a budget with
+  headroom and records why, along with the edge underneath it:
+  `dv_set_budget` accepts a memory limit below current usage, and the
+  failure surfaces later as "not enough memory" from whatever allocates
+  next.
+- **F-string format specifications are documented properly.** No code
+  change -- `$"total: ${total::%.2f}"` has worked since the specs landed
+  -- but the README and `doc/Guide.md` showed one example and left width,
+  alignment, `%q` and the rest to be inferred from `string.format`.
+
+### Upgrading
+
+Nothing to do for a program: `regex` is a new global, the literal is new
+syntax that was a syntax error before, and no existing construct changed
+meaning. Bytecode is unaffected and the format byte does not move.
+
+**A snapshot taken by an earlier build will not restore into this one.**
+`regex` joins the snapshot permanents (its module functions by name, and
+the shared metatable as `dregex.mt`), which changes the permanents
+fingerprint that `doc/Messaging.md` 10.4 requires to be identical on
+save and restore. The refusal is clean and says so by name; there is no
+silent misread. Drain or replay before upgrading a host that holds
+snapshots.
+
+
 ## [5.5.1_build12p1] - 2026-09-02
 
 `v5.5.1_build12p1` &middot; Lua 5.5.1 &middot; bytecode format `0x46`

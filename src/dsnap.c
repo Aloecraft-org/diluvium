@@ -19,6 +19,7 @@
 #include "dhash.h"
 #include "dmsgpack.h"
 #include "dqueue.h"
+#include "dregex.h"
 #include "dshim.h"
 #include "dtask.h"
 #include "dsnap.h"
@@ -152,7 +153,8 @@ static const char DS_PERM_FP = 0;       /* the cached fingerprint hex */
 */
 static const char *const DS_MODULES[] = {
   "coroutine", "debug", "io", "math", "os", "string", "table", "utf8",
-  "msgpack", "queue", "endpoint", "bytes", "json", "time", "host", NULL
+  "msgpack", "queue", "endpoint", "bytes", "json", "regex", "time", "host",
+  NULL
 };
 
 
@@ -277,6 +279,17 @@ LUA_API void diluvium_snap_permanents (lua_State *L) {
   */
   diluvium_endpoint_pushrefmt(L);
   ds_perm_put(L, nameidx, validx, "dendpoint.refmt");
+
+  /*
+  ** The compiled-regex metatable, for the same reason and with the same
+  ** consequence if it were left out: 'regex' recognises one of its own objects
+  ** by rawequal against this table, so a copy restored by content would be a
+  ** regex every method refused to run. Its '__index' carries the methods, which
+  ** the module walk above has already named one by one, and none of it is
+  ** program state.
+  */
+  diluvium_regex_pushmt(L);
+  ds_perm_put(L, nameidx, validx, "dregex.mt");
 
   /* The string metatable. Reachable from any string through '__index', so a
      program that keeps 'getmetatable("")' would otherwise serialize a table full
