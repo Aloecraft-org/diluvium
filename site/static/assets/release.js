@@ -1,11 +1,12 @@
 // Reading the release mirrors.
 //
-// /release/ and /drt/ are generated on the server by script/release_mirror.py
-// in lk2, from changelog.json in each repository's tree: releases.json is the
-// index, latest/ a symlink to whichever tag the changelog marks, and every
-// tag directory carries the release's own SHA256SUMS.txt and BUILDINFO.txt.
-// The page reads the mirrors rather than the GitHub API so it costs no rate
-// limit and keeps working when GitHub does not.
+// Every Aloecraft release mirror lives under software.aloecraft.org/releases/,
+// one directory per entry in lk2's manifest/mirrors.json, generated on the
+// server by script/release_mirror.py from changelog.json in each repository's
+// tree: releases.json is the index, latest/ a symlink to whichever tag the
+// changelog marks, and every tag directory carries the release's own
+// SHA256SUMS.txt and BUILDINFO.txt. The page reads the mirrors rather than the
+// GitHub API so it costs no rate limit and keeps working when GitHub does not.
 //
 // Surface:
 //   RELEASE_BASE, DRT_BASE, KERNEL_URL     where things are
@@ -16,12 +17,12 @@
 
 const LOCALHOST = /^(localhost|127\.0\.0\.1|\[::1\])$/;
 
-// In production both mirrors are same-origin: nginx roots the vhost at
-// /var/www/html/diluvium/ and the mirrors write into release/ and drt/
-// underneath it. For development, a dev server on localhost may point at the
-// deployed ones -- they send Access-Control-Allow-Origin: * -- with
+// The mirrors are cross-origin, and the /releases/ tree sends
+// Access-Control-Allow-Origin: * so this page can read them. For
+// development, a page served on localhost may be pointed at a copy of them
+// -- the smoke test stages one same-origin and opens
 //
-//   http://localhost:8081/?release=https://diluvium.aloecraft.org/release&drt=https://diluvium.aloecraft.org/drt
+//   http://127.0.0.1:8099/?release=/releases/diluvium&drt=/releases/diluvium-drt
 //
 // Honoured on localhost only: a link to the real site must not be able to
 // point the kernel loader, or the download links, anywhere else.
@@ -33,8 +34,8 @@ function mirrorBase(path, param) {
   return path;
 }
 
-export const RELEASE_BASE = mirrorBase('/release', 'release');
-export const DRT_BASE = mirrorBase('/drt', 'drt');
+export const RELEASE_BASE = mirrorBase('https://software.aloecraft.org/releases/diluvium', 'release');
+export const DRT_BASE = mirrorBase('https://software.aloecraft.org/releases/diluvium-drt', 'drt');
 
 // It must be libdiluvium_wasi.wasm: diluvium_wasi.wasm is a command module
 // whose _start runs the interpreter against stdin, and

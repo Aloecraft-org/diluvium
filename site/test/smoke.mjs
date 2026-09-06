@@ -5,7 +5,9 @@
 //   SITE=https://diluvium.aloecraft.org npm test    against the deployed site
 //
 // Needs `../site/build.sh` to have run (it serves _out/) and, for the local
-// case, `npm run stage-mirror` to have copied the kernel into _out/release/.
+// case, `npm run stage-mirror` to have copied the mirrors into _out/releases/;
+// the page is then opened with ?release=&drt= pointing at those copies, which
+// release.js honours on localhost only.
 // It asserts on behaviour that has actually broken: doubled output (the
 // runtime's onOutput callback firing twice), continuation prompts not opening
 // on unfinished input, an error killing the session instead of being caught
@@ -62,7 +64,10 @@ const consoleErrors = [];
 page.on('console', (m) => { if (m.type() === 'error') consoleErrors.push(m.text()); });
 page.on('pageerror', (e) => consoleErrors.push(`pageerror: ${e.message}`));
 
-await page.goto(base, { waitUntil: 'domcontentloaded' });
+const url = process.env.SITE
+  ? base
+  : `${base}/?release=/releases/diluvium&drt=/releases/diluvium-drt`;
+await page.goto(url, { waitUntil: 'domcontentloaded' });
 await page.waitForFunction(
   () => /ready|unavailable/.test(document.getElementById('repl-status')?.textContent || ''),
   { timeout: 60000 },

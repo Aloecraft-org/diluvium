@@ -57,7 +57,7 @@ TEMPLATE_MUST_HAVE = [
     ('id="install-cmd"', "the one-liner the hero's copy button copies"),
     ('curl -fsSL https://diluvium.aloecraft.org/start | sh',
      "the install one-liner, at the URL start.sh is served from"),
-    ('curl -fsSL https://diluvium.aloecraft.org/drt/latest/install.sh | sh',
+    ('curl -fsSL https://software.aloecraft.org/releases/diluvium-drt/latest/install.sh | sh',
      "the DRT install one-liner, at the URL DRT's mirror serves it from"),
     ('href="assets/vendor/xterm.css"', "xterm's stylesheet; the terminal is unusable without it"),
     ('href="assets/styles.css"', "the page's stylesheet"),
@@ -73,8 +73,10 @@ TEMPLATE_MUST_HAVE = [
      "the page's own code, a module so it can import the REPL pieces "
      "without a bundler"),
     ('href="/lab/"', "the way in to the Lab"),
-    ('href="/release/"', "the way in to the release mirror"),
-    ('href="/drt/"', "the way in to DRT's release mirror"),
+    ('href="https://software.aloecraft.org/releases/diluvium/"',
+     "the way in to the Diluvium release mirror, which lives on "
+     "software.aloecraft.org with every other mirror"),
+    ('href="https://software.aloecraft.org/releases/diluvium-drt/"', "the way in to DRT's release mirror"),
     ('rel="icon"', "the favicon; without it every visit 404s once"),
 ]
 
@@ -85,6 +87,10 @@ TEMPLATE_MUST_NOT_HAVE = [
      "Link the Guide on GitHub instead"),
     (r'(src|href)="[^"]*\?v=',
      "a pre-stamped URL; render.py stamps at build time and would stamp it twice"),
+    (r'diluvium\.aloecraft\.org/(release|drt)\b|href="/(release|drt)/"',
+     "a mirror address on this vhost. The mirrors moved to "
+     "software.aloecraft.org/releases/<name>/: /release/ is retiring behind "
+     "the Lab and /drt/ is reserved for a page of DRT's own"),
 ]
 
 # (earlier, later): script order that has to hold. app.js is a module and
@@ -121,13 +127,15 @@ SOURCE_MUST_HAVE = [
      "prints nothing"),
     ("app.js", "Prism.highlightAll()",
      "with data-manual on Prism's script tag, nothing else highlights the samples"),
+    ("release.js", "https://software.aloecraft.org/releases/diluvium-drt",
+     "DRT's mirror, read cross-origin for the version, the downloads and BUILDINFO.txt"),
 ]
 
 # The one URL the installer is built around. Everything else in start.sh
 # is an override.
 INSTALLER_MUST_HAVE = [
     ("#!/bin/sh", "POSIX sh, because it runs on whatever /bin/sh the machine has"),
-    ('BASE="${DILUVIUM_BASE:-https://diluvium.aloecraft.org/release}"',
+    ('BASE="${DILUVIUM_BASE:-https://software.aloecraft.org/releases/diluvium}"',
      "the mirror the installer downloads from by default"),
 ]
 

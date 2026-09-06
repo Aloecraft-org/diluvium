@@ -43,9 +43,11 @@ test/stage-mirror.mjs copies enough of the deployed mirrors into _out/ for it
 
 ## Three projects, one page
 
-DRT shares this landing page: `/drt/` on this vhost is only where its
-artifacts live (the second release mirror), and the DRT section and its
-install line are here. dollup has its own page at `dollup.aloecraft.org`;
+DRT shares this landing page: the DRT section and its install line are
+here, and its artifacts live with every other mirror at
+`software.aloecraft.org/releases/diluvium-drt/`. `/drt/` on this vhost is
+reserved for a page of DRT's own, the day it has one. dollup has its own
+page at `dollup.aloecraft.org`;
 this one carries the family strip under the hero, a section, and the
 install line, so a reader arriving for any of the three can see the other
 two. Links to the sibling sites and to the software portal are plain
@@ -75,14 +77,21 @@ that forgets any of them:
 
 ## The release mirrors
 
-Nothing here vendors a runtime. `/release/` and `/drt/` are generated on
-the server by `script/release_mirror.py` in lk2 from `changelog.json` in
-the diluvium and diluvium-drt trees. The page reads each mirror's
-`releases.json` for the version badge and the download links, and DRT's
-`latest/BUILDINFO.txt` for the connector list, so what the page says a
-release carries is read off the artifact rather than written here.
-`latest/` is a symlink the mirror maintains, so the kernel URL never needs
-updating when a release is cut.
+Nothing here vendors a runtime. Every Aloecraft release mirror lives under
+`software.aloecraft.org/releases/<name>/`, one directory per entry in lk2's
+`manifest/mirrors.json`, generated on cloud1 by `script/release_mirror.py`
+from `changelog.json` in each repository's tree. The page reads
+`releases/diluvium/` and `releases/diluvium-drt/` cross-origin (the tree
+sends `Access-Control-Allow-Origin: *`): each mirror's `releases.json` for
+the version badge and the download links, and DRT's `latest/BUILDINFO.txt`
+for the connector list, so what the page says a release carries is read off
+the artifact rather than written here. `latest/` is a symlink the mirror
+maintains, so the kernel URL never needs updating when a release is cut.
+The installer at `/start` downloads from the same mirror.
+
+`diluvium.aloecraft.org/release/` and `/drt/` were the mirrors' first
+addresses. `/release/` is retiring behind the Lab and `/drt/` is gone;
+`check.py` refuses either in the template.
 
 ## No bundler, and what replaced it
 
@@ -112,19 +121,16 @@ dark in both themes, the way an editor's terminal pane does.
 ./site/build.sh
 cd site
 npm install                      # playwright, for the test; nothing else
-npm run stage-mirror             # copy the real kernel and indexes into _out/
-npm run serve                    # http://localhost:8081/
+npm run stage-mirror             # copy the real kernel and indexes into _out/releases/
+npm run serve                    # http://localhost:8081/?release=/releases/diluvium&drt=/releases/diluvium-drt
 npm test                         # build must have run; drives the REPL in Chromium
 ```
 
-Against the deployed mirrors instead of a staged copy, on localhost only:
-
-```
-http://localhost:8081/?release=https://diluvium.aloecraft.org/release&drt=https://diluvium.aloecraft.org/drt
-```
-
-`/release/` and `/drt/` send `Access-Control-Allow-Origin: *`, so that
-works from a dev server. To test what is deployed rather than a local build:
+The build clears `_out/`, so stage the mirrors again after every build.
+Without the `?release=&drt=` query the page reads the real mirrors, which
+works from a dev server too. `MIRROR=file:///path/diluvium` and
+`DRT_MIRROR=file:///path/diluvium-drt` stage from local copies with no
+network at all. To test what is deployed rather than a local build:
 
 ```sh
 SITE=https://diluvium.aloecraft.org npm test
