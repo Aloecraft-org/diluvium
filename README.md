@@ -224,8 +224,8 @@ See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#rep
 🐝 **Thousands of Isolated Agents, In One Process**
 
 Every agent is a sealed instance with its own heap, its own capability set, and its
-own instruction and memory budget. An idle one costs about **73 KB awake and 1.4 KB
-hibernated** — roughly 14,600 per GiB resident, or 750,000 hibernated — and an agent
+own instruction and memory budget. An idle one costs about **90 KB awake and 1.4 KB
+hibernated** — roughly 11,700 per GiB resident, or 750,000 hibernated — and an agent
 parked on its inbox can be swapped out to a snapshot and woken by the next message
 addressed to it.
 

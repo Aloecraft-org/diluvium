@@ -114,12 +114,18 @@ before waiting.
 Reference machine: 4-vCPU Intel Xeon @ 2.80 GHz, 16 GiB, Linux, gcc 13.3 at
 `-O2`. Single run, `--scale 1`.
 
+The **byte and count rows were re-measured at 5.5.1_build13**; the timings are
+still the reference machine's. That split is not laziness: `swarm_bench` says
+of its own output that counts and byte figures are deterministic and comparable
+across machines while times are advisory, so a byte figure re-measured anywhere
+belongs in this table and a time does not.
+
 | quantity | value |
 |---|---|
-| resident memory per awake agent | ~73 KB guest heap (~90 KB RSS) |
+| resident memory per awake agent | ~90 KB guest heap (~109 KB RSS) |
 | hibernated snapshot per agent | ~1.4 KB |
-| resident / hibernated ratio | ~51× |
-| agents per GiB, awake | ~14,600 |
+| resident / hibernated ratio | ~64× |
+| agents per GiB, awake | ~11,700 |
 | agents per GiB, hibernated | ~750,000 |
 | slot table, per slot | 1,632 B, allocated up front, used or not |
 | hibernate | ~284 µs |
@@ -142,8 +148,8 @@ halves. That is the single-threaded host, not the workload.
 Three costs sit outside the per-agent figure, and they are the ones a capacity
 plan gets wrong: the slot table (`max_instances` × 1,632 B — a swarm sized at
 100,000 instances reserves 156 MB before a single program loads), the
-process's overhead beyond the guest heap (RSS ≈ 90 KB against the heap's
-73 KB), and the supervisor, which holds one copy of the worker's source per
+process's overhead beyond the guest heap (RSS ≈ 109 KB against the heap's
+90 KB), and the supervisor, which holds one copy of the worker's source per
 queued spawn request.
 
 ## Reading the numbers
@@ -275,7 +281,7 @@ target machine, then:
 3. Requests per second ≈ 1,000,000 / (µs per op × ops per request). Hold
    roughly 30% headroom for the OS, the front-end, and noisy neighbours on
    shared cores.
-4. Memory: awake agents × ~73 KB, plus parked agents × ~1.4 KB, plus
+4. Memory: awake agents × ~90 KB, plus parked agents × ~1.4 KB, plus
    `max_instances` × 1,632 B for the table. Confirm all three from `density`
    on your box.
 

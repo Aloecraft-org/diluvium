@@ -172,6 +172,41 @@ releases:
         change -- `$"total: ${total::%.2f}"` has worked since the specs landed
         -- but the README and `doc/Guide.md` showed one example and left width,
         alignment, `%q` and the rest to be inferred from `string.format`.
+      - |
+        **The per-agent memory figures are re-measured, and one of them had
+        drifted 23%.** `doc/Benchmarks.md` advertised ~73 KB of guest heap per
+        awake agent and ~14,600 agents per GiB; the same harness, unchanged
+        since those numbers were written, now reports **~90 KB and ~11,700**.
+        About 1 KB of that is this release's `regex` library. The rest
+        accumulated across earlier builds and nobody re-ran the benchmark, so
+        the README, the guide and the benchmark doc had all been reprinting a
+        figure that stopped being true some builds ago. Corrected in all four
+        places. The hibernated figures did not move -- still ~1.4 KB and
+        ~750,000 per GiB -- because a snapshot carries program state and not
+        the library tables an instance is handed.
+
+        Only the byte and count rows were re-measured; the timings in that
+        table are still the reference machine's, because `swarm_bench` says
+        byte figures are comparable across machines and times are not.
+    known_issues:
+      - |
+        **Carried forward from 5.5.1_build12p1, because it is still true: a
+        guest that catches its budget error in a loop still spins.** build12p1
+        bounded the *work* a guest can do past its budget; it did not make the
+        error uncatchable and does not return control to the host.
+
+        ```lua
+        while true do pcall(function() while true do end end) end
+        ```
+
+        still never leaves `dv_run` -- each catch buys `DV_HOOK_STEP`
+        instructions and the loop repeats. Lua has no uncatchable error.
+        Closing it needs a `pcall`/`xpcall` that refuses to catch once
+        `exceeded` is set, which is a core-file patch and so a
+        `CORE_PATCH_ALLOWLIST` decision, or a process-level watchdog, since a
+        host inside `dv_run` has no way in. The practical bound today is
+        operational: run the host under a supervisor that restarts it, and
+        alert on the restart count rather than absorbing it.
   - version: "5.5.1_build12p1"
     tag: v5.5.1_build12p1
     date: 2026-09-02

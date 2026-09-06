@@ -15,8 +15,8 @@ work it describes.
 
 ## Verified state
 
-Against `v5.5.1_build2` (Lua 5.5.1 fork point `7579fc9`), suite green at
-39 passed / 0 failed / 6 skipped on linux-x86_64 and macos-arm64, and
+Against `v5.5.1_build13` (Lua 5.5.1 fork point `7579fc9`), suite green at
+53 passed / 0 failed / 3 skipped on linux-x86_64 and macos-arm64, and
 again under ASan and UBSan with no report.
 
 `5.5.1_build1` is the first release of the 5.5 line and is named to stay
