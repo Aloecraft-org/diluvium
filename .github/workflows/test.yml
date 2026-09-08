@@ -297,6 +297,16 @@ jobs:
       - name: Run suite
         run: ./test/run_tests.sh --bin dist/diluvium_debug --timeout 300
 
+      # Stage 0's acceptance criterion (A2): a corpus of array programs
+      # produces bit-identical output on every target. It prints nothing
+      # but IEEE bit patterns, so a difference between this job's two
+      # architectures -- x86-64 and aarch64 -- is a difference in the
+      # arithmetic and not in how a double was formatted. This is the
+      # step that would have caught a missing -ffp-contract=off if the
+      # canary above somehow had not.
+      - name: The numeric corpus produces the same bits here
+        run: ./script/numeric_corpus.sh --bin dist/diluvium_debug
+
       # The per-file build, where a flag that only the amalgamation received
       # would show up as a difference between two objects.
       - name: Build the platform target with the feature on

@@ -21,6 +21,7 @@
 #include "djson.h"
 #include "dregex.h"
 #include "dtime.h"
+#include "dnumeric.h"
 #include "dhostlib.h"
 
 
@@ -46,6 +47,13 @@ static const luaL_Reg diluvium_libs[] = {
   {"json", luaopen_djson},
   {"regex", luaopen_dregex},
   {"time", luaopen_dtime},
+#if defined(DV_NUMERIC)
+  /* Only where the feature is built. A program that needs arrays on a
+     build without them finds no 'array' global, which is the same shape
+     of failure the numeric spec's section 2 asks for: by name, at the
+     point of use, rather than a wrong answer. */
+  {"array", luaopen_dnumeric},
+#endif
   {"host", luaopen_dhostlib},
   {NULL, NULL}
 };

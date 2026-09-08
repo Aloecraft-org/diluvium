@@ -56,6 +56,14 @@ guard_no_test_libs() {
       'assert(package.loadlib("libs/lib1.so", "*"))') >/dev/null 2>&1
 }
 
+# test_array needs the 'array' library, which is behind the 'numeric' build
+# feature and absent from a default build. Checked by asking the binary, for
+# the same reason as above: what is on disk says nothing about how it was
+# compiled. 'assert' and a normal exit, not os.exit -- see the note above.
+guard_no_numeric() {
+  ! "$BIN" -e 'assert(array)' >/dev/null 2>&1
+}
+
 # literals asserts exact float formatting. It passes on glibc, which is what CI
 # runs; musl and macOS are simply unverified, and claiming otherwise in either
 # direction would be inventing a result.
@@ -96,6 +104,7 @@ secure_function|run||
 sort|run||
 strings|run||
 test_analysis|run||
+test_array|run||needs the 'numeric' build feature: build with NUMERIC=1|guard_no_numeric
 test_bytes|run||
 test_json|run||
 test_time|run||

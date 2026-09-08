@@ -487,6 +487,13 @@ dtask_check: _build_step0
 # work. The flags are spelled out here rather than taken from NUMERIC_FPFLAGS
 # for the same reason -- that variable is empty in a default build, and an
 # empty flag list is precisely what this must not be run with.
+# Stage 0's acceptance criterion: the corpus produces the same bits on
+# every target (A2). Needs the numeric feature, so it builds its own
+# binary rather than relying on whatever 'dist/' happens to hold.
+numeric_corpus:
+	@$(MAKE) --no-print-directory NUMERIC=1 test_build
+	@$(CURDIR)/script/numeric_corpus.sh --bin $(TEST_BIN)
+
 # Every syntax form this fork adds is a parse error in stock Lua 5.5 (3.6).
 # Needs the fork-point commit in the history, so a shallow clone must be
 # deepened before this runs.

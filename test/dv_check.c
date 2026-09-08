@@ -2606,23 +2606,34 @@ static void numeric_surface (void) {
   ok(dv_numeric_touched_fast(NULL) == 0, "a NULL instance has touched nothing");
 
   {
-    /* The copy path. Eight bytes of f64, adopted, and the value that lands on
-       the stack is a string of the same bytes until the 'array' type exists.
-       The buffer is released by the call either way, so there is no free
-       here -- running this under the sanitizers is what checks that claim. */
+    /* Eight bytes of f64, handed over. With the feature built this is a
+       real adoption and the return is 0; without it the bytes reach the
+       guest as a string copy and the return is 1. Either way the buffer
+       is released by the call, so there is no free here -- running this
+       under the sanitizers is what checks that claim. */
     double one = 1.0;
     void *buf = malloc(sizeof(one));
     if (buf == NULL) { ok(0, "malloc for the adopt path"); dv_free(inst); return; }
     memcpy(buf, &one, sizeof(one));
+#if defined(DV_NUMERIC)
+    eq_i(dv_array_adopt(inst, DV_DTYPE_F64, sizeof(one), buf), 0,
+         "an f64 buffer is adopted without a copy");
+#else
     eq_i(dv_array_adopt(inst, DV_DTYPE_F64, sizeof(one), buf), 1,
-         "an f64 buffer is copied, not adopted, before the array type exists");
+         "an f64 buffer is copied into a string without the feature");
+#endif
   }
   {
     /* Zero length is a legitimate column, not an error. */
     void *buf = malloc(1);
     if (buf != NULL)
+#if defined(DV_NUMERIC)
+      eq_i(dv_array_adopt(inst, DV_DTYPE_U8, 0, buf), 0,
+           "an empty buffer is accepted");
+#else
       eq_i(dv_array_adopt(inst, DV_DTYPE_U8, 0, buf), 1,
            "an empty buffer is accepted");
+#endif
   }
   {
     /* The invalid-argument returns. Ownership does not transfer in any of
@@ -2650,6 +2661,62 @@ static void numeric_surface (void) {
   }
   dv_free(inst);
 }
+
+
+#if defined(DV_NUMERIC)
+/*
+** A kernel charges the instruction budget by element count (3.4).
+**
+** The program below runs a handful of VM instructions and touches a
+** million elements, so a budget it exceeds can only have been spent by
+** the kernel: the instruction hook fires every 1000 VM instructions and
+** this program never reaches its first firing. One instruction per 64
+** elements makes the million cost about 15,600, so 4,000 is short and
+** 400,000 is ample.
+*/
+static void a_kernel_charges_the_budget_by_elements (void) {
+  static const char *src =
+    "local a = array.zeros('f64', 1000000) return array.sum(a)";
+  {
+    dv_instance *inst = dv_new(NULL);
+    dv_waitset ws;
+    uint64_t used = 0;
+    if (inst == NULL) { ok(0, "an instance"); return; }
+    dv_set_budget(inst, 4000, 0);
+    dv_load(inst, (const uint8_t *)src, strlen(src), "=kernel");
+    memset(&ws, 0, sizeof(ws));
+    ok(dv_run(inst, &ws) == DV_ERROR,
+       "a kernel too big for the budget stops with an error");
+    ok(dv_exceeded(inst), "and the instance says it was the budget");
+    dv_usage(inst, &used, NULL);
+    ok(used >= 4000, "having charged what it processed");
+    {
+      const char *msg = dv_last_error(inst);
+      ok(msg != NULL && strstr(msg, "budget") != NULL,
+         "with a message naming the budget");
+    }
+    dv_free(inst);
+  }
+  {
+    /* The control: the same program, a budget large enough, no error.
+       Without it the test above would pass just as well if the array
+       library were simply broken. */
+    dv_instance *inst = dv_new(NULL);
+    dv_waitset ws;
+    uint64_t used = 0;
+    if (inst == NULL) { ok(0, "an instance"); return; }
+    dv_set_budget(inst, 400000, 0);
+    dv_load(inst, (const uint8_t *)src, strlen(src), "=kernel");
+    memset(&ws, 0, sizeof(ws));
+    ok(dv_run(inst, &ws) == DV_DONE, "and finishes under a budget that fits");
+    ok(!dv_exceeded(inst), "without reporting one");
+    dv_usage(inst, &used, NULL);
+    ok(used >= 1000000 / 64,
+       "having still charged roughly one instruction per 64 elements");
+    dv_free(inst);
+  }
+}
+#endif
 
 
 int main (void) {
@@ -2707,6 +2774,9 @@ int main (void) {
 
   printf("\n=== the numeric surface (Plan-2026-09 3.1) ===\n");
   numeric_surface();
+#if defined(DV_NUMERIC)
+  a_kernel_charges_the_budget_by_elements();
+#endif
 
   printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");
   a_parked_instance_snapshots_and_wakes();
