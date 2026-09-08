@@ -402,6 +402,16 @@ LUA_API void diluvium_budget_charge (lua_State *L, void *cookie,
 
 
 /*
+** A fast-tier kernel ran. Sticky; see the header for why.
+*/
+LUA_API void diluvium_numeric_touched (lua_State *L) {
+  dv_instance *inst = (dv_instance *)diluvium_budget_open(L);
+  if (inst != NULL)
+    inst->numeric_touched_fast = 1;
+}
+
+
+/*
 ** Bytes per element, or 0 for a dtype this build does not know.
 **
 ** The dispatch point for element types. Every place that has to reason about a

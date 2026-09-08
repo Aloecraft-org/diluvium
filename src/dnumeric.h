@@ -80,4 +80,19 @@ LUA_API void diluvium_budget_charge (lua_State *L, void *cookie,
                                        uint64_t n);
 
 
+/*
+** Record that something ran at DV_TIER_FAST, which is what
+** 'dv_numeric_touched_fast' reports.
+**
+** Sticky and one-way: the flag is the audit trail's answer to "was this
+** run reproducible", and a call that could clear it would answer that
+** wrongly. No backend calls this yet -- the portable kernels are all
+** reproducible tier by construction -- so the only caller today is the
+** test hook in dnumeric.c, which exists so the wiring from a kernel to
+** the host's question is proved before there is a kernel to prove it
+** with. Implemented in dv.c, for the same reason as the two above.
+*/
+LUA_API void diluvium_numeric_touched (lua_State *L);
+
+
 #endif

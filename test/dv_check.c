@@ -2719,6 +2719,71 @@ static void a_kernel_charges_the_budget_by_elements (void) {
 #endif
 
 
+#if defined(DV_NUMERIC)
+/*
+** The fast-tier flag, from a guest all the way to the host's question
+** (Plan-2026-09 A3).
+**
+** No fast backend exists -- every portable kernel is reproducible tier by
+** construction -- so what is checked is the *wiring*: a kernel that
+** declared itself fast would set the flag, the flag is sticky, and
+** 'dv_numeric_touched_fast' is what a host reads it through. The guest
+** calls 'array.__mark_fast', which exists only in the debug build and
+** does exactly what such a kernel would do on entry.
+**
+** Whether that hook is there is a property of the *runtime's* build, not
+** of this file's: 'make dv_check' compiles the amalgamation with
+** ltests.h and has it, and the sanitizer target compiles the same file
+** without and does not. So it is probed rather than assumed, and the
+** absence is reported as a skip -- a check that silently did nothing
+** would be worse than no check.
+*/
+static void the_fast_tier_flag_reaches_the_host (void) {
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  static const char *src =
+    "assert(array.__mark_fast, 'no fast-tier mock in this build') "
+    "array.__mark_fast() "
+    "array.__mark_fast() "                      /* twice: it is not a toggle */
+    "return array.sum(array.ones('f64', 8))";
+  dv_status st;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  ok(dv_numeric_touched_fast(inst) == 0, "a fresh instance has touched nothing");
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=fast");
+  memset(&ws, 0, sizeof(ws));
+  st = dv_run(inst, &ws);
+  if (st == DV_ERROR) {
+    const char *msg = dv_last_error(inst);
+    if (msg != NULL && strstr(msg, "no fast-tier mock") != NULL) {
+      printf("[SKIP] the fast-tier flag: this runtime build has no mock "
+             "(not an ltests.h build)\n");
+      dv_free(inst);
+      return;
+    }
+  }
+  ok(st == DV_DONE, "the program runs");
+  ok(dv_numeric_touched_fast(inst) == 1,
+     "and the host sees that something ran at the fast tier");
+  ok(dv_numeric_touched_fast(inst) == 1, "and keeps seeing it: the flag sticks");
+  dv_free(inst);
+  {
+    /* A second instance is not contaminated by the first: the flag is
+       per-instance, which is what makes it an audit trail rather than a
+       process-wide warning. */
+    dv_instance *clean = dv_new(NULL);
+    static const char *plain = "return array.sum(array.ones('f64', 8))";
+    if (clean == NULL) { ok(0, "a second instance"); return; }
+    dv_load(clean, (const uint8_t *)plain, strlen(plain), "=plain");
+    memset(&ws, 0, sizeof(ws));
+    dv_run(clean, &ws);
+    ok(dv_numeric_touched_fast(clean) == 0,
+       "and a second instance that ran only portable kernels has not");
+    dv_free(clean);
+  }
+}
+#endif
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
@@ -2776,6 +2841,9 @@ int main (void) {
   numeric_surface();
 #if defined(DV_NUMERIC)
   a_kernel_charges_the_budget_by_elements();
+#endif
+#if defined(DV_NUMERIC)
+  the_fast_tier_flag_reaches_the_host();
 #endif
 
   printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");

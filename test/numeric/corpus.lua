@@ -123,3 +123,44 @@ say("transpose", bits(array.copy(array.transpose(big))))
 say("view_sum", fbits(array.sum(array.transpose(big))))
 say("axis1", bits(array.sum(big, 1)))
 say("axis2", bits(array.sum(big, 2)))
+
+-- 9. The embedded libm (stage 1).
+--
+-- These are the reason it exists. glibc, musl, Apple's, wasi-libc's and
+-- mingw's are five correct implementations that disagree in the last bit,
+-- so a program whose answer depends on one has no cross-target answer;
+-- routed through the vendored openlibm they all give what is below.
+--
+-- The values are not arbitrary. 'exp_glibc_differs' is a point where this
+-- build and glibc disagree in the last bit -- measured, not guessed -- so
+-- a build where the routing failed to install fails this line rather than
+-- passing quietly.
+local function f1(name, fn, x) say(name, fbits(fn(x))) end
+f1("exp", math.exp, 1.0)
+f1("exp_neg", math.exp, -1.0)
+f1("exp_glibc_differs", math.exp, -20.505154639175259)
+f1("exp_large", math.exp, 709.0)
+f1("exp_small", math.exp, -745.0)
+f1("log", math.log, 2.0)
+f1("log_near1", math.log, 1.0000000000000002)
+f1("log10", function(x) return math.log(x, 10) end, 7.0)
+f1("log2", function(x) return math.log(x, 2) end, 7.0)
+say("log_exact", tostring(math.log(8, 2)) .. " " .. tostring(math.log(100, 10)))
+f1("sin", math.sin, 1.0)
+f1("cos", math.cos, 1.0)
+f1("tan", math.tan, 1.0)
+-- Argument reduction is where two libms diverge most, so the large ones
+-- are the interesting cases rather than a formality.
+f1("sin_huge", math.sin, 1e22)
+f1("cos_huge", math.cos, 1e300)
+f1("tan_huge", math.tan, 1e22)
+f1("sin_pi", math.sin, 3.141592653589793)
+f1("asin", math.asin, 0.5)
+f1("acos", math.acos, 0.5)
+f1("atan", math.atan, 1.0)
+say("atan2", fbits(math.atan(1.0, -1.0)))
+-- Exact by IEEE 754 and therefore still the platform's: these lines say
+-- so, and would change if one were ever routed by mistake.
+f1("sqrt", math.sqrt, 2.0)
+f1("floor", math.floor, -1.5)
+f1("fmod", function(x) return math.fmod(x, 2.0) end, 5.5)
