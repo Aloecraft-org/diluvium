@@ -92,6 +92,8 @@ void luaX_init (lua_State *L) {
   luaC_fix(L, obj2gco(luaS_newliteral(L, "with")));
   luaC_fix(L, obj2gco(luaS_newliteral(L, "continue")));
   luaC_fix(L, obj2gco(luaS_newliteral(L, "const")));
+  luaC_fix(L, obj2gco(luaS_newliteral(L, "export")));
+  luaC_fix(L, obj2gco(luaS_newliteral(L, "(export)")));
 }
 
 
@@ -199,6 +201,7 @@ void luaX_setinput (lua_State *L, LexState *ls, ZIO *z, TString *source,
   ls->lastline = 1;
   ls->source = source;
   ls->encrypted_flag = 0;  /* Diluvium: no pending '~function' */
+  ls->exportv = -1;        /* Diluvium: no module table until 'export' */
   ls->fstring_del = 0;     /* Diluvium: not lexing an f-string */
   /* all three strings here ("_ENV", "break", "global") were fixed,
      so they cannot be collected */
@@ -211,7 +214,9 @@ void luaX_setinput (lua_State *L, LexState *ls, ZIO *z, TString *source,
   ls->dfrn = luaS_newliteral(L, "defer");   /* get "defer" string */
   ls->wthn = luaS_newliteral(L, "with");    /* get "with" string */
   ls->contn = luaS_newliteral(L, "continue"); /* get "continue" string */
-  ls->cstn = luaS_newliteral(L, "const");    /* get "const" string */
+  ls->cstn = luaS_newliteral(L, "const");        /* get "const" string */
+  ls->expn = luaS_newliteral(L, "export");       /* get "export" string */
+  ls->modn = luaS_newliteral(L, "(export)");     /* the module table */
 #if LUA_COMPAT_GLOBAL
   /* compatibility mode: "global" is not a reserved word */
   ls->glbn = luaS_newliteral(L, "global");  /* get "global" string */
