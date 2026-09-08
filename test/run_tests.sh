@@ -56,8 +56,8 @@ guard_no_test_libs() {
       'assert(package.loadlib("libs/lib1.so", "*"))') >/dev/null 2>&1
 }
 
-# test_array needs the 'array' library, which is behind the 'numeric' build
-# feature and absent from a default build. Checked by asking the binary, for
+# test_array and test_transform need the 'array' library, which is behind the
+# 'numeric' build feature and absent from a default build. Checked by asking the binary, for
 # the same reason as above: what is on disk says nothing about how it was
 # compiled. 'assert' and a normal exit, not os.exit -- see the note above.
 guard_no_numeric() {
@@ -129,6 +129,7 @@ test_secure_dump|run||
 test_spread|run||
 test_switch|run||
 test_tierb|run||
+test_transform|run||needs the 'numeric' build feature: build with NUMERIC=1|guard_no_numeric
 test_vault|run||
 test_verify|run||
 test_wait|run|--task|needs --task: parking requires a host that resumes, and the default entry keeps stock Lua semantics
