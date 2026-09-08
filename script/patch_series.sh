@@ -38,9 +38,9 @@ FORK_POINT=7579fc9d7ed90240487251dfb69168f8e64e9294
 # Core files that are allowed to differ from upstream, one per line:
 #   <file>  <reason>
 CORE_PATCH_ALLOWLIST='
-llex.c      f-strings ($"..."), regex literals (`...`), ?? token, $ must introduce a string, contextual keyword names
+llex.c      f-strings ($"..."), regex literals (`...`), ?? token, $ must introduce a string, contextual keyword names, numeral separators and 0b literals
 llex.h      TK_2Q/TK_FPART/TK_REGEX tokens, fstring_del/encrypted_flag, contextual keyword names
-lparser.c   ~function forms, f-string codegen, regex literal codegen, switch, defer, with, compound assignment, ?? and ?.
+lparser.c   ~function forms, f-string codegen, regex literal codegen, switch, defer, with, compound assignment, ?? and ?., continue, const, default parameters, expression-bodied functions, spread
 lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_skipifnil for ?.
 lcode.h     OPR_2Q enum entry, luaK_skipifnil export
 lobject.h   is_encrypted flag on Proto

@@ -101,6 +101,7 @@ test_json|run||
 test_time|run||
 test_host|run||
 test_compound|run||
+test_const|run||
 test_continue|run||
 test_defer|run||
 test_determinism|run||
@@ -108,11 +109,14 @@ test_endpoint|run||
 test_fstrings|run||
 test_interop|run||
 test_msgpack|run||
+test_numerals|run||
+test_params|run||
 test_queue|run||
 test_nullco|run||
 test_regex|run||
 test_safenav|run||
 test_secure_dump|run||
+test_spread|run||
 test_switch|run||
 test_vault|run||
 test_verify|run||
