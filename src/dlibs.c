@@ -23,6 +23,7 @@
 #include "dtime.h"
 #include "dnumeric.h"
 #include "dlibm.h"
+#include "ddv.h"
 #include "dhostlib.h"
 
 
@@ -48,6 +49,9 @@ static const luaL_Reg diluvium_libs[] = {
   {"json", luaopen_djson},
   {"regex", luaopen_dregex},
   {"time", luaopen_dtime},
+  /* The desugars' runtime half. Not gated on any feature: the syntax it
+     serves is in every build, so the helper has to be too. */
+  {"dv", luaopen_ddv},
 #if defined(DV_NUMERIC)
   /* Only where the feature is built. A program that needs arrays on a
      build without them finds no 'array' global, which is the same shape

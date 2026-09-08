@@ -128,6 +128,7 @@ test_safenav|run||
 test_secure_dump|run||
 test_spread|run||
 test_switch|run||
+test_tierb|run||
 test_vault|run||
 test_verify|run||
 test_wait|run|--task|needs --task: parking requires a host that resumes, and the default entry keeps stock Lua semantics

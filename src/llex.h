@@ -82,6 +82,13 @@ typedef struct LexState {
   TString *dfrn;  /* Diluvium: "defer" name (a contextual keyword) */
   TString *wthn;  /* Diluvium: "with" name (a contextual keyword) */
   TString *cstn;  /* Diluvium: "const" name (a contextual keyword) */
+  TString *expn;  /* Diluvium: "export" name (a contextual keyword) */
+  TString *modn;  /* Diluvium: "(export)", the chunk's hidden module table */
+  int exportv;    /* Diluvium: the module table's variable index, or -1.
+                     In the lexer state rather than in 'FuncState' because
+                     'export' is a chunk-level form and there is one main
+                     function per parse -- and because 'lparser.h' is
+                     pristine against upstream, which is worth keeping. */
   int fstring_del;  /* Diluvium: delimiter of the f-string just opened
                        (handed to the parser, which then keeps its own
                        copy, so nested f-strings do not clobber it) */

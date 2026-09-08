@@ -1837,6 +1837,11 @@ static const luaL_Reg arraylib[] = {
   /* linear algebra */
   {"dot", dvn_f_dot},
   {"matmul", dvn_f_matmul},
+  /* '__slice' as well as 'slice': 'dv.slice' looks the metamethod up, so
+     this is what makes 'a[2:5]' a view rather than a copy. The two are
+     the same function -- an array's slice already takes (a, i, j) and
+     already treats a missing end as "to the end". */
+  {"__slice", dvn_f_slice},
 #if defined(LUA_DEBUG)
   /* the fast-tier mock; see above. Absent from every shipped build. */
   {"__mark_fast", dvn_f_mark_fast},
@@ -1881,6 +1886,8 @@ static int dvn_mm_newindex (lua_State *L) {
 }
 
 static const luaL_Reg arraymeta[] = {
+  /* proposals 4.4: 'a[i:j]' asks 'dv.slice', which asks this. */
+  {"__slice", dvn_f_slice},
   {"__add", dvn_mm_add},
   {"__sub", dvn_mm_sub},
   {"__mul", dvn_mm_mul},
