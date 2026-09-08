@@ -71,7 +71,19 @@ do
 end
 assert_eq(SHADOW, 1, "which is restored on the way out")
 
-print("-- 4. 'const' is still an ordinary name")
+print("-- 4. The keyword's name outlives the collector")
+-- See the note in test_continue.lua: a contextual keyword is compared by
+-- string identity, so its name is fixed in 'luaX_init' alongside the
+-- reserved words.
+collectgarbage("collect")
+for _ = 1, 200 do local churn = ("const"):sub(1, 5) .. tostring(_) end
+collectgarbage("collect")
+collectgarbage("collect")
+const AFTER_GC = 11
+assert_eq(AFTER_GC, 11, "'const' still declares")
+assert_nocompile("const Q = 1; Q = 2", "and still refuses assignment")
+
+print("-- 5. 'const' is still an ordinary name")
 local const = 5
 assert_eq(const, 5, "as a local")
 const = 6

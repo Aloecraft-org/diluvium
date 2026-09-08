@@ -28,6 +28,7 @@
 #include "dshim.h"
 #include "dsnap.h"
 #include "dtask.h"
+#include "dnumeric.h"
 #include "dv.h"
 
 
@@ -355,6 +356,52 @@ int dv_exceeded (dv_instance *inst) {
 /* ---------------------------------------------------------------- numeric -- */
 
 /*
+** The budget seam for numeric kernels (doc/Plan-2026-09.md 3.4).
+**
+** Kernels charge the instruction budget by element count and never by
+** time: one instruction per 64 elements, checked at a block boundary. So
+** 'exceeded' fires at the same element of the same kernel on every
+** target, which is what makes a replay of a budget-exceeded run mean
+** anything.
+**
+** Two calls rather than one because the alternative is a registry lookup
+** per block. 'diluvium_budget_open' does that lookup once per kernel and
+** hands back a cookie; 'diluvium_budget_charge' is then two additions and
+** a compare. A cookie of NULL means this state is not running under an
+** instance -- the standalone interpreter, or a host embedding Lua
+** directly -- and charging it is a no-op rather than an error, because
+** the kernels are the same code in both.
+**
+** Here rather than in dnumeric.c because 'dv_instance' is private to this
+** file, and rather than in dv.h because that header is the published ABI
+** and this is not part of it.
+*/
+LUA_API void *diluvium_budget_open (lua_State *L) {
+  dv_instance *inst;
+  lua_getfield(L, LUA_REGISTRYINDEX, "diluvium.instance");
+  inst = (dv_instance *)lua_touserdata(L, -1);
+  lua_pop(L, 1);
+  return (void *)inst;
+}
+
+
+LUA_API void diluvium_budget_charge (lua_State *L, void *cookie,
+                                     uint64_t n) {
+  dv_instance *inst = (dv_instance *)cookie;
+  if (inst == NULL)
+    return;
+  inst->insn_used += n;
+  if (inst->insn_limit != 0 && inst->insn_used >= inst->insn_limit) {
+    inst->exceeded = 1;
+    /* The same error the instruction hook raises, for the same reason and
+       catchable in the same way; see 'dv_insn_hook' above. */
+    luaL_error(L, "instruction budget of %I exceeded",
+               (lua_Integer)inst->insn_limit);
+  }
+}
+
+
+/*
 ** Bytes per element, or 0 for a dtype this build does not know.
 **
 ** The dispatch point for element types. Every place that has to reason about a
@@ -429,14 +476,22 @@ int dv_array_adopt (dv_instance *inst, int dtype, size_t len, void *bytes) {
     set_error(inst, "dv_array_adopt: NULL buffer with a non-zero length");
     return 1;
   }
-  /*
-  ** The copy path, which is what a build without 'DV_NUMERIC' does and what
-  ** every build does until the 'array' type exists to adopt into. The bytes
-  ** reach the guest either way; the return value is how the caller learns
-  ** whether it is holding an array or a string, so nothing here has to change
-  ** shape when adoption becomes real.
-  */
   L = dv_valuestack(inst);
+  /*
+  ** Adoption proper, where the feature is built: the buffer becomes the
+  ** array's elements with no copy at all, and the array's finaliser is
+  ** what releases it. 'diluvium_array_adopt' reports 1 when it did not
+  ** take the buffer, which is every build without DV_NUMERIC and any
+  ** state the library was never opened in.
+  */
+  if (diluvium_array_adopt(L, dtype, len, bytes) == 0)
+    return 0;
+  /*
+  ** The copy path otherwise. The bytes reach the guest either way; the
+  ** return value is how the caller learns whether it is holding an array
+  ** or a string, so nothing a host wrote has to change shape when the
+  ** feature is turned on.
+  */
   lua_pushlstring(L, (const char *)bytes, len);
   dv_release_adopted(inst, bytes, len);
   return 1;

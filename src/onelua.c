@@ -137,6 +137,7 @@
 #include "djson.c"
 #include "dregex.c"
 #include "dtime.c"
+#include "dnumeric.c"
 #include "dhostlib.c"
 #include "dshim.c"
 #include "dsnap.c"
