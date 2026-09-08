@@ -40,7 +40,7 @@ import { wasiPreview1, WASI_MODULE } from "./wasi.js";
 export { Ext, Float } from "./msgpack.js";
 export { wasiPreview1, WasiExit, WASI_MODULE } from "./wasi.js";
 
-export const ABI_VERSION = 1;
+export const ABI_VERSION = 2;
 
 const DV_OK = 0;
 const DV_QUEUE_FULL = 1;

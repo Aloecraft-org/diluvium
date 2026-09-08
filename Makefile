@@ -1,3 +1,62 @@
+# ---------------------------------------------------------------- numeric --
+#
+# The 'numeric' build feature (doc/Plan-2026-09.md 2 and 3.5). Off here and on
+# in the CI matrix, so that principle 4 holds literally: with NUMERIC unset
+# every variable below is empty and the compiler is invoked with exactly the
+# arguments it was invoked with before this block existed.
+#
+# The flags are attached to the *feature*, not to a file. 3.5 asks for them on
+# every translation unit under 'numeric' and the embedded libm; the numeric
+# code lives in the amalgamation, which is one translation unit, so the whole
+# of it takes them. That is a superset of what 3.5 requires and it is the
+# reading that survives: a flag that must reach "the numeric TU" is a flag one
+# build path can quietly miss, and there are four build paths here.
+#
+# What each one is for -- none of these is decoration, and dropping any of them
+# is how one target's last digits start disagreeing with another's:
+#
+#   -ffp-contract=off          no fused multiply-add. GCC on aarch64 contracts
+#                              by default and x86-64 does not, which is the
+#                              single most likely source of a cross-target
+#                              mismatch. test/contraction_check.c is the canary.
+#   -fno-fast-math             never assume associativity or finite operands;
+#                              a reduction order the spec pins is only pinned
+#                              if the compiler is not allowed to re-associate.
+#   -fexcess-precision=standard round to the declared type at each assignment,
+#                              rather than carrying x87 80-bit intermediates.
+#   -fno-builtin               no substituting or constant-folding the libm
+#                              calls. With the embedded libm's 'dv_' prefixes
+#                              (stage 1) this is the second half of keeping
+#                              'exp' the one this tree ships.
+#
+# Three of the four are accepted by every compiler in the matrix. The fourth,
+# -fexcess-precision=standard, is GCC's spelling that Clang only learned in 17,
+# and the macOS runners carry whichever Apple clang their image has. So it is
+# probed rather than assumed -- and probing costs nothing real here, because
+# excess precision is an x87 phenomenon and no target this project builds for
+# (x86-64, aarch64, wasm32) has any. The three with teeth are unconditional.
+#
+# The wasm lane does not probe and does not need to: WASI_IMG is pinned at a
+# wasi-sdk whose clang is 20.1, which is well past 17. A probe run with the
+# host's gcc would be answering for the wrong compiler anyway, which is the
+# mistake diluvium-sys's build.rs has its own long comment about.
+NUMERIC ?=
+ifeq ($(NUMERIC),1)
+NUMERIC_EXCESS := $(shell echo 'int main(void){return 0;}' | \
+    gcc -fexcess-precision=standard -x c - -o /dev/null 2>/dev/null \
+    && echo -fexcess-precision=standard)
+NUMERIC_FPFLAGS := -ffp-contract=off -fno-fast-math -fno-builtin \
+                   $(NUMERIC_EXCESS)
+NUMERIC_CFLAGS  := -DDV_NUMERIC $(NUMERIC_FPFLAGS)
+NUMERIC_WASM_CFLAGS := -DDV_NUMERIC -ffp-contract=off -fno-fast-math \
+                       -fno-builtin -fexcess-precision=standard
+else
+NUMERIC_EXCESS :=
+NUMERIC_FPFLAGS :=
+NUMERIC_CFLAGS  :=
+NUMERIC_WASM_CFLAGS :=
+endif
+
 BUILD_MNT:=-v $(CURDIR)/.data:/data
 # Pinned by digest: an unpinned :latest tracks wasi-sdk's main branch and
 # broke the 2026-08 builds when the sysroot moved from lib/wasm32-wasi to
@@ -5,7 +64,7 @@ BUILD_MNT:=-v $(CURDIR)/.data:/data
 # -mllvm -wasm-use-legacy-eh flag below, so this pins the :latest that the
 # 2026-08 builds compile cleanly against. Bump deliberately, not by surprise.
 WASI_IMG:=ghcr.io/webassembly/wasi-sdk@sha256:46e14a8323321ca68b92ead633fc3fb004e5fa4205dd4b77b8aa1197bfe1f07b
-WASI_CLANG:=cd /data && /opt/wasi-sdk/bin/clang -O3
+WASI_CLANG:=cd /data && /opt/wasi-sdk/bin/clang -O3 $(NUMERIC_WASM_CFLAGS)
 WASM_LLVM_OPT:=-mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false
 BUILD_WASM_OPT:=-lsetjmp -lwasi-emulated-signal -lwasi-emulated-process-clocks -Wl,--export-all, -Wl,--export=malloc -Wl,--export=free
 PODMAN_RUN_WASM:=podman run --rm $(BUILD_MNT) $(WASI_IMG)
@@ -68,7 +127,11 @@ ifeq ($(UNAME_S),Darwin)
     PLATFORM_CFLAGS = -DLUA_USE_POSIX
 endif
 
-TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g $(PLATFORM_CFLAGS)
+# $(NUMERIC_CFLAGS) is appended to the shared flag variables rather than to
+# each recipe: every contract test and sanitizer target is built out of one of
+# these four, so `make NUMERIC=1 <anything>` compiles the same configuration
+# everywhere instead of one recipe at a time remembering to.
+TEST_CFLAGS = -DLUA_USER_H='"ltests.h"' -O0 -g $(PLATFORM_CFLAGS) $(NUMERIC_CFLAGS)
 
 TEST_BIN:=$(CURDIR)/dist/diluvium_debug
 TEST_RUNNER:=$(CURDIR)/test/run_tests.sh
@@ -84,14 +147,14 @@ _native_static_lib: _build_step0
 	@echo '=== Building Native Static Archive ==='
 	rm -f $(CURDIR)/dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a
 	# We use -DLUA_LIB and -UMAKE_LUA to ensure the standalone 'main' is NOT compiled
-	cd .data && gcc -O3 -c onelua.c -o onelua.o -fPIC $(PLAT_CFLAGS) -DDILUVIUM_AS_LIBRARY
-	cd .data && gcc -O3 -c wasm_stubs.c -o wasm_stubs.o -fPIC
+	cd .data && gcc -O3 -c onelua.c -o onelua.o -fPIC $(PLAT_CFLAGS) $(NUMERIC_CFLAGS) -DDILUVIUM_AS_LIBRARY
+	cd .data && gcc -O3 -c wasm_stubs.c -o wasm_stubs.o -fPIC $(NUMERIC_CFLAGS)
 	# analyze.c / diluvium_api.c set their own _POSIX_C_SOURCE and need no
 	# Lua platform config. Do NOT pass -DLUA_USE_LINUX here: on Windows,
 	# 5.5's luaconf auto-defines LUA_USE_C89, and LUA_USE_LINUX would then
 	# force LUA_USE_POSIX, tripping luaconf's "POSIX not compatible with C89".
-	cd .data && gcc -O3 -c analyze.c -o analyze.o -fPIC -std=gnu99 -DDILUVIUM_AS_LIBRARY
-	cd .data && gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=gnu99 -DDILUVIUM_AS_LIBRARY
+	cd .data && gcc -O3 -c analyze.c -o analyze.o -fPIC -std=gnu99 $(NUMERIC_CFLAGS) -DDILUVIUM_AS_LIBRARY
+	cd .data && gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=gnu99 $(NUMERIC_CFLAGS) -DDILUVIUM_AS_LIBRARY
 	ar rcs dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a .data/onelua.o .data/wasm_stubs.o .data/diluvium_api.o .data/analyze.o
 	@echo 'Native library built: dist/libdiluvium_$(UNAME_Sl)_$(ARCHl).a'
 
@@ -99,10 +162,10 @@ _portable_static_lib: _build_step0
 	@echo '=== Building Portable (musl) Static Archive ==='
 	$(PODMAN_RUN_ALPINE) sh -c "\
 		apk add --no-cache gcc musl-dev && \
-		gcc -O3 -c onelua.c -o onelua.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY && \
-		gcc -O3 -c wasm_stubs.c -o wasm_stubs.o -fPIC && \
-		gcc -O3 -c analyze.c -o analyze.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY  && \
-		gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=c99 -DLUA_USE_LINUX -DDILUVIUM_AS_LIBRARY  && \
+		gcc -O3 -c onelua.c -o onelua.o -fPIC -std=c99 -DLUA_USE_LINUX $(NUMERIC_CFLAGS) -DDILUVIUM_AS_LIBRARY && \
+		gcc -O3 -c wasm_stubs.c -o wasm_stubs.o -fPIC $(NUMERIC_CFLAGS) && \
+		gcc -O3 -c analyze.c -o analyze.o -fPIC -std=c99 -DLUA_USE_LINUX $(NUMERIC_CFLAGS) -DDILUVIUM_AS_LIBRARY  && \
+		gcc -O3 -c diluvium_api.c -o diluvium_api.o -fPIC -std=c99 -DLUA_USE_LINUX $(NUMERIC_CFLAGS) -DDILUVIUM_AS_LIBRARY  && \
 		ar rcs /data/libdiluvium_musl_$(ARCHl).a onelua.o wasm_stubs.o diluvium_api.o analyze.o"
 	@cp .data/libdiluvium_musl_$(ARCHl).a dist/libdiluvium_musl_$(ARCHl).a
 
@@ -298,13 +361,13 @@ build_wasm: _wasm_build_step0 _wasm_build_step1 _wasm_build_step2 _wasi_static_l
 build_platform: _build_step0 _native_static_lib
 	@echo "Building for $(UNAME_S)..."
 	cd src && make clean && make all \
-		MYCFLAGS="$(PLAT_CFLAGS) -DDILUVIUM_BUILD='\"$(HOST_VERSION)\"'" \
+		MYCFLAGS="$(PLAT_CFLAGS) $(NUMERIC_CFLAGS) -DDILUVIUM_BUILD='\"$(HOST_VERSION)\"'" \
 		MYLDFLAGS='$(PLAT_LDFLAGS)' \
 		MYLIBS='$(PLAT_LIBS)'
 
 	@echo '=== Building Compiler (luac) ==='
 	gcc -o .data/luac_$(UNAME_Sl)_$(ARCHl) .data/onelua.c .data/analyze.c .data/diluvium_api.c \
-		-std=c99 -DMAKE_LUAC -lm
+		-std=c99 $(NUMERIC_CFLAGS) -DMAKE_LUAC -lm
 	
 	cp src/lua dist/diluvium_$(UNAME_Sl)_$(ARCHl) 2>/dev/null || \
 	cp src/lua.exe dist/diluvium_$(UNAME_Sl)_$(ARCHl).exe
@@ -322,11 +385,11 @@ build_linux_static: _build_step0 _portable_static_lib
 		make clean && \
 		make all \
 			CC=gcc \
-			MYCFLAGS='-static -Os -std=c99 -DLUA_USE_LINUX -DMAKE_LUAC' \
+			MYCFLAGS='-static -Os -std=c99 -DLUA_USE_LINUX $(NUMERIC_CFLAGS) -DMAKE_LUAC' \
 			MYLDFLAGS='-static' \
 			MYLIBS='' && \
 		echo '--- Building Compiler (luac) ---' && \
-		gcc -o /data/luac onelua.c analyze.c diluvium_api.c -static -Os -std=c99 -DMAKE_LUAC -lm"
+		gcc -o /data/luac onelua.c analyze.c diluvium_api.c -static -Os -std=c99 $(NUMERIC_CFLAGS) -DMAKE_LUAC -lm"
 
 	cp .data/luac dist/diluvium_compiler_linux_$(ARCH_CANON)_musl
 	cp .data/lua dist/diluvium_linux_$(ARCH_CANON)_musl
@@ -412,6 +475,36 @@ dtask_check: _build_step0
 	  $(CURDIR)/test/dtask_check.c $(CURDIR)/.data/onelua.c -lm
 	@$(CURDIR)/dist/dtask_check
 
+# The contraction canary (3.5). No Lua and no libm: what it checks is the
+# compiler's flags, so anything it linked would only be a way for the check to
+# fail for another reason.
+#
+# Built with the numeric flags whatever NUMERIC is set to, and that is
+# deliberate. The canary's job is to show the flags do what the plan says they
+# do; running it against a build that was never given them would only ever
+# report the platform default, which nobody is relying on. `make NUMERIC=1
+# <target>` is what puts them on the artifacts; this target is what proves they
+# work. The flags are spelled out here rather than taken from NUMERIC_FPFLAGS
+# for the same reason -- that variable is empty in a default build, and an
+# empty flag list is precisely what this must not be run with.
+# Every syntax form this fork adds is a parse error in stock Lua 5.5 (3.6).
+# Needs the fork-point commit in the history, so a shallow clone must be
+# deepened before this runs.
+freeness_check:
+	@$(CURDIR)/script/freeness_check.sh
+
+contraction_check:
+	@mkdir -p $(CURDIR)/dist
+	@excess=$$(echo 'int main(void){return 0;}' | \
+	    gcc -fexcess-precision=standard -x c - -o /dev/null 2>/dev/null \
+	    && echo -fexcess-precision=standard); \
+	  set -x; \
+	  gcc -Wall -Wextra -O2 -std=c99 \
+	    -ffp-contract=off -fno-fast-math -fno-builtin $$excess \
+	    -o $(CURDIR)/dist/contraction_check \
+	    $(CURDIR)/test/contraction_check.c
+	@$(CURDIR)/dist/contraction_check
+
 # No Lua at all: dhash.c is self-contained, and compiling it alone is part of
 # what is being checked -- the compiler links it too and must not pull the
 # runtime in.
@@ -469,7 +562,7 @@ dvs_check: _build_step0
 #
 # Not the ltests.h build: that installs its own allocator and would fight ASan for
 # the same job. TEST_CFLAGS is therefore not reused here.
-SAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g
+SAN_CFLAGS = -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g $(NUMERIC_CFLAGS)
 # detect_leaks is Linux-only: Apple's AddressSanitizer ships no LeakSanitizer, so
 # asking for it on Darwin is an error rather than a no-op. Leak coverage therefore
 # comes from the Linux job, and the Darwin run still checks addresses and undefined
@@ -563,7 +656,7 @@ test_libs:
 # actually being made -- that a host can link this against the instance ABI alone.
 # nm prefixes symbols with an underscore on Darwin, hence the optional one.
 build_swarm_lib: _build_step0
-	gcc -O2 -fPIC -c -I$(CURDIR)/.data -o $(CURDIR)/dist/dvs.o $(CURDIR)/.data/dvs.c
+	gcc -O2 -fPIC -c -I$(CURDIR)/.data $(NUMERIC_CFLAGS) -o $(CURDIR)/dist/dvs.o $(CURDIR)/.data/dvs.c
 	ar rcs $(CURDIR)/dist/libdiluvium-swarm.a $(CURDIR)/dist/dvs.o
 	@leaked=$$(nm -u $(CURDIR)/dist/dvs.o | awk '{print $$NF}' \
 	    | grep -E '^_?lua' || true); \
@@ -614,7 +707,7 @@ dshim_check: _build_step0
 # four-core machine without dying once -- which is the same result that made
 # 2,600 clean runs of a test binary look like evidence of absence for four
 # days. 'dshim_race_tsan' below is the lane that actually decides.
-RACE_CFLAGS = -O1 -g -fno-omit-frame-pointer $(PLATFORM_CFLAGS)
+RACE_CFLAGS = -O1 -g -fno-omit-frame-pointer $(PLATFORM_CFLAGS) $(NUMERIC_CFLAGS)
 RACE_RUNS ?= 300
 RACE_THREADS ?= 8
 
@@ -688,7 +781,7 @@ HOST_SRCS = $(CURDIR)/host/dhost.c $(CURDIR)/host/dhost_http.c \
 # would carry a capability it never uses).
 build_host: _build_step0
 	gcc -O2 -Wall -DMAKE_LIB -I$(CURDIR)/.data -I$(CURDIR)/host \
-	  $(HOST_VERSION_CFLAGS) \
+	  $(HOST_VERSION_CFLAGS) $(NUMERIC_CFLAGS) \
 	  -o $(CURDIR)/dist/diluvium-host \
 	  $(HOST_SRCS) $(CURDIR)/host/dhost_main.c \
 	  $(CURDIR)/.data/dvs.c $(CURDIR)/.data/onelua.c -lm -lsqlite3

@@ -55,11 +55,53 @@ struct dv_instance {
   uint64_t mem_used;
   uint64_t mem_peak;
   int exceeded;
+  /* Numeric bounds (Plan-2026-09 3.1). Stored here, enforced by the kernels
+     when they land; 'max_elements' 0 means no limit. */
+  uint64_t numeric_max_elements;
+  dv_tier numeric_max_tier;
+  int numeric_touched_fast;
 };
 
 
 uint32_t dv_abi_version (void) {
   return DV_ABI_VERSION;
+}
+
+
+int dv_build (void) {
+  return DV_BUILD;
+}
+
+
+/*
+** The feature string. Assembled by the preprocessor so it is one constant in
+** the binary and the pointer is good for the life of the process.
+**
+** The unconditional four are here rather than left implicit because the reader
+** of this string is a DRT profile line, and "what does this build carry" is
+** answered badly by a list that only names the optional parts. The order is
+** the header's contract; a new name is appended to its group, never inserted.
+**
+** Only facts this file can state exactly. Line editing and the threading arm
+** are deliberately absent: both are chosen inside another translation unit
+** ('dline.c', 'dsync.h'), and a condition retyped here would be a second
+** definition free to drift from the first -- and 'dv.c' is compiled both
+** standalone and inside the amalgamation, where the two would not even see
+** the same macros. Neither is a property of an instance in any case.
+*/
+static const char dv_feature_string[] =
+  "regex\n"
+  "json\n"
+  "msgpack\n"
+  "snapshot"
+#if defined(DV_NUMERIC)
+  "\nnumeric"
+#endif
+  ;
+
+
+const char *dv_features (void) {
+  return dv_feature_string;
 }
 
 
@@ -310,6 +352,122 @@ int dv_exceeded (dv_instance *inst) {
 }
 
 
+/* ---------------------------------------------------------------- numeric -- */
+
+/*
+** Bytes per element, or 0 for a dtype this build does not know.
+**
+** The dispatch point for element types. Every place that has to reason about a
+** dtype goes through here rather than switching again, so adding 'c128' in
+** stage 2 is one line in one function.
+*/
+static size_t dv_dtype_width (int dtype) {
+  switch (dtype) {
+    case DV_DTYPE_F64: return 8;
+    case DV_DTYPE_I64: return 8;
+    case DV_DTYPE_U8:  return 1;
+    default: return 0;
+  }
+}
+
+
+/*
+** Which stack an adopted value is pushed onto.
+**
+** The instance's thread while there is one, because that is where a parked
+** program's frames are and a hostcall reply is being assembled for it. Before
+** the thread exists -- a host adopting into an instance it has loaded but not
+** run -- the main state is the only stack there is.
+*/
+static lua_State *dv_valuestack (dv_instance *inst) {
+  return (inst->co != NULL) ? inst->co : inst->L;
+}
+
+
+/*
+** Release a buffer this call took ownership of, through the instance's own
+** allocator.
+**
+** depth: the accounting, which is not decoration. 'dv_alloc' subtracts the
+** block's size from 'mem_used' on a free, and these bytes were never added to
+** it -- the host allocated them outside the instance. Freeing them without the
+** matching credit walks the counter downward against the truth, which is
+** exactly the drift documented at 'dv_alloc' above and exactly what made a
+** memory budget evadable there. So the bytes are charged first and released
+** second, and the pair nets to zero. Charging is also the honest answer for
+** the moment adoption becomes real: an adopted column is memory the instance
+** holds.
+*/
+static void dv_release_adopted (dv_instance *inst, void *bytes, size_t len) {
+  lua_Alloc allocf;
+  void *ud;
+  if (bytes == NULL)
+    return;
+  inst->mem_used += (uint64_t)len;
+  if (inst->mem_used > inst->mem_peak)
+    inst->mem_peak = inst->mem_used;
+  allocf = lua_getallocf(inst->L, &ud);
+  allocf(ud, bytes, len, 0);
+}
+
+
+int dv_array_adopt (dv_instance *inst, int dtype, size_t len, void *bytes) {
+  size_t width;
+  lua_State *L;
+  if (inst == NULL)
+    return 1;
+  width = dv_dtype_width(dtype);
+  if (width == 0) {
+    set_error(inst, "dv_array_adopt: unknown dtype");
+    return 1;
+  }
+  if (len % width != 0) {
+    set_error(inst, "dv_array_adopt: length is not a whole number of elements");
+    return 1;
+  }
+  if (bytes == NULL && len != 0) {
+    set_error(inst, "dv_array_adopt: NULL buffer with a non-zero length");
+    return 1;
+  }
+  /*
+  ** The copy path, which is what a build without 'DV_NUMERIC' does and what
+  ** every build does until the 'array' type exists to adopt into. The bytes
+  ** reach the guest either way; the return value is how the caller learns
+  ** whether it is holding an array or a string, so nothing here has to change
+  ** shape when adoption becomes real.
+  */
+  L = dv_valuestack(inst);
+  lua_pushlstring(L, (const char *)bytes, len);
+  dv_release_adopted(inst, bytes, len);
+  return 1;
+}
+
+
+void dv_numeric_set_max_elements (dv_instance *inst, uint64_t n) {
+  if (inst != NULL)
+    inst->numeric_max_elements = n;
+}
+
+
+void dv_numeric_set_max_tier (dv_instance *inst, dv_tier t) {
+  if (inst == NULL)
+    return;
+  /* Clamp rather than refuse: the setter cannot report, and the weakest tier
+     is the safe reading of a value this build does not recognise. */
+  {
+    int v = (int)t;
+    if (v < (int)DV_TIER_EXACT) v = (int)DV_TIER_EXACT;
+    if (v > (int)DV_TIER_FAST) v = (int)DV_TIER_FAST;
+    inst->numeric_max_tier = (dv_tier)v;
+  }
+}
+
+
+int dv_numeric_touched_fast (dv_instance *inst) {
+  return (inst != NULL && inst->numeric_touched_fast) ? 1 : 0;
+}
+
+
 dv_instance *dv_new (const dv_config *cfg) {
   dv_instance *inst;
   if (cfg != NULL && cfg->abi_version != 0 &&
@@ -321,6 +479,10 @@ dv_instance *dv_new (const dv_config *cfg) {
   inst->chunk_ref = LUA_NOREF;
   inst->co_ref = LUA_NOREF;
   inst->flags = (cfg != NULL) ? cfg->flags : 0u;
+  /* Not calloc's zero, which is DV_TIER_EXACT and would silently forbid every
+     floating-point kernel in an instance nobody had configured. The weakest
+     tier is the open default; a supervisor narrows it, never widens it. */
+  inst->numeric_max_tier = DV_TIER_FAST;
   /* 'lua_newstate' rather than 'luaL_newstate', so the allocator is ours and a
      memory budget is possible at all. The instance is anchored in the registry
      because the instruction hook is handed a 'lua_State' and nothing else. */
