@@ -653,6 +653,35 @@ impl Instance {
         unsafe { sys::dv_exceeded(self.raw) != 0 }
     }
 
+    /// Cap how many elements one numeric kernel call may process; 0 for no
+    /// limit.
+    ///
+    /// Attenuating only, by convention rather than by enforcement here: a
+    /// supervisor narrows a child at spawn and never widens it, the same rule
+    /// budgets follow. Nothing enforces the bound yet -- no kernel exists to
+    /// charge against it -- so this stores the value a host will be held to.
+    pub fn set_numeric_max_elements(&mut self, n: u64) {
+        unsafe { sys::dv_numeric_set_max_elements(self.raw, n) }
+    }
+
+    /// The weakest result tier this instance may reach.
+    ///
+    /// An instance set to [`Tier::Reproducible`] cannot be routed to a fast
+    /// backend even where one exists. The default is [`Tier::Fast`]: open, and
+    /// narrowed by whoever spawned it.
+    pub fn set_numeric_max_tier(&mut self, tier: Tier) {
+        unsafe { sys::dv_numeric_set_max_tier(self.raw, tier.into()) }
+    }
+
+    /// Did anything in this instance run at [`Tier::Fast`]?
+    ///
+    /// Sticky and never cleared: it is the audit trail's answer to "was this
+    /// run reproducible", and a flag that could be cleared would answer it
+    /// wrongly. Always false while no fast backend exists.
+    pub fn numeric_touched_fast(&self) -> bool {
+        unsafe { sys::dv_numeric_touched_fast(self.raw) != 0 }
+    }
+
     /// Hibernate: write the instance's whole state -- the parked program, its
     /// call chain, its reachable values, and every queue with its contents --
     /// into bytes that [`Config::restore`] can wake.
@@ -792,6 +821,52 @@ pub fn abi_version() -> u32 {
 /// The ABI version the linked library reports.
 pub fn library_abi_version() -> u32 {
     unsafe { sys::dv_abi_version() }
+}
+
+/// What a numeric kernel promises about its result.
+///
+/// Ordered strongest to weakest, so `tier <= max_tier` is the admission test
+/// and the ordering derived here is the one the C enum has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// Integer or fixed-point: one answer, no rounding.
+    Exact,
+    /// Floating point, bit-identical on every target this runtime builds for.
+    Reproducible,
+    /// Floating point, whatever the machine is quickest at. Reproducible
+    /// across runs on one machine, not across machines.
+    Fast,
+}
+
+impl From<Tier> for sys::dv_tier {
+    fn from(t: Tier) -> Self {
+        match t {
+            Tier::Exact => sys::dv_tier::DV_TIER_EXACT,
+            Tier::Reproducible => sys::dv_tier::DV_TIER_REPRODUCIBLE,
+            Tier::Fast => sys::dv_tier::DV_TIER_FAST,
+        }
+    }
+}
+
+/// The build number the linked library reports: the N in `5.5.1_buildN`.
+pub fn library_build() -> i32 {
+    unsafe { sys::dv_build() }
+}
+
+/// The feature names the linked library was compiled with.
+///
+/// A *build* fact, not a capability grant: a feature named here is compiled
+/// in, and whether a given instance may reach it is what [`Config`] and the
+/// capability layer decide. The order is fixed by the library, so two builds'
+/// lists compare directly.
+pub fn library_features() -> Vec<&'static str> {
+    // Safe: the library returns a non-NULL compile-time string that is stable
+    // for the life of the process, which is what makes 'static honest here.
+    let s = unsafe { std::ffi::CStr::from_ptr(sys::dv_features()) };
+    s.to_str()
+        .expect("the feature string is ASCII")
+        .split('\n')
+        .collect()
 }
 
 /// Set a callback for when the program pushes to a queue it exported, so a host

@@ -251,6 +251,57 @@ jobs:
       - name: Check that Ctrl-C interrupts a runaway loop
         run: ./test/interrupt_check.sh --bin dist/diluvium_debug
 
+  numeric:
+    name: Numeric (${{ matrix.name }})
+    needs: resolve
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    # The 'numeric' feature is off in the Makefile and on here
+    # (doc/Plan-2026-09.md A0). Off is the shipped default and principle 4
+    # makes that build byte-identical to one from before the feature existed,
+    # so the suite job above is the proof of the default and this job is the
+    # proof of the feature. Both architectures, because the flags in 3.5 exist
+    # for a divergence that only appears when two of them are compared.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+          - name: macos-arm64
+            os: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      # First, and on its own: if the floating-point flags did not reach the
+      # compiler there is no point running anything else, and every later
+      # failure would be a puzzle rather than a report. This target applies
+      # the flags itself, so it is a statement about the compiler on this
+      # runner and not about the Makefile's variables.
+      - name: The contraction canary
+        run: make contraction_check
+
+      # The ABI surface with the feature on. 'build_facts' asserts that
+      # dv_features() reports 'numeric', which is what says -DDV_NUMERIC
+      # reached this translation unit and not merely the make invocation.
+      - name: The instance-ABI contract tests, with the feature on
+        run: make NUMERIC=1 dv_check
+
+      # The whole suite, so a feature that is supposed to change nothing
+      # observable in the language is held to that.
+      - name: Build debug binary with the feature on
+        run: make NUMERIC=1 test_build
+
+      - name: Run suite
+        run: ./test/run_tests.sh --bin dist/diluvium_debug --timeout 300
+
+      # The per-file build, where a flag that only the amalgamation received
+      # would show up as a difference between two objects.
+      - name: Build the platform target with the feature on
+        run: make NUMERIC=1 build_platform
+
   rust-binding:
     name: Rust binding
     needs: resolve
@@ -279,6 +330,17 @@ jobs:
       - name: Test the Lua C API feature
         working-directory: bindings/rust
         run: cargo test -p diluvium-sys --features lua
+
+      # The numeric feature carries compiler flags and a define, not only a
+      # cargo cfg, and build.rs is the second of the two build systems they
+      # have to reach (doc/Plan-2026-09.md 3.5 and 9). The -sys crate's
+      # 'features_report_this_build' asserts both directions -- the library
+      # reports 'numeric' with the feature on and does not with it off -- so
+      # this step is what says -DDV_NUMERIC actually arrived at the C
+      # compiler rather than stopping at cargo.
+      - name: Test the numeric build feature
+        working-directory: bindings/rust
+        run: cargo test -p diluvium-sys --features numeric
 
       - name: The example host runs
         working-directory: bindings/rust
@@ -616,6 +678,33 @@ jobs:
           name: core-patch-series-${{ needs.resolve.outputs.short_sha }}
           path: /tmp/series.patch
           retention-days: 90
+
+  freeness:
+    name: Syntax freeness
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0   # the fork-point commit must be reachable
+
+      # Principle 1 of doc/Plan-2026-09.md is 100% Lua compatibility, and 3.6
+      # is its operational form: every syntax form this fork adds must be a
+      # parse error in stock Lua 5.5, or adding it changes what some valid Lua
+      # program already means. The script builds a pristine upstream Lua from
+      # the fork point in this repository's own history -- no network and no
+      # vendored tarball -- and asks both parsers about each form.
+      - name: Every added form is refused by stock Lua 5.5
+        run: ./script/freeness_check.sh
+
+      # 3.6's other half -- the reverse corpus, which must still parse and
+      # still produce the same output -- is not repeated here. The 'suite' job
+      # runs the Lua test suite, which is that corpus and checks its output
+      # rather than only its syntax, and the 'analyzer' job already compiles
+      # every test file as a parser smoke check. A third copy would cost a
+      # build and say nothing either of them does not.
 
   sanitizers:
     name: ASan + UBSan

@@ -2554,10 +2554,109 @@ static void a_woken_instance_is_still_budgeted (void) {
 }
 
 
+/*
+** The build facts (Plan-2026-09 3.1): what a DRT reads to fill in a profile's
+** 'features:' line and the build number beside its revision.
+*/
+static void build_facts (void) {
+  const char *f = dv_features();
+  eq_i(dv_build(), DV_BUILD, "the library reports its build number");
+  ok(f != NULL && f[0] != '\0', "the feature string is neither NULL nor empty");
+  if (f == NULL) return;
+  ok(f[strlen(f) - 1] != '\n', "the feature string has no trailing newline");
+  ok(strstr(f, "regex") != NULL, "'regex' is reported");
+  ok(strstr(f, "msgpack") != NULL, "'msgpack' is reported");
+  ok(strstr(f, "snapshot") != NULL, "'snapshot' is reported");
+  /* The one fact that differs between the two configurations, and the reason
+     this check exists: it is what says the define reached this translation
+     unit rather than only the Makefile variable. */
+#if defined(DV_NUMERIC)
+  ok(strstr(f, "numeric") != NULL,
+     "'numeric' is reported in a DV_NUMERIC build");
+#else
+  ok(strstr(f, "numeric") == NULL,
+     "'numeric' is not reported without DV_NUMERIC");
+#endif
+}
+
+
+/*
+** The numeric surface as it stands before any kernel exists.
+**
+** Every assertion here is about the *shape* a host is being asked to write
+** against, which is the whole point of publishing the surface early: B can be
+** written and tested now, and nothing it wrote changes when the kernels land.
+*/
+static void numeric_surface (void) {
+  dv_instance *inst = dv_new(NULL);
+  if (inst == NULL) { ok(0, "dv_new for the numeric surface"); return; }
+
+  /* The bounds accept and report nothing back; what is checked is that they
+     are callable on every build and change no other observable. */
+  dv_numeric_set_max_elements(inst, 1024);
+  dv_numeric_set_max_tier(inst, DV_TIER_REPRODUCIBLE);
+  ok(dv_numeric_touched_fast(inst) == 0,
+     "nothing has touched a fast tier, because no backend exists");
+  ok(dv_exceeded(inst) == 0, "setting numeric bounds does not exceed a budget");
+
+  /* NULL is refused rather than dereferenced, the same rule the rest of this
+     ABI follows. */
+  dv_numeric_set_max_elements(NULL, 1);
+  dv_numeric_set_max_tier(NULL, DV_TIER_EXACT);
+  ok(dv_numeric_touched_fast(NULL) == 0, "a NULL instance has touched nothing");
+
+  {
+    /* The copy path. Eight bytes of f64, adopted, and the value that lands on
+       the stack is a string of the same bytes until the 'array' type exists.
+       The buffer is released by the call either way, so there is no free
+       here -- running this under the sanitizers is what checks that claim. */
+    double one = 1.0;
+    void *buf = malloc(sizeof(one));
+    if (buf == NULL) { ok(0, "malloc for the adopt path"); dv_free(inst); return; }
+    memcpy(buf, &one, sizeof(one));
+    eq_i(dv_array_adopt(inst, DV_DTYPE_F64, sizeof(one), buf), 1,
+         "an f64 buffer is copied, not adopted, before the array type exists");
+  }
+  {
+    /* Zero length is a legitimate column, not an error. */
+    void *buf = malloc(1);
+    if (buf != NULL)
+      eq_i(dv_array_adopt(inst, DV_DTYPE_U8, 0, buf), 1,
+           "an empty buffer is accepted");
+  }
+  {
+    /* The invalid-argument returns. Ownership does not transfer in any of
+       them, so each buffer is freed here. */
+    void *buf = malloc(8);
+    if (buf != NULL) {
+      eq_i(dv_array_adopt(inst, 99, 8, buf), 1, "an unknown dtype is refused");
+      eq_i(dv_array_adopt(inst, DV_DTYPE_I64, 3, buf), 1,
+           "a length that is not a whole number of elements is refused");
+      free(buf);
+    }
+    eq_i(dv_array_adopt(inst, DV_DTYPE_U8, 8, NULL), 1,
+         "a NULL buffer with a non-zero length is refused");
+    eq_i(dv_array_adopt(NULL, DV_DTYPE_U8, 0, NULL), 1,
+         "a NULL instance is refused");
+  }
+  {
+    /* Adopted bytes are charged to the instance. Not asserted as an exact
+       figure -- the copy the guest now holds is counted too -- but the
+       counter must not have gone *down*, which is the drift that made a
+       memory budget evadable once before (see 'dv_alloc'). */
+    uint64_t now = 0, peak = 0;
+    dv_memory(inst, &now, &peak);
+    ok(peak > 0, "the memory counter is still positive after an adopt");
+  }
+  dv_free(inst);
+}
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
   version();
+  build_facts();
   run_to_completion();
   errors();
   queues();
@@ -2605,6 +2704,9 @@ int main (void) {
   an_instance_is_sealed_by_default();
   a_sealed_instance_reaches_nothing_outside_itself();
   a_snapshot_does_not_cross_the_seal();
+
+  printf("\n=== the numeric surface (Plan-2026-09 3.1) ===\n");
+  numeric_surface();
 
   printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");
   a_parked_instance_snapshots_and_wakes();
