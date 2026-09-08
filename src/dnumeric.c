@@ -1744,6 +1744,28 @@ static int dvn_f_set (lua_State *L) {
 }
 
 
+/*
+** The mock a fast-tier backend will one day replace.
+**
+** doc/Plan-2026-09.md A3 asks for the flag to be "wired and tested with a
+** mock", and this is the mock: it does what a fast-tier kernel would do
+** on entry and nothing else. Only in the debug build, which is the build
+** the suite and the contract tests run and the one no artifact ships, so
+** a program cannot reach it anywhere it matters.
+**
+** Why a hook rather than a kernel that pretends to be fast: the thing
+** worth proving is the path from "a kernel decided to run fast" to
+** 'dv_numeric_touched_fast' answering a host, and a real kernel would
+** prove the same path with more moving parts in front of it.
+*/
+#if defined(LUA_DEBUG)
+static int dvn_f_mark_fast (lua_State *L) {
+  diluvium_numeric_touched(L);
+  return 0;
+}
+#endif
+
+
 /* ======================================================== the library == */
 
 /*
@@ -1815,6 +1837,10 @@ static const luaL_Reg arraylib[] = {
   /* linear algebra */
   {"dot", dvn_f_dot},
   {"matmul", dvn_f_matmul},
+#if defined(LUA_DEBUG)
+  /* the fast-tier mock; see above. Absent from every shipped build. */
+  {"__mark_fast", dvn_f_mark_fast},
+#endif
   {NULL, NULL}
 };
 
