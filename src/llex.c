@@ -91,6 +91,7 @@ void luaX_init (lua_State *L) {
   luaC_fix(L, obj2gco(luaS_newliteral(L, "defer")));
   luaC_fix(L, obj2gco(luaS_newliteral(L, "with")));
   luaC_fix(L, obj2gco(luaS_newliteral(L, "continue")));
+  luaC_fix(L, obj2gco(luaS_newliteral(L, "const")));
 }
 
 
@@ -210,6 +211,7 @@ void luaX_setinput (lua_State *L, LexState *ls, ZIO *z, TString *source,
   ls->dfrn = luaS_newliteral(L, "defer");   /* get "defer" string */
   ls->wthn = luaS_newliteral(L, "with");    /* get "with" string */
   ls->contn = luaS_newliteral(L, "continue"); /* get "continue" string */
+  ls->cstn = luaS_newliteral(L, "const");    /* get "const" string */
 #if LUA_COMPAT_GLOBAL
   /* compatibility mode: "global" is not a reserved word */
   ls->glbn = luaS_newliteral(L, "global");  /* get "global" string */
@@ -263,15 +265,119 @@ static int check_next2 (LexState *ls, const char *set) {
 **
 ** The caller might have already read an initial dot.
 */
+/*
+** Diluvium: the digit set a numeral separator has to sit between.
+**
+** Base-aware because 'F' is a digit in a hex numeral and a letter in a
+** decimal one, so a single test would accept '1_F' or reject '0xF_F'.
+*/
+#define DVNUM_DEC	0
+#define DVNUM_HEX	1
+#define DVNUM_BIN	2
+
+static int isnumdigit (int c, int base) {
+  switch (base) {
+    case DVNUM_HEX: return lisxdigit(c);
+    case DVNUM_BIN: return c == '0' || c == '1';
+    default: return lisdigit(c);
+  }
+}
+
+
+/*
+** Diluvium: '_' inside a numeral (syntax proposals 3.5). Ignored, and it
+** must sit *between* digits -- the character already saved and the one
+** coming must both be digits in this numeral's base. So '1_000' and
+** '0xFF_FF' are numbers while '1_', '1__0', '0x_FF' and '1e_5' are not.
+**
+** Nothing is saved, so 'luaO_str2num' below never sees an underscore and
+** needs no knowledge of this at all.
+**
+** Returns 1 when it consumed a separator, 0 when the current character is
+** not '_'. Raises rather than returning when the '_' is misplaced, because
+** by then the character is consumed and there is no way back.
+*/
+static int numseparator (LexState *ls, int base) {
+  size_t n;
+  const char *b;
+  if (ls->current != '_')
+    return 0;
+  n = luaZ_bufflen(ls->buff);
+  b = luaZ_buffer(ls->buff);
+  if (n == 0 || !isnumdigit(cast_uchar(b[n - 1]), base)) {
+    save_and_next(ls);  /* show the '_' in the message */
+    save(ls, '\0');
+    lexerror(ls, "'_' in a number must follow a digit", TK_INT);
+  }
+  next(ls);  /* skip the '_' without saving it */
+  if (!isnumdigit(ls->current, base)) {
+    save(ls, '_');  /* likewise */
+    if (ls->current != EOZ)  /* EOZ is not a character; do not quote it */
+      save_and_next(ls);
+    save(ls, '\0');
+    lexerror(ls, "'_' in a number must be followed by a digit", TK_INT);
+  }
+  return 1;
+}
+
+
+/*
+** Diluvium: binary integer literals, '0b1010_0110' (syntax proposals 3.5).
+**
+** Read here rather than handed to 'luaO_str2num', which knows decimal and
+** hex and is shared with 'tonumber' -- teaching it '0b' would make
+** 'tonumber("0b1")' answer differently from stock Lua, which is a library
+** change in the middle of a syntax one.
+**
+** Wraps on overflow, exactly as a hex literal does ('l_str2int' in
+** lobject.c accumulates unsigned and lets it wrap), so '0b' and '0x'
+** describe bit patterns the same way. Always an integer: there is no
+** binary float syntax and no exponent.
+*/
+static int read_binary (LexState *ls, SemInfo *seminfo) {
+  lua_Unsigned a = 0;
+  int digits = 0;
+  for (;;) {
+    if (numseparator(ls, DVNUM_BIN))
+      continue;
+    if (ls->current != '0' && ls->current != '1')
+      break;
+    a = a * 2 + cast_uint(ls->current - '0');
+    digits++;
+    save_and_next(ls);
+  }
+  /* A digit, a letter or a '.' here is the rest of something that is not a
+     binary numeral: '0b12', '0b1f', '0b1.5'. Saved so the message quotes
+     it, the same way the decimal path forces an error on a trailing
+     letter. */
+  if (digits == 0 || lislalpha(ls->current) || lisdigit(ls->current) ||
+      ls->current == '.') {
+    if (ls->current != EOZ)  /* EOZ is not a character; do not quote it */
+      save_and_next(ls);
+    save(ls, '\0');
+    lexerror(ls, "malformed number", TK_INT);
+  }
+  seminfo->i = l_castU2S(a);
+  return TK_INT;
+}
+
+
 static int read_numeral (LexState *ls, SemInfo *seminfo) {
   TValue obj;
   const char *expo = "Ee";
+  int base = DVNUM_DEC;
   int first = ls->current;
   lua_assert(lisdigit(ls->current));
   save_and_next(ls);
-  if (first == '0' && check_next2(ls, "xX"))  /* hexadecimal? */
+  if (first == '0' && check_next2(ls, "xX")) {  /* hexadecimal? */
     expo = "Pp";
+    base = DVNUM_HEX;
+  }
+  else if (first == '0' && check_next2(ls, "bB"))  /* Diluvium: binary? */
+    return read_binary(ls, seminfo);
   for (;;) {
+    if (numseparator(ls, base))  /* Diluvium: '_' between digits? */
+      continue;
     if (check_next2(ls, expo))  /* exponent mark? */
       check_next2(ls, "-+");  /* optional exponent sign */
     else if (lisxdigit(ls->current) || ls->current == '.')  /* '%x|%.' */

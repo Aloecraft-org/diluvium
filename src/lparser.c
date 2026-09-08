@@ -64,6 +64,8 @@ typedef struct BlockCnt {
 */
 static void statement (LexState *ls);
 static void expr (LexState *ls, expdesc *v);
+static int isspread (LexState *ls);
+static void spreadexp (LexState *ls, expdesc *v);
 
 
 static l_noret error_expected (LexState *ls, int token) {
@@ -931,6 +933,7 @@ typedef struct ConsControl {
   int na;  /* number of array elements already stored */
   int tostore;  /* number of array elements pending to be stored */
   int maxtostore;  /* maximum number of pending elements */
+  int spread;  /* Diluvium: the last item read was a spread */
 } ConsControl;
 
 
@@ -995,8 +998,13 @@ static void lastlistfield (FuncState *fs, ConsControl *cc) {
 
 
 static void listfield (LexState *ls, ConsControl *cc) {
-  /* listfield -> exp */
-  expr(ls, &cc->v);
+  /* listfield -> exp | '...' suffixedexp */
+  if (isspread(ls)) {  /* Diluvium: spread (syntax proposals 3.7) */
+    spreadexp(ls, &cc->v);
+    cc->spread = 1;
+  }
+  else
+    expr(ls, &cc->v);
   cc->tostore++;
 }
 
@@ -1048,6 +1056,7 @@ static void constructor (LexState *ls, expdesc *t) {
   ConsControl cc;
   luaK_code(fs, 0);  /* space for extra arg. */
   cc.na = cc.nh = cc.tostore = 0;
+  cc.spread = 0;
   cc.t = t;
   init_exp(t, VNONRELOC, fs->freereg);  /* table will be at stack top */
   luaK_reserveregs(fs, 1);
@@ -1056,6 +1065,13 @@ static void constructor (LexState *ls, expdesc *t) {
   cc.maxtostore = maxtostore(fs);
   do {
     if (ls->t.token == /*{*/ '}') break;
+    /* Diluvium: a spread expands to as many values as the table holds,
+       and Lua expands only the *last* expression of a list -- an earlier
+       one is truncated to one value. So a spread that is not last would
+       silently drop everything but the first element. Refused instead;
+       'lastlistfield' below is what makes the last one expand. */
+    if (cc.spread)
+      luaX_syntaxerror(ls, "a spread must be the last item in a constructor");
     if (cc.v.k != VVOID)  /* is there a previous list item? */
       closelistfield(fs, &cc);  /* close it */
     field(ls, &cc);
@@ -1076,21 +1092,99 @@ static void setvararg (FuncState *fs) {
 }
 
 
+/*
+** Diluvium: a parameter's default value (syntax proposals 3.2).
+**
+**   function connect(host, port = 8080)
+**
+** is exactly
+**
+**   function connect(host, port) if port == nil then port = 8080 end
+**
+** and this emits that, through the ordinary expression machinery, so the
+** bytecode is the bytecode the hand-written form produces. An explicit
+** 'nil' argument therefore takes the default, which is the Lua-consistent
+** reading -- a missing argument and an explicit 'nil' are the same value.
+**
+** The expression is evaluated per call and only when it is needed, so a
+** default may have side effects or raise, and it may name any parameter
+** to its left: 'parlist' activates each parameter as it reads it, so
+** everything before this one is in scope and everything after it is not.
+*/
+static void paramdefault (LexState *ls, int vidx, int line) {
+  FuncState *fs = ls->fs;
+  expdesc cond, nil, target, val;
+  init_var(fs, &cond, vidx);
+  luaK_infix(fs, OPR_EQ, &cond);
+  init_exp(&nil, VNIL, 0);
+  luaK_posfix(fs, OPR_EQ, &cond, &nil, line);
+  luaK_goiftrue(fs, &cond);  /* fall through when the parameter is nil */
+  init_var(fs, &target, vidx);
+  expr(ls, &val);
+  luaK_storevar(fs, &target, &val);
+  luaK_patchtohere(fs, cond.f);  /* a supplied argument lands here */
+  fs->freereg = luaY_nvarstack(fs);  /* free the expression's registers */
+}
+
+
+/*
+** Diluvium: give every variable that is now active its register.
+**
+** 'self' is the reason this reads 'nactvar' rather than counting the
+** parameters it has seen: 'body' activates that one before calling
+** 'parlist', and the single 'luaK_reserveregs(fs, fs->nactvar)' this
+** replaces covered it by construction. Reserving per parameter instead
+** and forgetting 'self' left 'freereg' one low in every method, so the
+** body compiled its first temporary on top of the last parameter.
+*/
+static void reserveparams (FuncState *fs) {
+  int n = cast_int(fs->nactvar) - cast_int(fs->freereg);
+  if (n > 0)
+    luaK_reserveregs(fs, n);
+}
+
+
 static void parlist (LexState *ls) {
-  /* parlist -> [ {NAME ','} (NAME | '...') ] */
+  /* parlist -> [ {NAME [ '=' exp ] ','} (NAME [ '=' exp ] | '...') ] */
   FuncState *fs = ls->fs;
   Proto *f = fs->f;
   int nparams = 0;
   int varargk = 0;
+  int ndefaults = 0;  /* Diluvium: parameters carrying a default value */
   if (ls->t.token != ')') {  /* is 'parlist' not empty? */
     do {
       switch (ls->t.token) {
         case TK_NAME: {
-          new_localvar(ls, str_checkname(ls));
+          /* Diluvium: each parameter is activated and given its register
+             here rather than all of them together after the loop. With no
+             defaults this is the same thing said in a loop -- no code is
+             emitted, so every parameter still starts at pc 0 and the
+             prototype is unchanged. With defaults it is what puts the
+             parameter, and the ones before it, in scope for the
+             expression below. */
+          int vidx = new_localvar(ls, str_checkname(ls));
+          int line = ls->linenumber;
           nparams++;
+          adjustlocalvars(ls, 1);
+          reserveparams(fs);
+          if (testnext(ls, '=')) {  /* Diluvium: default value? */
+            paramdefault(ls, vidx, line);
+            ndefaults++;
+          }
           break;
         }
         case TK_DOTS: {
+          /* Diluvium: 'OP_VARARGPREP' reads the live argument count off
+             the stack, so it has to be a function's first instruction --
+             and a default's code is already in front of it by the time
+             '...' is read, because '...' comes last in a parameter list
+             and the lexer is a single pass with no way to go back for the
+             defaults afterwards. Refused with the reason rather than
+             miscompiled: the count VARARGPREP would read has moved, and
+             the function would see the wrong arguments. */
+          if (ndefaults > 0)
+            luaX_syntaxerror(ls,
+              "'...' cannot follow a parameter with a default value");
           varargk = 1;
           luaX_next(ls);  /* skip '...' */
           if (ls->t.token == TK_NAME)
@@ -1103,19 +1197,61 @@ static void parlist (LexState *ls) {
       }
     } while (!varargk && testnext(ls, ','));
   }
-  adjustlocalvars(ls, nparams);
   f->numparams = cast_byte(fs->nactvar);
   if (varargk) {
     setvararg(fs);  /* declared vararg */
     adjustlocalvars(ls, 1);  /* vararg parameter */
   }
-  /* reserve registers for parameters (plus vararg parameter, if present) */
-  luaK_reserveregs(fs, fs->nactvar);
+  /* reserve registers for parameters (plus vararg parameter, if present).
+     Still needed after the loop: a method with no parameters at all never
+     enters it, and 'self' is active. */
+  reserveparams(fs);
+}
+
+
+/*
+** Diluvium: an expression body (syntax proposals 3.8).
+**
+**   function area(w, h) = w * h
+**
+** is 'return w * h end', and this emits exactly that: one value, through
+** the same 'luaK_ret' the return statement uses, so a call in the
+** expression is a tail call for the same reason it would be in a written
+** 'return'.
+**
+** One expression, not an expression list, and that is not a shortcut. An
+** expression body ends where its expression ends, with no 'end' to close
+** it, so a comma has to be free to belong to whatever encloses the
+** function -- otherwise
+**
+**   { half = function(x) = x / 2, name = "half" }
+**
+** would read ', name = "half"' as a second return value and swallow the
+** rest of the table. A function that returns two values keeps the block
+** form, which says where it stops.
+*/
+static void expbody (LexState *ls) {
+  FuncState *fs = ls->fs;
+  expdesc e;
+  int first;
+  expr(ls, &e);
+  if (hasmultret(e.k)) {  /* a call or '...'? */
+    luaK_setmultret(fs, &e);
+    if (e.k == VCALL && !fs->bl->insidetbc) {  /* tail call */
+      SET_OPCODE(getinstruction(fs, &e), OP_TAILCALL);
+      lua_assert(GETARG_A(getinstruction(fs, &e)) == luaY_nvarstack(fs));
+    }
+    luaK_ret(fs, luaY_nvarstack(fs), LUA_MULTRET);
+  }
+  else {
+    first = luaK_exp2anyreg(fs, &e);  /* can use the value's own slot */
+    luaK_ret(fs, first, 1);
+  }
 }
 
 
 static void body (LexState *ls, expdesc *e, int ismethod, int line) {
-  /* body ->  '(' parlist ')' block END */
+  /* body ->  '(' parlist ')' (block END | '=' exp) */
   FuncState new_fs;
   BlockCnt bl;
   new_fs.f = addprototype(ls);
@@ -1128,24 +1264,59 @@ static void body (LexState *ls, expdesc *e, int ismethod, int line) {
   }
   parlist(ls);
   checknext(ls, ')');
-  statlist(ls);
-  new_fs.f->lastlinedefined = ls->linenumber;
-  check_match(ls, TK_END, TK_FUNCTION, line);
+  if (testnext(ls, '=')) {  /* Diluvium: expression body? */
+    expbody(ls);
+    /* 'lastline', not 'linenumber': an expression body has no 'end' to
+       stop on, so by now the lexer holds the token *after* the function
+       and 'linenumber' is that token's line. The block form below reads
+       'linenumber' while the current token is still its own 'end'. */
+    new_fs.f->lastlinedefined = ls->lastline;
+  }
+  else {
+    statlist(ls);
+    new_fs.f->lastlinedefined = ls->linenumber;
+    check_match(ls, TK_END, TK_FUNCTION, line);
+  }
   codeclosure(ls, e);
   close_func(ls);
 }
 
 
-static int explist (LexState *ls, expdesc *v) {
+/*
+** Diluvium: 'allowspread' is set only where a list's last expression is
+** expanded to all its values -- a call's arguments (syntax proposals
+** 3.7). Everywhere else a list has a fixed arity and a spread would be
+** truncated to one value without saying so, which is worse than not
+** having the form.
+*/
+static int explistaux (LexState *ls, expdesc *v, int allowspread) {
   /* explist -> expr { ',' expr } */
   int n = 1;  /* at least one expression */
-  expr(ls, v);
-  while (testnext(ls, ',')) {
-    luaK_exp2nextreg(ls->fs, v);
+  int spread = 0;
+  if (allowspread && isspread(ls)) {
+    spreadexp(ls, v);
+    spread = 1;
+  }
+  else
     expr(ls, v);
+  while (testnext(ls, ',')) {
+    if (spread)
+      luaX_syntaxerror(ls, "a spread must be the last argument");
+    luaK_exp2nextreg(ls->fs, v);
+    if (allowspread && isspread(ls)) {
+      spreadexp(ls, v);
+      spread = 1;
+    }
+    else
+      expr(ls, v);
     n++;
   }
   return n;
+}
+
+
+static int explist (LexState *ls, expdesc *v) {
+  return explistaux(ls, v, 0);
 }
 
 
@@ -1160,7 +1331,7 @@ static void funcargs (LexState *ls, expdesc *f) {
       if (ls->t.token == ')')  /* arg list is empty? */
         args.k = VVOID;
       else {
-        explist(ls, &args);
+        explistaux(ls, &args, 1);  /* Diluvium: a spread may end the list */
         if (hasmultret(args.k))
           luaK_setmultret(fs, &args);
       }
@@ -1310,6 +1481,68 @@ static void suffixedexp (LexState *ls, expdesc *v, int *safenav) {
     luaK_patchtohere(fs, over);
     if (safenav != NULL) *safenav = 1;
   }
+}
+
+
+/*
+** Diluvium: is this the start of a spread (syntax proposals 3.7)?
+**
+**   f(a, ...args)        {1, 2, ...rest}
+**
+** '...' followed by a name, which stock Lua reads as two expressions with
+** nothing between them -- a syntax error, so the form is free.
+**
+** A *parameter* list is not reached from here and keeps 5.5's own meaning
+** for the same two tokens: 'function f(...args)' names the vararg table.
+** The two never meet -- 'parlist' handles '...' itself and never calls
+** into a list that allows a spread -- but they do read alike, and that is
+** worth knowing before writing both in one function.
+*/
+static int isspread (LexState *ls) {
+  return ls->t.token == TK_DOTS && luaX_lookahead(ls) == TK_NAME;
+}
+
+
+/*
+** Diluvium: '...' suffixedexp, compiled as '_ENV.table.unpack(exp)'.
+**
+** A call, so it carries VCALL and expands to all of its values wherever
+** Lua expands the last expression of a list -- which is exactly where the
+** callers allow it, and why nothing here has to know about multiple
+** results.
+**
+** Through _ENV rather than a registry helper, following 'defer' above and
+** for the same reason: generated code reaches a library function no other
+** way, and adding a registry table is machinery this one form does not
+** justify. The consequence is stated rather than hidden -- a program that
+** replaces the global 'table', or 'table.unpack' in it, changes what a
+** spread means, in the same way it changes what 'defer' means by
+** replacing 'setmetatable'.
+**
+** 'suffixedexp' rather than 'expr', so the spread takes a variable and
+** its suffixes and stops: in 'f(...a .. b)' the concatenation is not part
+** of the spread, and would truncate it to one value if it were.
+*/
+static void spreadexp (LexState *ls, expdesc *v) {
+  FuncState *fs = ls->fs;
+  expdesc fn, key, arg;
+  int base, line = ls->linenumber;
+  luaX_next(ls);  /* skip '...' */
+  /* '_ENV.table.unpack', built the way 'fieldsel' builds any two-level
+     name: the first level has to reach a register or an upvalue before
+     the second can index it. */
+  buildglobal(ls, luaX_newstring(ls, "table", 5), &fn);
+  luaK_exp2anyregup(fs, &fn);
+  codestring(&key, luaX_newstring(ls, "unpack", 6));
+  luaK_indexed(fs, &fn, &key);
+  luaK_exp2nextreg(fs, &fn);  /* the function being called */
+  lua_assert(fn.k == VNONRELOC);
+  base = fn.u.info;  /* base register for the call, as 'funcargs' does */
+  suffixedexp(ls, &arg, NULL);
+  luaK_exp2nextreg(fs, &arg);  /* its one argument */
+  init_exp(v, VCALL, luaK_codeABC(fs, OP_CALL, base, 2, 2));
+  luaK_fixline(fs, line);
+  fs->freereg = cast_byte(base + 1);  /* the call leaves one result */
 }
 
 
@@ -2213,7 +2446,15 @@ static void checktoclose (FuncState *fs, int level) {
 }
 
 
-static void localstat (LexState *ls) {
+/*
+** Diluvium: 'defkind' is the attribute every variable in the list gets
+** unless it carries its own. It is a parameter rather than read here so
+** that 'const NAME = exp' (syntax proposals 3.6) is this function called
+** with RDKCONST -- literally 'local NAME <const> = exp', sharing the
+** compile-time-constant folding below and everything else, rather than a
+** second declaration path that would have to be kept in step with it.
+*/
+static void localstat (LexState *ls, lu_byte defkind) {
   /* stat -> LOCAL NAME attrib { ',' NAME attrib } ['=' explist] */
   FuncState *fs = ls->fs;
   int toclose = -1;  /* index of to-be-closed variable (if any) */
@@ -2222,8 +2463,6 @@ static void localstat (LexState *ls) {
   int nvars = 0;
   int nexps;
   expdesc e;
-  /* get prefixed attribute (if any); default is regular local variable */
-  lu_byte defkind = getvarattribute(ls, VDKREG);
   do {  /* for each variable */
     TString *vname = str_checkname(ls);  /* get its name */
     lu_byte kind = getvarattribute(ls, defkind);  /* postfixed attribute */
@@ -2384,6 +2623,18 @@ static void withstat (LexState *ls, int line) {
 
 static int iswithstat (LexState *ls) {
   return ls->t.seminfo.ts == ls->wthn && luaX_lookahead(ls) == TK_NAME;
+}
+
+
+/*
+** Diluvium: does a 'const' name at the start of a statement introduce a
+** const declaration (syntax proposals 3.6)?  Only when a name follows,
+** which is the whole rule: 'const = e', 'const(...)', 'const.x' and
+** 'const[k]' are all programs stock Lua accepts and they keep their
+** meaning, while 'const NAME' is a syntax error there.
+*/
+static int isconststat (LexState *ls) {
+  return ls->t.seminfo.ts == ls->cstn && luaX_lookahead(ls) == TK_NAME;
 }
 
 
@@ -2755,7 +3006,8 @@ static void statement (LexState *ls) {
       }
       else
       {
-        localstat(ls);
+        /* prefixed attribute (if any); default is regular local variable */
+        localstat(ls, getvarattribute(ls, VDKREG));
       }
       break;
     }
@@ -2797,6 +3049,11 @@ static void statement (LexState *ls) {
       }
       if (iscontinuestat(ls)) {  /* Diluvium: stat -> continuestat */
         continuestat(ls, line);
+        break;
+      }
+      if (isconststat(ls)) {  /* Diluvium: stat -> 'const' localstat */
+        luaX_next(ls);  /* skip 'const' */
+        localstat(ls, RDKCONST);
         break;
       }
 #if LUA_COMPAT_GLOBAL
