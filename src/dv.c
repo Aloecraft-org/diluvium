@@ -415,8 +415,15 @@ LUA_API void diluvium_numeric_touched (lua_State *L) {
 ** Bytes per element, or 0 for a dtype this build does not know.
 **
 ** The dispatch point for element types. Every place that has to reason about a
-** dtype goes through here rather than switching again, so adding 'c128' in
-** stage 2 is one line in one function.
+** dtype goes through here rather than switching again.
+**
+** Stage 2 added a 'c128' dtype and it is deliberately not here. 'dv.h' spells
+** this call's dtype argument out as "0=f64 1=i64 2=u8" and session B compiled
+** against that header at A0; a fourth number would move a published contract,
+** and it would move it for a type no host has a buffer of -- complex data
+** arrives as pairs of doubles, which is 'f64' and then 'array.complex'. So
+** 'c128' lives in the guest library only, and 'diluvium_array_adopt' refuses
+** it by name rather than by falling off this switch.
 */
 static size_t dv_dtype_width (int dtype) {
   switch (dtype) {

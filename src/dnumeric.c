@@ -34,6 +34,8 @@
 **   DVN_ACC        accumulators in the canonical reduction order
 **   DVN_MTNAME     the metatable's registry name
 **   DVN_MAXDIM     dimensions an array may have
+**   DVN_TAU        2*pi, the constant every FFT twiddle is built from
+**   DVN_NTT_P      the NTT's prime, and DVN_NTT_G its primitive root
 **
 ** Fan-out points, each a table or a switch and nothing declared
 ** elsewhere:
@@ -42,13 +44,15 @@
 **   arraymeta      the metamethods
 **   dvn_width      the dtype table: bytes per element
 **   dvn_getf / dvn_geti / dvn_setf / dvn_seti   the dtype accessors
+**   dvn_getc / dvn_setc                         the c128 pair accessors
+**   dvn_check / dvn_checkany   which kernels a c128 array may enter
 **   dvn_binop      the elementwise operator set
 **   dvn_reduce     the reduction set
 **
 ** Below the surface the file runs: values and layout, the budget, dtype
 ** access, construction, views, the canonical reduction, elementwise,
-** reductions, sorting, grouping, linear algebra, formatting,
-** registration.
+** reductions, sorting, grouping, linear algebra, complex, transforms,
+** formatting, registration.
 */
 
 #define dnumeric_c
@@ -64,6 +68,7 @@
 #include "lua.h"
 
 #include "lauxlib.h"
+#include "dlibm.h"    /* the twiddles: stage 1's dv_cos and dv_sin */
 #include "dnumeric.h"
 
 #if defined(DV_NUMERIC)
@@ -149,19 +154,21 @@ static void dvn_meter_elems (dvn_meter *m, size_t n) {
 
 static size_t dvn_width (int dtype) {
   switch (dtype) {
-    case DVN_F64: return sizeof(double);
-    case DVN_I64: return sizeof(lua_Integer);
-    case DVN_U8:  return 1;
-    default:      return 0;
+    case DVN_F64:  return sizeof(double);
+    case DVN_I64:  return sizeof(lua_Integer);
+    case DVN_U8:   return 1;
+    case DVN_C128: return 2 * sizeof(double);
+    default:       return 0;
   }
 }
 
 static const char *dvn_dtypename (int dtype) {
   switch (dtype) {
-    case DVN_F64: return "f64";
-    case DVN_I64: return "i64";
-    case DVN_U8:  return "u8";
-    default:      return "?";
+    case DVN_F64:  return "f64";
+    case DVN_I64:  return "i64";
+    case DVN_U8:   return "u8";
+    case DVN_C128: return "c128";
+    default:       return "?";
   }
 }
 
@@ -169,7 +176,8 @@ static int dvn_dtypecode (lua_State *L, const char *name) {
   if (strcmp(name, "f64") == 0) return DVN_F64;
   if (strcmp(name, "i64") == 0) return DVN_I64;
   if (strcmp(name, "u8") == 0) return DVN_U8;
-  return luaL_error(L, "unknown dtype '%s' (f64, i64 or u8)", name);
+  if (strcmp(name, "c128") == 0) return DVN_C128;
+  return luaL_error(L, "unknown dtype '%s' (f64, i64, u8 or c128)", name);
 }
 
 /*
@@ -194,11 +202,22 @@ static size_t dvn_off2 (const dv_array *a, size_t r, size_t c) {
   return (size_t)((ptrdiff_t)r * a->stride[0] + (ptrdiff_t)c * a->stride[1]);
 }
 
+/*
+** The four scalar accessors. 'c128' is not one of the cases and must not
+** reach them: it is two doubles per element, so a c128 array read as u8
+** would return a byte of a mantissa and say nothing was wrong.
+** 'dvn_check' is what keeps it away: every kernel that takes a real
+** array goes through it, and 'dvn_operand_read' makes the same refusal
+** for the elementwise path. The 'default' case is u8, and the comment on
+** each is there because a reader of these four cannot see that from
+** here.
+*/
 static double dvn_getf (const dv_array *a, size_t off) {
   switch (a->dtype) {
     case DVN_F64: return ((const double *)a->data)[off];
     case DVN_I64: return (double)((const lua_Integer *)a->data)[off];
-    default:      return (double)((const unsigned char *)a->data)[off];
+    default: /* DVN_U8; c128 never arrives, see 'dvn_check' */
+             return (double)((const unsigned char *)a->data)[off];
   }
 }
 
@@ -206,7 +225,8 @@ static lua_Integer dvn_geti (const dv_array *a, size_t off) {
   switch (a->dtype) {
     case DVN_F64: return (lua_Integer)((const double *)a->data)[off];
     case DVN_I64: return ((const lua_Integer *)a->data)[off];
-    default:      return (lua_Integer)((const unsigned char *)a->data)[off];
+    default: /* DVN_U8; c128 never arrives, see 'dvn_check' */
+             return (lua_Integer)((const unsigned char *)a->data)[off];
   }
 }
 
@@ -214,7 +234,8 @@ static void dvn_setf (dv_array *a, size_t off, double v) {
   switch (a->dtype) {
     case DVN_F64: ((double *)a->data)[off] = v; break;
     case DVN_I64: ((lua_Integer *)a->data)[off] = (lua_Integer)v; break;
-    default:      ((unsigned char *)a->data)[off] = (unsigned char)v; break;
+    default: /* DVN_U8; c128 never arrives, see 'dvn_check' */
+             ((unsigned char *)a->data)[off] = (unsigned char)v; break;
   }
 }
 
@@ -222,9 +243,28 @@ static void dvn_seti (dv_array *a, size_t off, lua_Integer v) {
   switch (a->dtype) {
     case DVN_F64: ((double *)a->data)[off] = (double)v; break;
     case DVN_I64: ((lua_Integer *)a->data)[off] = v; break;
-    default:      ((unsigned char *)a->data)[off] = (unsigned char)(v & 0xFF);
-                  break;
+    default: /* DVN_U8; c128 never arrives, see 'dvn_check' */
+             ((unsigned char *)a->data)[off] = (unsigned char)(v & 0xFF);
+             break;
   }
+}
+
+/*
+** A c128 element is the pair of doubles at 2*off, real part first. The
+** offset arithmetic is the same as every other dtype's -- 'dvn_off'
+** counts elements -- and only these two functions know an element is
+** two of anything.
+*/
+static void dvn_getc (const dv_array *a, size_t off, double *re, double *im) {
+  const double *p = (const double *)a->data + 2 * off;
+  *re = p[0];
+  *im = p[1];
+}
+
+static void dvn_setc (dv_array *a, size_t off, double re, double im) {
+  double *p = (double *)a->data + 2 * off;
+  p[0] = re;
+  p[1] = im;
 }
 
 /* Is this dtype a whole number? Decides whether an operator stays exact
@@ -236,8 +276,32 @@ static int dvn_isint (int dtype) {
 
 /* ====================================================== construction == */
 
-static dv_array *dvn_check (lua_State *L, int idx) {
+/*
+** Two ways to take an array argument, and which one a function uses is
+** the whole of how 'c128' is kept out of the kernels that cannot mean
+** anything for it.
+**
+** 'dvn_checkany' is any array. It is what the shape and view functions
+** use, and the transforms, and anything that copies elements without
+** interpreting them.
+**
+** 'dvn_check' is an array of a *real* dtype, and is the default. Every
+** elementwise operator, every reduction, the sorts, the grouping and the
+** linear algebra go through it, so none of them had to grow a complex
+** case and none of them can silently read a c128 array as bytes. What a
+** program gets instead is a sentence naming the dtype and the two
+** functions that turn it into one this kernel can take.
+*/
+static dv_array *dvn_checkany (lua_State *L, int idx) {
   return (dv_array *)luaL_checkudata(L, idx, DVN_MTNAME);
+}
+
+static dv_array *dvn_check (lua_State *L, int idx) {
+  dv_array *a = (dv_array *)luaL_checkudata(L, idx, DVN_MTNAME);
+  if (a->dtype == DVN_C128)
+    luaL_error(L, "this operation needs a real array, not c128 "
+                  "(use array.real or array.imag)");
+  return a;
 }
 
 static dv_array *dvn_test (lua_State *L, int idx) {
@@ -538,6 +602,8 @@ typedef struct dvn_operand {
 static void dvn_operand_read (lua_State *L, int idx, dvn_operand *o) {
   o->a = dvn_test(L, idx);
   if (o->a != NULL) {
+    if (o->a->dtype == DVN_C128)  /* the same refusal 'dvn_check' makes */
+      dvn_check(L, idx);
     o->isint = dvn_isint(o->a->dtype);
     o->f = 0.0;
     o->i = 0;
@@ -1331,9 +1397,11 @@ static int dvn_fill (lua_State *L, double v) {
   dv_array *a;
   size_t k;
   dvn_f_new(L);
-  a = dvn_check(L, -1);
-  for (k = 0; k < a->nelem; k++)
-    dvn_setf(a, k, v);
+  a = dvn_checkany(L, -1);
+  for (k = 0; k < a->nelem; k++) {
+    if (a->dtype == DVN_C128) dvn_setc(a, k, v, 0.0);  /* 'ones' is 1+0i */
+    else dvn_setf(a, k, v);
+  }
   return 1;
 }
 
@@ -1381,6 +1449,10 @@ static int dvn_f_from (lua_State *L) {
     }
     dtype = allint ? DVN_I64 : DVN_F64;
   }
+  /* A c128 table is a list of pairs, so its outer entries are tables and
+     the 2D test above would have read the first pair as a row. One
+     dimension, and the pair is the element. */
+  if (dtype == DVN_C128) twod = 0;
   out = twod ? dvn_new(L, dtype, rows, cols, 2)
              : dvn_new(L, dtype, rows, 0, 1);
   for (i = 1; i <= rows; i++) {
@@ -1397,6 +1469,17 @@ static int dvn_f_from (lua_State *L) {
         lua_pop(L, 1);
       }
     }
+    else if (dtype == DVN_C128) {
+      /* '{re, im}', or a bare number for a real value. */
+      if (lua_istable(L, -1)) {
+        double re, im;
+        lua_geti(L, -1, 1); re = luaL_checknumber(L, -1); lua_pop(L, 1);
+        lua_geti(L, -1, 2); im = luaL_optnumber(L, -1, 0.0); lua_pop(L, 1);
+        dvn_setc(out, i - 1, re, im);
+      }
+      else
+        dvn_setc(out, i - 1, luaL_checknumber(L, -1), 0.0);
+    }
     else {
       if (dvn_isint(dtype)) dvn_seti(out, i - 1, luaL_checkinteger(L, -1));
       else dvn_setf(out, i - 1, luaL_checknumber(L, -1));
@@ -1406,27 +1489,39 @@ static int dvn_f_from (lua_State *L) {
   return 1;
 }
 
+/*
+** One element onto the table below the top, at index 'k'. A c128
+** element becomes a two-element table {re, im} -- the shape
+** 'array.from' reads back, so 'from(to_table(a), "c128")' is 'a'.
+*/
+static void dvn_seteleminto (lua_State *L, const dv_array *a, size_t off,
+                             lua_Integer k) {
+  if (a->dtype == DVN_C128) {
+    double re, im;
+    dvn_getc(a, off, &re, &im);
+    lua_createtable(L, 2, 0);
+    lua_pushnumber(L, re); lua_seti(L, -2, 1);
+    lua_pushnumber(L, im); lua_seti(L, -2, 2);
+  }
+  else if (dvn_isint(a->dtype)) lua_pushinteger(L, dvn_geti(a, off));
+  else lua_pushnumber(L, dvn_getf(a, off));
+  lua_seti(L, -2, k);
+}
+
 static int dvn_f_to_table (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   size_t i, j;
   if (a->ndim == 1) {
     lua_createtable(L, (int)a->nelem, 0);
-    for (i = 0; i < a->nelem; i++) {
-      if (dvn_isint(a->dtype)) lua_pushinteger(L, dvn_geti(a, dvn_off(a, i)));
-      else lua_pushnumber(L, dvn_getf(a, dvn_off(a, i)));
-      lua_seti(L, -2, (lua_Integer)i + 1);
-    }
+    for (i = 0; i < a->nelem; i++)
+      dvn_seteleminto(L, a, dvn_off(a, i), (lua_Integer)i + 1);
   }
   else {
     lua_createtable(L, (int)a->shape[0], 0);
     for (i = 0; i < a->shape[0]; i++) {
       lua_createtable(L, (int)a->shape[1], 0);
-      for (j = 0; j < a->shape[1]; j++) {
-        size_t off = dvn_off2(a, i, j);
-        if (dvn_isint(a->dtype)) lua_pushinteger(L, dvn_geti(a, off));
-        else lua_pushnumber(L, dvn_getf(a, off));
-        lua_seti(L, -2, (lua_Integer)j + 1);
-      }
+      for (j = 0; j < a->shape[1]; j++)
+        dvn_seteleminto(L, a, dvn_off2(a, i, j), (lua_Integer)j + 1);
       lua_seti(L, -2, (lua_Integer)i + 1);
     }
   }
@@ -1498,7 +1593,7 @@ static int dvn_f_linspace (lua_State *L) {
 /* slice(a, i, j) -- elements i..j inclusive for a 1D array, rows i..j for
    a 2D one. A view: no copy, and the base stays alive behind it. */
 static int dvn_f_slice (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   lua_Integer i = luaL_checkinteger(L, 2);
   lua_Integer j = luaL_optinteger(L, 3, (lua_Integer)a->shape[0]);
   dv_array *v;
@@ -1519,7 +1614,7 @@ static int dvn_f_slice (lua_State *L) {
 
 /* row(a, i) -- a 1D view of one row of a 2D array. */
 static int dvn_f_row (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   lua_Integer i = luaL_checkinteger(L, 2);
   dv_array *v;
   size_t width = dvn_width(a->dtype);
@@ -1538,7 +1633,7 @@ static int dvn_f_row (lua_State *L) {
 /* transpose(a) -- a 2D view with the axes swapped. Strides, not a copy,
    which is the whole reason strides are in the header. */
 static int dvn_f_transpose (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   dv_array *v;
   luaL_argcheck(L, a->ndim == 2, 1, "transpose needs a 2D array");
   v = dvn_newview(L, 1, a);
@@ -1556,7 +1651,7 @@ static int dvn_f_transpose (lua_State *L) {
 /* copy(a) -- a dense array with the same values, which is what turns a
    view back into something contiguous. */
 static int dvn_f_copy (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   dv_array *out;
   dvn_meter m;
   size_t k;
@@ -1564,25 +1659,50 @@ static int dvn_f_copy (lua_State *L) {
   out = dvn_new(L, a->dtype, a->shape[0], a->shape[1], a->ndim);
   for (k = 0; k < a->nelem; k++) {
     size_t off = dvn_off(a, k);
-    if (dvn_isint(a->dtype)) dvn_seti(out, k, dvn_geti(a, off));
+    if (a->dtype == DVN_C128) {
+      double re, im;
+      dvn_getc(a, off, &re, &im);
+      dvn_setc(out, k, re, im);
+    }
+    else if (dvn_isint(a->dtype)) dvn_seti(out, k, dvn_geti(a, off));
     else dvn_setf(out, k, dvn_getf(a, off));
     if ((k % DVN_BLOCK) == DVN_BLOCK - 1) dvn_meter_block(&m);
   }
   return 1;
 }
 
-/* cast(a, dtype) -- a dense array of another element type. */
+/*
+** cast(a, dtype) -- a dense array of another element type.
+**
+** A real array casts to c128 with a zero imaginary part, which is what
+** every complex program means by it. The other direction is refused:
+** dropping the imaginary part is a decision, and 'array.real' is where a
+** program makes it in a word a reader can see.
+*/
 static int dvn_f_cast (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   int dtype = dvn_dtypecode(L, luaL_checkstring(L, 2));
   dv_array *out;
   dvn_meter m;
   size_t k;
+  if (a->dtype == DVN_C128 && dtype != DVN_C128)
+    return luaL_error(L, "cannot cast c128 to %s: use array.real, "
+                         "array.imag or array.magnitude",
+                      dvn_dtypename(dtype));
   dvn_meter_open(L, &m);
   out = dvn_new(L, dtype, a->shape[0], a->shape[1], a->ndim);
   for (k = 0; k < a->nelem; k++) {
     size_t off = dvn_off(a, k);
-    if (dvn_isint(dtype)) dvn_seti(out, k, dvn_geti(a, off));
+    if (dtype == DVN_C128) {
+      if (a->dtype == DVN_C128) {
+        double re, im;
+        dvn_getc(a, off, &re, &im);
+        dvn_setc(out, k, re, im);
+      }
+      else
+        dvn_setc(out, k, dvn_getf(a, off), 0.0);
+    }
+    else if (dvn_isint(dtype)) dvn_seti(out, k, dvn_geti(a, off));
     else dvn_setf(out, k, dvn_getf(a, off));
     if ((k % DVN_BLOCK) == DVN_BLOCK - 1) dvn_meter_block(&m);
   }
@@ -1593,12 +1713,12 @@ static int dvn_f_cast (lua_State *L) {
 /* ======================================================== inspection == */
 
 static int dvn_f_dtype (lua_State *L) {
-  lua_pushstring(L, dvn_dtypename(dvn_check(L, 1)->dtype));
+  lua_pushstring(L, dvn_dtypename(dvn_checkany(L, 1)->dtype));
   return 1;
 }
 
 static int dvn_f_shape (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   lua_pushinteger(L, (lua_Integer)a->shape[0]);
   if (a->ndim == 2) {
     lua_pushinteger(L, (lua_Integer)a->shape[1]);
@@ -1608,12 +1728,12 @@ static int dvn_f_shape (lua_State *L) {
 }
 
 static int dvn_f_size (lua_State *L) {
-  lua_pushinteger(L, (lua_Integer)dvn_check(L, 1)->nelem);
+  lua_pushinteger(L, (lua_Integer)dvn_checkany(L, 1)->nelem);
   return 1;
 }
 
 static int dvn_f_isview (lua_State *L) {
-  lua_pushboolean(L, dvn_check(L, 1)->owns == DVN_OWN_NONE);
+  lua_pushboolean(L, dvn_checkany(L, 1)->owns == DVN_OWN_NONE);
   return 1;
 }
 
@@ -1632,10 +1752,10 @@ static int dvn_f_isview (lua_State *L) {
 ** separated by a single space, rows of a 2D array by a newline.
 */
 static int dvn_f_bits (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   luaL_Buffer b;
   size_t i, j, rows, cols;
-  char tmp[32];
+  char tmp[48];  /* a c128 element is two 16-digit halves and a colon */
   luaL_buffinit(L, &b);
   rows = (a->ndim == 1) ? 1 : a->shape[0];
   cols = (a->ndim == 1) ? a->shape[0] : a->shape[1];
@@ -1656,6 +1776,19 @@ static int dvn_f_bits (lua_State *L) {
           lua_Integer v = ((const lua_Integer *)a->data)[off];
           l_sprintf(tmp, sizeof(tmp), "%016llx",
                     (unsigned long long)(lua_Unsigned)v);
+          break;
+        }
+        case DVN_C128: {
+          /* Both halves, real first, joined by a colon -- one element is
+             still one space-separated field. */
+          uint64_t ur, ui;
+          const double *pv = (const double *)a->data + 2 * off;
+          memcpy(&ur, pv, sizeof(ur));
+          memcpy(&ui, pv + 1, sizeof(ui));
+          l_sprintf(tmp, sizeof(tmp), "%016llx", (unsigned long long)ur);
+          tmp[16] = ':';
+          l_sprintf(tmp + 17, sizeof(tmp) - 17, "%016llx",
+                    (unsigned long long)ui);
           break;
         }
         default: {
@@ -1680,7 +1813,7 @@ static int dvn_f_bits (lua_State *L) {
 ** array's contents are printed.
 */
 static int dvn_mm_tostring (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   if (a->ndim == 1)
     lua_pushfstring(L, "array<%s>[%I]%s", dvn_dtypename(a->dtype),
                     (lua_Integer)a->shape[0],
@@ -1695,36 +1828,46 @@ static int dvn_mm_tostring (lua_State *L) {
 /* '#a' is the first dimension: the length of a 1D array, the number of
    rows of a 2D one -- so it agrees with what 'a[i]' indexes. */
 static int dvn_mm_len (lua_State *L) {
-  lua_pushinteger(L, (lua_Integer)dvn_check(L, 1)->shape[0]);
+  lua_pushinteger(L, (lua_Integer)dvn_checkany(L, 1)->shape[0]);
+  return 1;
+}
+
+/*
+** get(a, i [, j]) -- one element.
+**
+** A c128 element is two numbers and is returned as two, real part
+** first, rather than as a table: a pair a program can feed straight
+** back to 'set' costs no allocation and no unpacking.
+*/
+static int dvn_pushelem (lua_State *L, const dv_array *a, size_t off) {
+  if (a->dtype == DVN_C128) {
+    double re, im;
+    dvn_getc(a, off, &re, &im);
+    lua_pushnumber(L, re);
+    lua_pushnumber(L, im);
+    return 2;
+  }
+  if (dvn_isint(a->dtype)) lua_pushinteger(L, dvn_geti(a, off));
+  else lua_pushnumber(L, dvn_getf(a, off));
   return 1;
 }
 
 static int dvn_f_get (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   lua_Integer i = luaL_checkinteger(L, 2);
   if (a->ndim == 2 && !lua_isnoneornil(L, 3)) {
     lua_Integer j = luaL_checkinteger(L, 3);
     luaL_argcheck(L, i >= 1 && (size_t)i <= a->shape[0], 2, "out of range");
     luaL_argcheck(L, j >= 1 && (size_t)j <= a->shape[1], 3, "out of range");
-    {
-      size_t off = dvn_off2(a, (size_t)i - 1, (size_t)j - 1);
-      if (dvn_isint(a->dtype)) lua_pushinteger(L, dvn_geti(a, off));
-      else lua_pushnumber(L, dvn_getf(a, off));
-    }
-    return 1;
+    return dvn_pushelem(L, a, dvn_off2(a, (size_t)i - 1, (size_t)j - 1));
   }
   luaL_argcheck(L, a->ndim == 1, 2, "a 2D array needs two indices");
   luaL_argcheck(L, i >= 1 && (size_t)i <= a->shape[0], 2, "out of range");
-  {
-    size_t off = dvn_off(a, (size_t)i - 1);
-    if (dvn_isint(a->dtype)) lua_pushinteger(L, dvn_geti(a, off));
-    else lua_pushnumber(L, dvn_getf(a, off));
-  }
-  return 1;
+  return dvn_pushelem(L, a, dvn_off(a, (size_t)i - 1));
 }
 
 static int dvn_f_set (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   lua_Integer i = luaL_checkinteger(L, 2);
   int vidx = (a->ndim == 2) ? 4 : 3;
   size_t off;
@@ -1738,7 +1881,10 @@ static int dvn_f_set (lua_State *L) {
     luaL_argcheck(L, i >= 1 && (size_t)i <= a->shape[0], 2, "out of range");
     off = dvn_off(a, (size_t)i - 1);
   }
-  if (dvn_isint(a->dtype)) dvn_seti(a, off, luaL_checkinteger(L, vidx));
+  if (a->dtype == DVN_C128)  /* the imaginary part is optional and 0 */
+    dvn_setc(a, off, luaL_checknumber(L, vidx),
+             luaL_optnumber(L, vidx + 1, 0.0));
+  else if (dvn_isint(a->dtype)) dvn_seti(a, off, luaL_checkinteger(L, vidx));
   else dvn_setf(a, off, luaL_checknumber(L, vidx));
   return 0;
 }
@@ -1765,6 +1911,642 @@ static int dvn_f_mark_fast (lua_State *L) {
 }
 #endif
 
+
+/* ============================================================ complex == */
+
+/*
+** Everything a program can say about a c128 array, which is five
+** functions and deliberately not more.
+**
+** The elementwise operators and the reductions do not take c128 (see
+** 'dvn_check'), so this is the whole boundary: real arrays go in,
+** a complex array comes out, and the transforms below are what happens
+** in between. A complex arithmetic library is not stage 2 and would be a
+** second implementation of every kernel above for a use nothing here
+** has.
+*/
+
+/* complex(re [, im]) -- a c128 array from one or two real arrays. */
+static int dvn_f_complex (lua_State *L) {
+  dv_array *re = dvn_check(L, 1);
+  dv_array *im = lua_isnoneornil(L, 2) ? NULL : dvn_check(L, 2);
+  dv_array *out;
+  dvn_meter m;
+  size_t k;
+  luaL_argcheck(L, re->ndim == 1, 1, "complex needs 1D arrays");
+  if (im != NULL) {
+    luaL_argcheck(L, im->ndim == 1, 2, "complex needs 1D arrays");
+    luaL_argcheck(L, im->nelem == re->nelem, 2, "lengths differ");
+  }
+  dvn_meter_open(L, &m);
+  out = dvn_new(L, DVN_C128, re->nelem, 0, 1);
+  for (k = 0; k < re->nelem; k++) {
+    dvn_setc(out, k, dvn_getf(re, dvn_off(re, k)),
+             (im != NULL) ? dvn_getf(im, dvn_off(im, k)) : 0.0);
+    if ((k % DVN_BLOCK) == DVN_BLOCK - 1) dvn_meter_block(&m);
+  }
+  return 1;
+}
+
+/* One half of a complex array as f64. 'part' is 0 for real, 1 for
+   imaginary; the two entries below are the only callers. */
+static int dvn_half (lua_State *L, int part) {
+  dv_array *a = dvn_checkany(L, 1);
+  dv_array *out;
+  dvn_meter m;
+  size_t k;
+  luaL_argcheck(L, a->dtype == DVN_C128, 1, "a c128 array expected");
+  luaL_argcheck(L, a->ndim == 1, 1, "a 1D array expected");
+  dvn_meter_open(L, &m);
+  out = dvn_new(L, DVN_F64, a->nelem, 0, 1);
+  for (k = 0; k < a->nelem; k++) {
+    double r, i;
+    dvn_getc(a, dvn_off(a, k), &r, &i);
+    dvn_setf(out, k, part ? i : r);
+    if ((k % DVN_BLOCK) == DVN_BLOCK - 1) dvn_meter_block(&m);
+  }
+  return 1;
+}
+
+static int dvn_f_real (lua_State *L) { return dvn_half(L, 0); }
+static int dvn_f_imag (lua_State *L) { return dvn_half(L, 1); }
+
+/* conj(a) -- the same array with the imaginary part negated. */
+static int dvn_f_conj (lua_State *L) {
+  dv_array *a = dvn_checkany(L, 1);
+  dv_array *out;
+  dvn_meter m;
+  size_t k;
+  luaL_argcheck(L, a->dtype == DVN_C128, 1, "a c128 array expected");
+  luaL_argcheck(L, a->ndim == 1, 1, "a 1D array expected");
+  dvn_meter_open(L, &m);
+  out = dvn_new(L, DVN_C128, a->nelem, 0, 1);
+  for (k = 0; k < a->nelem; k++) {
+    double r, i;
+    dvn_getc(a, dvn_off(a, k), &r, &i);
+    dvn_setc(out, k, r, -i);
+    if ((k % DVN_BLOCK) == DVN_BLOCK - 1) dvn_meter_block(&m);
+  }
+  return 1;
+}
+
+/*
+** magnitude(a) -- sqrt(re*re + im*im) as f64.
+**
+** Written out rather than handed to 'hypot': 'hypot' is not correctly
+** rounded and is not one of the functions stage 1 vendored, so a
+** platform's would put a cross-target difference back into a value the
+** reproducible tier is supposed to pin. Multiplication, addition and
+** 'sqrt' are each correctly rounded by IEEE 754, so this expression has
+** one answer everywhere. What it costs is 'hypot''s scaling: a
+** magnitude overflows here when the squares do, at about 1.3e154.
+*/
+static int dvn_f_magnitude (lua_State *L) {
+  dv_array *a = dvn_checkany(L, 1);
+  dv_array *out;
+  dvn_meter m;
+  size_t k;
+  luaL_argcheck(L, a->dtype == DVN_C128, 1, "a c128 array expected");
+  luaL_argcheck(L, a->ndim == 1, 1, "a 1D array expected");
+  dvn_meter_open(L, &m);
+  out = dvn_new(L, DVN_F64, a->nelem, 0, 1);
+  for (k = 0; k < a->nelem; k++) {
+    double r, i;
+    dvn_getc(a, dvn_off(a, k), &r, &i);
+    dvn_setf(out, k, sqrt(r * r + i * i));
+    if ((k % DVN_BLOCK) == DVN_BLOCK - 1) dvn_meter_block(&m);
+  }
+  return 1;
+}
+
+
+/* ========================================================= transforms == */
+
+/*
+** Stage 2 of the numeric spec: FFT and NTT, both reproducible tier, and
+** the convolutions built on them.
+**
+** The two are the same algorithm over different rings and are written
+** the same way on purpose -- one bit-reversal, one iterative
+** doubling loop, power-of-two sizes only -- so a reader who has followed
+** one has followed both. Where they differ is where the arithmetic
+** does, and there is exactly one such place: the FFT computes its
+** twiddle from the index every time, and the NTT walks its root by
+** repeated multiplication. That is not an inconsistency. Modular
+** multiplication is exact, so a recurrence over roots of unity mod p is
+** the same number however many steps preceded it; a float recurrence is
+** not, and its error would depend on the transform length, which is the
+** one thing a stage whose acceptance is "bit-identical across targets"
+** cannot have.
+**
+** Sizes are powers of two and nothing here pads for you. The spec's
+** bail-out (section on stage 2) says arbitrary sizes are Bluestein and
+** deferred, and explicit padding is the v1 contract -- so a length that
+** is not a power of two is refused with the number it would have needed,
+** rather than quietly rounded up into an answer about a different
+** signal.
+*/
+
+/* Is 'n' a power of two? Zero is not, which is what the callers want. */
+static int dvn_ispow2 (size_t n) {
+  return n != 0 && (n & (n - 1)) == 0;
+}
+
+/* The smallest power of two >= n, or 0 if that would not fit. */
+static size_t dvn_ceilpow2 (size_t n) {
+  size_t p = 1;
+  while (p < n) {
+    if (p > ((size_t)-1) / 2) return 0;
+    p <<= 1;
+  }
+  return p;
+}
+
+static void dvn_checkpow2 (lua_State *L, size_t n) {
+  if (!dvn_ispow2(n)) {
+    size_t up = dvn_ceilpow2(n);
+    luaL_error(L, "length %I is not a power of two (pad to %I)",
+               (lua_Integer)n, (lua_Integer)up);
+  }
+}
+
+/* Swap the two complex numbers at 'i' and 'j' in an interleaved buffer. */
+static void dvn_cswap (double *b, size_t i, size_t j) {
+  double tr = b[2 * i], ti = b[2 * i + 1];
+  b[2 * i] = b[2 * j];       b[2 * i + 1] = b[2 * j + 1];
+  b[2 * j] = tr;             b[2 * j + 1] = ti;
+}
+
+/*
+** The decimation-in-time permutation, shared in shape by both
+** transforms. Written as the standard incremental counter rather than
+** by counting bits, because the loop below has to visit the pairs in
+** exactly one order on every target and this one has no width to get
+** wrong.
+*/
+static void dvn_bitrev_c (double *b, size_t n) {
+  size_t i, j = 0;
+  for (i = 1; i < n; i++) {
+    size_t bit = n >> 1;
+    for (; (j & bit) != 0; bit >>= 1)
+      j ^= bit;
+    j ^= bit;
+    if (i < j) dvn_cswap(b, i, j);
+  }
+}
+
+/*
+** exp(sign * 2*pi*i * j / len), computed from (j, len) and nothing else.
+**
+** 'j / len' is exact -- 'len' is a power of two and 'j' is below it, so
+** the quotient is 'j' with a shifted exponent -- which leaves exactly
+** one rounding, in the multiplication by tau. 'dv_cos' and 'dv_sin' are
+** the vendored ones from stage 1, so they answer the same on every
+** target; the platform's would not.
+*/
+#define DVN_TAU		6.283185307179586476925286766559
+
+static void dvn_twiddle (int sign, size_t j, size_t len,
+                         double *wr, double *wi) {
+  double theta = ((double)sign * DVN_TAU) * ((double)j / (double)len);
+  *wr = dv_cos(theta);
+  *wi = dv_sin(theta);
+}
+
+/*
+** The transform itself, in place over 'n' interleaved complex numbers.
+** 'sign' is -1 forward and +1 inverse; the inverse's 1/n is the caller's,
+** because 'rfft' and the convolutions want it at different moments.
+*/
+static void dvn_fft_core (double *b, size_t n, int sign, dvn_meter *m) {
+  size_t len, i, j;
+  dvn_bitrev_c(b, n);
+  dvn_meter_elems(m, n);   /* the permutation is a pass like any other */
+  for (len = 2; len <= n; len <<= 1) {
+    size_t half = len >> 1;
+    for (i = 0; i < n; i += len) {
+      for (j = 0; j < half; j++) {
+        double wr, wi, ur, ui, vr, vi;
+        double *pu = b + 2 * (i + j);
+        double *pv = b + 2 * (i + j + half);
+        dvn_twiddle(sign, j, len, &wr, &wi);
+        ur = pu[0]; ui = pu[1];
+        vr = pv[0] * wr - pv[1] * wi;
+        vi = pv[0] * wi + pv[1] * wr;
+        pu[0] = ur + vr; pu[1] = ui + vi;
+        pv[0] = ur - vr; pv[1] = ui - vi;
+      }
+    }
+    /* One stage is one pass over the array; charged as such, at a stage
+       boundary, so the point a budget stops a transform is the same
+       everywhere. */
+    dvn_meter_elems(m, n);
+  }
+}
+
+/* Scale 'n' complex numbers by 1/n, which for a power of two is exact. */
+static void dvn_cscale (double *b, size_t n) {
+  double f = 1.0 / (double)n;
+  size_t k;
+  for (k = 0; k < 2 * n; k++)
+    b[k] = b[k] * f;
+}
+
+/*
+** A working buffer of 'n' complex numbers, zeroed, owned by a userdata
+** on the stack so the collector accounts for it and an error unwinds it.
+** The array's first 'a->nelem' elements are copied in, real or complex.
+*/
+static double *dvn_cbuf (lua_State *L, const dv_array *a, size_t n) {
+  double *b;
+  size_t k, have = (a == NULL) ? 0 : a->nelem;
+  if (n > (((size_t)-1) - sizeof(double)) / (2 * sizeof(double)))
+    luaL_error(L, "transform too large: %I elements", (lua_Integer)n);
+  b = (double *)lua_newuserdatauv(L, 2 * n * sizeof(double) +
+                                     sizeof(double), 0);
+  memset(b, 0, 2 * n * sizeof(double));
+  if (have > n) have = n;
+  for (k = 0; k < have; k++) {
+    if (a->dtype == DVN_C128)
+      dvn_getc(a, dvn_off(a, k), &b[2 * k], &b[2 * k + 1]);
+    else
+      b[2 * k] = dvn_getf(a, dvn_off(a, k));
+  }
+  return b;
+}
+
+/* The buffer as a fresh c128 array of 'n' elements. */
+static void dvn_pushc (lua_State *L, const double *b, size_t n) {
+  dv_array *out = dvn_new(L, DVN_C128, n, 0, 1);
+  size_t k;
+  for (k = 0; k < n; k++)
+    dvn_setc(out, k, b[2 * k], b[2 * k + 1]);
+}
+
+/* fft(a) / ifft(a) -- a 1D array of any dtype in, c128 of the same
+   length out. The inverse divides by n; a round trip is the identity to
+   within rounding, which 'test_transform.lua' measures. */
+static int dvn_fft (lua_State *L, int sign) {
+  dv_array *a = dvn_checkany(L, 1);
+  dvn_meter m;
+  double *b;
+  size_t n = a->nelem;
+  luaL_argcheck(L, a->ndim == 1, 1, "a 1D array expected");
+  dvn_checkpow2(L, n);
+  dvn_meter_open(L, &m);
+  b = dvn_cbuf(L, a, n);
+  dvn_fft_core(b, n, sign, &m);
+  if (sign > 0) dvn_cscale(b, n);
+  dvn_pushc(L, b, n);
+  return 1;
+}
+
+static int dvn_f_fft (lua_State *L) { return dvn_fft(L, -1); }
+static int dvn_f_ifft (lua_State *L) { return dvn_fft(L, 1); }
+
+/*
+** rfft(a) -- the half spectrum of a real signal: elements 0..n/2, which
+** is n/2+1 of them, the rest being the conjugates of these.
+**
+** The full transform, truncated. The half-length complex trick that
+** halves the work would give different last bits, and the contract this
+** stage owes is a fixed answer rather than a fast one; the saving is
+** recorded as available and not taken.
+*/
+static int dvn_f_rfft (lua_State *L) {
+  dv_array *a = dvn_check(L, 1);
+  dvn_meter m;
+  double *b;
+  size_t n = a->nelem;
+  luaL_argcheck(L, a->ndim == 1, 1, "a 1D array expected");
+  dvn_checkpow2(L, n);
+  dvn_meter_open(L, &m);
+  b = dvn_cbuf(L, a, n);
+  dvn_fft_core(b, n, -1, &m);
+  dvn_pushc(L, b, n / 2 + 1);
+  return 1;
+}
+
+/*
+** irfft(h [, n]) -- the real signal a half spectrum came from.
+**
+** 'n' defaults to 2*(#h - 1), which is the length 'rfft' was given. The
+** other half is rebuilt from the Hermitian symmetry X[n-k] = conj(X[k]),
+** so what comes back is real by construction and the imaginary parts are
+** dropped rather than checked -- they are zero to within rounding, and a
+** tolerance here would be a number this file had to justify.
+*/
+static int dvn_f_irfft (lua_State *L) {
+  dv_array *h = dvn_checkany(L, 1);
+  dv_array *out;
+  dvn_meter m;
+  double *b;
+  size_t n, k;
+  luaL_argcheck(L, h->dtype == DVN_C128, 1, "a c128 array expected");
+  luaL_argcheck(L, h->ndim == 1, 1, "a 1D array expected");
+  luaL_argcheck(L, h->nelem >= 2, 1, "a half spectrum has at least 2 bins");
+  n = (size_t)luaL_optinteger(L, 2, (lua_Integer)(2 * (h->nelem - 1)));
+  dvn_checkpow2(L, n);
+  luaL_argcheck(L, h->nelem == n / 2 + 1, 1,
+                "the half spectrum does not match that length");
+  dvn_meter_open(L, &m);
+  b = dvn_cbuf(L, h, n);
+  for (k = n / 2 + 1; k < n; k++) {   /* X[n-k] = conj(X[k]) */
+    b[2 * k]     =  b[2 * (n - k)];
+    b[2 * k + 1] = -b[2 * (n - k) + 1];
+  }
+  dvn_fft_core(b, n, 1, &m);
+  dvn_cscale(b, n);
+  out = dvn_new(L, DVN_F64, n, 0, 1);
+  for (k = 0; k < n; k++)
+    dvn_setf(out, k, b[2 * k]);
+  return 1;
+}
+
+
+/* ------------------------------------------------------------- the NTT -- */
+
+/*
+** The number-theoretic transform over p = 2013265921 = 15 * 2^27 + 1,
+** which doc/Plan-2026-09.md section 2 names as the prime and which the
+** numeric spec left open.
+**
+** Why this one, in the two numbers that decide it: p - 1 is divisible by
+** 2^27, so a transform of up to 134 million points has a root of unity;
+** and (p-1)^2 is 4.05e18, which is under 2^63, so a product of two
+** residues fits a 64-bit integer and no 128-bit arithmetic is needed
+** anywhere below. That second number is the whole reason a 31-bit prime
+** was chosen over a 62-bit one.
+**
+** Everything here is exact. There is no tier question and no tolerance:
+** two targets that disagree about this disagree about integer
+** multiplication.
+*/
+#define DVN_NTT_P	2013265921u	/* 2^31 - 2^27 + 1 */
+#define DVN_NTT_G	31u		/* a primitive root of it */
+#define DVN_NTT_MAXLG	27		/* the 2-adic order of p - 1 */
+
+static uint64_t dvn_powmod (uint64_t b, uint64_t e) {
+  uint64_t r = 1;
+  b %= DVN_NTT_P;
+  while (e != 0) {
+    if ((e & 1) != 0) r = r * b % DVN_NTT_P;
+    b = b * b % DVN_NTT_P;
+    e >>= 1;
+  }
+  return r;
+}
+
+static void dvn_uswap (uint32_t *a, size_t i, size_t j) {
+  uint32_t t = a[i]; a[i] = a[j]; a[j] = t;
+}
+
+static void dvn_bitrev_u (uint32_t *a, size_t n) {
+  size_t i, j = 0;
+  for (i = 1; i < n; i++) {
+    size_t bit = n >> 1;
+    for (; (j & bit) != 0; bit >>= 1)
+      j ^= bit;
+    j ^= bit;
+    if (i < j) dvn_uswap(a, i, j);
+  }
+}
+
+/*
+** The transform, in place over 'n' residues. 'inverse' takes the
+** conjugate root and divides by n at the end, so 'intt(ntt(x))' is 'x'
+** exactly rather than nearly.
+*/
+static void dvn_ntt_core (uint32_t *a, size_t n, int inverse, dvn_meter *m) {
+  size_t len, i, j;
+  dvn_bitrev_u(a, n);
+  dvn_meter_elems(m, n);
+  for (len = 2; len <= n; len <<= 1) {
+    uint64_t w = dvn_powmod(DVN_NTT_G, (DVN_NTT_P - 1) / len);
+    size_t half = len >> 1;
+    if (inverse) w = dvn_powmod(w, DVN_NTT_P - 2);  /* the inverse root */
+    for (i = 0; i < n; i += len) {
+      uint64_t wj = 1;
+      for (j = 0; j < half; j++) {
+        uint64_t u = a[i + j];
+        uint64_t v = (uint64_t)a[i + j + half] * wj % DVN_NTT_P;
+        a[i + j] = (uint32_t)((u + v) % DVN_NTT_P);
+        a[i + j + half] = (uint32_t)((u + DVN_NTT_P - v) % DVN_NTT_P);
+        wj = wj * w % DVN_NTT_P;
+      }
+    }
+    dvn_meter_elems(m, n);
+  }
+  if (inverse) {
+    uint64_t ninv = dvn_powmod(n % DVN_NTT_P, DVN_NTT_P - 2);
+    for (i = 0; i < n; i++)
+      a[i] = (uint32_t)((uint64_t)a[i] * ninv % DVN_NTT_P);
+  }
+}
+
+/* A residue buffer of 'n', zero-padded, owned by a userdata on the
+   stack. Every value of 'a' must already be a residue. */
+static uint32_t *dvn_ubuf (lua_State *L, size_t n) {
+  uint32_t *a = (uint32_t *)lua_newuserdatauv(L, (n + 1) * sizeof(uint32_t), 0);
+  memset(a, 0, n * sizeof(uint32_t));
+  return a;
+}
+
+/* The residue of one element, refusing anything outside [0, p). */
+static uint32_t dvn_checkresidue (lua_State *L, lua_Integer v) {
+  if (v < 0 || (lua_Unsigned)v >= DVN_NTT_P)
+    luaL_error(L, "%I is outside 0..%I, which is what a residue mod the "
+                  "transform's prime has to be",
+               v, (lua_Integer)(DVN_NTT_P - 1));
+  return (uint32_t)v;
+}
+
+/* ntt(a) / intt(a) -- an i64 array of residues in, another out. */
+static int dvn_ntt (lua_State *L, int inverse) {
+  dv_array *a = dvn_check(L, 1);
+  dv_array *out;
+  dvn_meter m;
+  uint32_t *u;
+  size_t n = a->nelem, k;
+  luaL_argcheck(L, a->ndim == 1, 1, "a 1D array expected");
+  luaL_argcheck(L, dvn_isint(a->dtype), 1, "an integer array expected");
+  dvn_checkpow2(L, n);
+  luaL_argcheck(L, n <= ((size_t)1 << DVN_NTT_MAXLG), 1,
+                "longer than the prime's 2^27 root of unity allows");
+  dvn_meter_open(L, &m);
+  u = dvn_ubuf(L, n);
+  for (k = 0; k < n; k++)
+    u[k] = dvn_checkresidue(L, dvn_geti(a, dvn_off(a, k)));
+  dvn_meter_elems(&m, n);   /* the read, before the transform's own passes */
+  dvn_ntt_core(u, n, inverse, &m);
+  out = dvn_new(L, DVN_I64, n, 0, 1);
+  for (k = 0; k < n; k++)
+    dvn_seti(out, k, (lua_Integer)u[k]);
+  return 1;
+}
+
+static int dvn_f_ntt (lua_State *L) { return dvn_ntt(L, 0); }
+static int dvn_f_intt (lua_State *L) { return dvn_ntt(L, 1); }
+
+
+/* ----------------------------------------------------- the convolutions -- */
+
+/*
+** The largest magnitude a signed convolution may reach and still be
+** recoverable: residues are read back as the representative nearest
+** zero, so the true value has to fit in half the ring.
+*/
+#define DVN_NTT_HALF	((lua_Integer)(DVN_NTT_P / 2))
+
+/* |v| as an unsigned, refusing what the bound below could not hold. */
+static uint64_t dvn_absbound (lua_State *L, int arg, lua_Integer v) {
+  lua_Integer a;
+  /* Tested before the negation, not after: '-LUA_MININTEGER' is
+     undefined and this project runs UBSan with 'halt_on_error'. */
+  if (v == LUA_MININTEGER || v > DVN_NTT_HALF || v < -DVN_NTT_HALF)
+    luaL_error(L, "argument #%d: %I is too large for an exact convolution "
+                  "(values must be within +-%I)", arg, v, DVN_NTT_HALF);
+  a = (v < 0) ? -v : v;
+  return (uint64_t)a;
+}
+
+/*
+** The exact convolution of two integer arrays, through the NTT.
+**
+** The bound is checked before any work: the answer is only the true
+** convolution if it never wraps, and the largest term is
+** max|x| * max|y| * min(#x, #y). Checked by division rather than by
+** multiplying, so the check itself cannot overflow. A program that
+** exceeds it is told the number it exceeded rather than handed a
+** residue.
+*/
+static int dvn_conv_exact (lua_State *L, dv_array *x, dv_array *y) {
+  dv_array *out;
+  dvn_meter m;
+  uint32_t *fx, *fy;
+  uint64_t ax = 0, ay = 0, bound = (uint64_t)DVN_NTT_HALF;
+  size_t nx = x->nelem, ny = y->nelem, n, len, k;
+  n = nx + ny - 1;
+  len = dvn_ceilpow2(n);
+  luaL_argcheck(L, len != 0 && len <= ((size_t)1 << DVN_NTT_MAXLG), 1,
+                "longer than the prime's 2^27 root of unity allows");
+  dvn_meter_open(L, &m);
+  for (k = 0; k < nx; k++) {
+    uint64_t v = dvn_absbound(L, 1, dvn_geti(x, dvn_off(x, k)));
+    if (v > ax) ax = v;
+  }
+  for (k = 0; k < ny; k++) {
+    uint64_t v = dvn_absbound(L, 2, dvn_geti(y, dvn_off(y, k)));
+    if (v > ay) ay = v;
+  }
+  dvn_meter_elems(&m, nx + ny);   /* the two bound scans */
+  {
+    uint64_t reach = (nx < ny) ? (uint64_t)nx : (uint64_t)ny;
+    if (ax != 0 && ay != 0 && reach != 0) {
+      if (ax > bound / ay || ax * ay > bound / reach)
+        return luaL_error(L, "this convolution can reach %I * %I * %I, "
+                             "which is past the exact range of +-%I",
+                          (lua_Integer)ax, (lua_Integer)ay,
+                          (lua_Integer)reach, DVN_NTT_HALF);
+    }
+  }
+  fx = dvn_ubuf(L, len);
+  fy = dvn_ubuf(L, len);
+  for (k = 0; k < nx; k++) {
+    lua_Integer v = dvn_geti(x, dvn_off(x, k));
+    fx[k] = (uint32_t)((v < 0) ? v + (lua_Integer)DVN_NTT_P : v);
+  }
+  for (k = 0; k < ny; k++) {
+    lua_Integer v = dvn_geti(y, dvn_off(y, k));
+    fy[k] = (uint32_t)((v < 0) ? v + (lua_Integer)DVN_NTT_P : v);
+  }
+  dvn_ntt_core(fx, len, 0, &m);
+  dvn_ntt_core(fy, len, 0, &m);
+  for (k = 0; k < len; k++)
+    fx[k] = (uint32_t)((uint64_t)fx[k] * fy[k] % DVN_NTT_P);
+  dvn_ntt_core(fx, len, 1, &m);
+  out = dvn_new(L, DVN_I64, n, 0, 1);
+  for (k = 0; k < n; k++) {
+    lua_Integer v = (lua_Integer)fx[k];
+    /* the representative nearest zero, which is where the sign comes back */
+    if (v > DVN_NTT_HALF) v -= (lua_Integer)DVN_NTT_P;
+    dvn_seti(out, k, v);
+  }
+  return 1;
+}
+
+/* The same product through the FFT, for anything with a float in it. */
+static int dvn_conv_fft (lua_State *L, dv_array *x, dv_array *y) {
+  dv_array *out;
+  dvn_meter m;
+  double *bx, *by;
+  size_t nx = x->nelem, ny = y->nelem, n = nx + ny - 1, len, k;
+  len = dvn_ceilpow2(n);
+  luaL_argcheck(L, len != 0, 1, "the result would be too long");
+  dvn_meter_open(L, &m);
+  bx = dvn_cbuf(L, x, len);
+  by = dvn_cbuf(L, y, len);
+  dvn_fft_core(bx, len, -1, &m);
+  dvn_fft_core(by, len, -1, &m);
+  for (k = 0; k < len; k++) {
+    double ar = bx[2 * k], ai = bx[2 * k + 1];
+    double br = by[2 * k], bi = by[2 * k + 1];
+    bx[2 * k]     = ar * br - ai * bi;
+    bx[2 * k + 1] = ar * bi + ai * br;
+  }
+  dvn_fft_core(bx, len, 1, &m);
+  dvn_cscale(bx, len);
+  out = dvn_new(L, DVN_F64, n, 0, 1);
+  for (k = 0; k < n; k++)
+    dvn_setf(out, k, bx[2 * k]);
+  return 1;
+}
+
+/*
+** convolve(x, y) -- the full linear convolution, #x + #y - 1 long.
+**
+** Exact through the NTT when both arrays hold integers, and through the
+** FFT otherwise. The dtypes decide, not a flag: an integer program gets
+** the answer it can check against schoolbook, and a float program gets
+** the one it was going to get anyway.
+*/
+static int dvn_f_convolve (lua_State *L) {
+  dv_array *x = dvn_check(L, 1);
+  dv_array *y = dvn_check(L, 2);
+  luaL_argcheck(L, x->ndim == 1, 1, "convolve needs 1D arrays");
+  luaL_argcheck(L, y->ndim == 1, 2, "convolve needs 1D arrays");
+  luaL_argcheck(L, x->nelem > 0, 1, "an empty array has no convolution");
+  luaL_argcheck(L, y->nelem > 0, 2, "an empty array has no convolution");
+  if (dvn_isint(x->dtype) && dvn_isint(y->dtype))
+    return dvn_conv_exact(L, x, y);
+  return dvn_conv_fft(L, x, y);
+}
+
+/*
+** correlate(x, y) -- the full cross-correlation, #x + #y - 1 long.
+**
+** The convolution of x with y reversed, which is the definition rather
+** than a trick: sum_n x[n+k] * y[n] is what a correlation is, and
+** reversing one operand turns the shift the other way. Element k of the
+** result is lag k - #y + 1, so the zero lag is at index #y.
+*/
+static int dvn_f_correlate (lua_State *L) {
+  dv_array *x = dvn_check(L, 1);
+  dv_array *y = dvn_check(L, 2);
+  dv_array *r;
+  size_t k;
+  luaL_argcheck(L, x->ndim == 1, 1, "correlate needs 1D arrays");
+  luaL_argcheck(L, y->ndim == 1, 2, "correlate needs 1D arrays");
+  luaL_argcheck(L, y->nelem > 0, 2, "an empty array has no correlation");
+  r = dvn_new(L, y->dtype, y->nelem, 0, 1);
+  for (k = 0; k < y->nelem; k++) {
+    size_t off = dvn_off(y, y->nelem - 1 - k);
+    if (dvn_isint(y->dtype)) dvn_seti(r, k, dvn_geti(y, off));
+    else dvn_setf(r, k, dvn_getf(y, off));
+  }
+  lua_replace(L, 2);   /* the reversed copy is the second operand now */
+  return dvn_f_convolve(L);
+}
 
 /* ======================================================== the library == */
 
@@ -1837,6 +2619,21 @@ static const luaL_Reg arraylib[] = {
   /* linear algebra */
   {"dot", dvn_f_dot},
   {"matmul", dvn_f_matmul},
+  /* complex, which is the whole of what a c128 array can be asked */
+  {"complex", dvn_f_complex},
+  {"real", dvn_f_real},
+  {"imag", dvn_f_imag},
+  {"conj", dvn_f_conj},
+  {"magnitude", dvn_f_magnitude},
+  /* transforms */
+  {"fft", dvn_f_fft},
+  {"ifft", dvn_f_ifft},
+  {"rfft", dvn_f_rfft},
+  {"irfft", dvn_f_irfft},
+  {"ntt", dvn_f_ntt},
+  {"intt", dvn_f_intt},
+  {"convolve", dvn_f_convolve},
+  {"correlate", dvn_f_correlate},
   /* '__slice' as well as 'slice': 'dv.slice' looks the metamethod up, so
      this is what makes 'a[2:5]' a view rather than a copy. The two are
      the same function -- an array's slice already takes (a, i, j) and
@@ -1857,7 +2654,7 @@ static const luaL_Reg arraylib[] = {
 ** and returns a mask.
 */
 static int dvn_mm_index (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   if (lua_isinteger(L, 2)) {
     lua_Integer i = lua_tointeger(L, 2);
     if (i < 1 || (size_t)i > a->shape[0])
@@ -1865,6 +2662,12 @@ static int dvn_mm_index (lua_State *L) {
                         (lua_Integer)a->shape[0]);
     if (a->ndim == 2)
       return dvn_f_row(L);
+    /* '__index' yields one value and a c128 element is two, so 'a[i]'
+       could only hand back the real part and say nothing about the rest.
+       Refused rather than truncated; 'array.get' returns both. */
+    if (a->dtype == DVN_C128)
+      return luaL_error(L, "a c128 element is two numbers: "
+                           "use array.get(a, i)");
     lua_settop(L, 2);
     return dvn_f_get(L);
   }
@@ -1877,10 +2680,15 @@ static int dvn_mm_index (lua_State *L) {
 }
 
 static int dvn_mm_newindex (lua_State *L) {
-  dv_array *a = dvn_check(L, 1);
+  dv_array *a = dvn_checkany(L, 1);
   luaL_argcheck(L, lua_isinteger(L, 2), 2, "an array is indexed by integers");
   luaL_argcheck(L, a->ndim == 1, 1,
                 "a 2D array is written through 'set(a, i, j, v)'");
+  /* The other half of the rule above: 'a[i] = x' would set the real part
+     and zero the imaginary one without being asked to. */
+  if (a->dtype == DVN_C128)
+    return luaL_error(L, "a c128 element is two numbers: "
+                         "use array.set(a, i, re, im)");
   lua_settop(L, 3);      /* 'set' reads the value from argument 3 */
   return dvn_f_set(L);
 }
@@ -1933,6 +2741,11 @@ LUA_API int diluvium_array_adopt (lua_State *L, int dtype, size_t len,
                                   void *bytes) {
   size_t width = dvn_width(dtype);
   dv_array *a;
+  /* 'c128' is a guest-side dtype and is not one of the three 'dv.h'
+     documents (see dnumeric.h). Refused here rather than accepted
+     quietly, so the header stays the whole truth about this call. */
+  if (dtype == DVN_C128)
+    return 1;
   if (width == 0 || len % width != 0 || (bytes == NULL && len != 0))
     return 1;
   a = (dv_array *)lua_newuserdatauv(L, sizeof(dv_array), 1);

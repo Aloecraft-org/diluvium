@@ -164,3 +164,33 @@ say("atan2", fbits(math.atan(1.0, -1.0)))
 f1("sqrt", math.sqrt, 2.0)
 f1("floor", math.floor, -1.5)
 f1("fmod", function(x) return math.fmod(x, 2.0) end, 5.5)
+
+-- 8. Stage 2: the transforms. A transform's whole claim is that its bits
+--    are the same on every target, and these lines are where that is
+--    checked rather than asserted. The FFT sizes are small on purpose:
+--    the divergence a target introduces is in the twiddle, and it shows
+--    at n = 8 as clearly as at n = 8192.
+local sig = array.from{1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0}
+say("fft", bits(array.fft(sig)))
+say("ifft", bits(array.ifft(array.fft(sig))))
+say("rfft", bits(array.rfft(sig)))
+say("irfft", bits(array.irfft(array.rfft(sig))))
+-- A signal with no symmetry to hide a wrong twiddle behind.
+local wob = {}
+for k = 1, 16 do wob[k] = math.sin(k * 1.7) * 3.0 + k * 0.25 end
+say("fft16", bits(array.fft(array.from(wob))))
+say("fft16_mag", bits(array.magnitude(array.fft(array.from(wob)))))
+-- Complex in, complex out, so the input's imaginary part is exercised.
+say("fft_c", bits(array.fft(array.complex(array.from{1.0, -2.0, 3.0, -4.0},
+                                          array.from{0.5, 0.25, -0.5, -0.25}))))
+say("conv_f", bits(array.convolve(array.from{1.5, -2.5, 3.5},
+                                  array.from{0.5, 0.25})))
+-- The NTT is integer arithmetic and cannot drift; these lines say so,
+-- and would catch a prime or a root that changed by accident.
+local iv = array.from{5, 7, 11, 13, 17, 19, 23, 29}
+say("ntt", bits(array.ntt(iv)))
+say("intt", bits(array.intt(array.ntt(iv))))
+say("conv_i", bits(array.convolve(array.from{1, -2, 3, 4, 5},
+                                  array.from{7, 8, -9})))
+say("corr_i", bits(array.correlate(array.from{1, 2, 3},
+                                   array.from{0, 1, 0})))

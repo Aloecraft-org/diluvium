@@ -33,10 +33,18 @@
 /*
 ** Element types, in the order the ABI numbers them ('dv_array_adopt' in
 ** dv.h takes these values, and they are part of that contract).
+**
+** 'c128' is the exception and deliberately so: it is a guest-side dtype
+** only. doc/Plan-2026-09.md 3.1 fixes 'dv_array_adopt''s dtype argument
+** at "0=f64 1=i64 2=u8", and that header is what session B compiled
+** against at A0 -- adding a fourth number to it would move a published
+** contract for a type no host has a buffer of. A host with complex data
+** adopts it as 'f64' pairs and the guest calls 'array.complex'.
 */
 #define DVN_F64		0
 #define DVN_I64		1
 #define DVN_U8		2
+#define DVN_C128	3	/* interleaved re/im doubles; not in dv.h */
 
 
 LUAMOD_API int luaopen_dnumeric (lua_State *L);
