@@ -4,7 +4,12 @@
 **
 ** doc/Plan-2026-09.md section 2 names 'dv.defer', 'dv.isa', 'dv.spread'
 ** and '__slice' as the registry helpers the new forms lean on. This is
-** where those live. A form whose desugar needs to *decide* something at
+** where those live. 'dv.class' is not on that list and is here for the
+** same reason the others are: what a class statement has to do at run
+** time -- copy a parent's metamethods, install a constructor, build the
+** two metatables an instance needs -- is thirty lines of C or two
+** hundred instructions of emitted bytecode, and the C version is the one
+** a reader can check. A form whose desugar needs to *decide* something at
 ** run time -- what a slice of this particular value means, whether this
 ** object is an instance of that class -- cannot decide it in the parser,
 ** and a helper is the alternative to a new opcode.
@@ -20,7 +25,9 @@
 **
 ** ------------------------------------------------------------- surface --
 **
-**   dv.slice(v, i, j)   the runtime half of 'v[i:j]' (proposals 4.4)
+**   dv.slice(v, i, j)      the runtime half of 'v[i:j]' (proposals 4.4)
+**   dv.class(name, parent) the table a 'class' statement declares (5.1)
+**   dv.isa(obj, class)     is 'obj' one of these? (5.1)
 **
 ** '__slice' is a metamethod name, not a function here: 'dv.slice' looks
 ** it up on the value's metatable and calls it when it is there. Strings

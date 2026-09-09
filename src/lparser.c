@@ -72,6 +72,10 @@ static void spreadexp (LexState *ls, expdesc *v);
    form are defined. */
 static int isswitchexp (LexState *ls);
 static void switchexp (LexState *ls, expdesc *v);
+/* Diluvium: '@' and 'super', which 'primaryexp' reaches long before the
+   class section that defines them. */
+static void selfexp (LexState *ls, expdesc *v);
+static void superexp (LexState *ls, expdesc *v);
 
 
 static l_noret error_expected (LexState *ls, int token) {
@@ -1574,10 +1578,14 @@ static void regexliteral (LexState *ls, expdesc *v);
 ** use would make the literal notation cost more than it saves.
 */
 static void primaryexp (LexState *ls, expdesc *v) {
-  /* primaryexp -> NAME | '(' expr ')' | REGEX */
+  /* primaryexp -> NAME | '(' expr ')' | REGEX | Diluvium: '@' | 'super' */
   switch (ls->t.token) {
     case TK_REGEX: {  /* Diluvium: regex literal */
       regexliteral(ls, v);
+      return;
+    }
+    case '@': {  /* Diluvium: '@' is 'self' (syntax proposals 5.1) */
+      selfexp(ls, v);
       return;
     }
     case '(': {
@@ -1589,6 +1597,11 @@ static void primaryexp (LexState *ls, expdesc *v) {
       return;
     }
     case TK_NAME: {
+      /* Diluvium: 'super' is a name everywhere but inside a class body */
+      if (ls->inclass && eqstr(ls->t.seminfo.ts, ls->supn)) {
+        superexp(ls, v);
+        return;
+      }
       singlevar(ls, v);
       return;
     }
@@ -3680,6 +3693,366 @@ static void exportstat (LexState *ls, int line) {
 }
 
 
+/*
+** Diluvium: classes (syntax proposals 5.1).
+**
+**   class Account extends Base
+**     balance = 0                  -- a per-instance default
+**
+**     function new(owner)          -- implicit 'self'
+**       super(owner)
+**       @owner = owner
+**     end
+**
+**     function deposit(amt) @balance += amt return self end
+**     static function empty() = Account("nobody")
+**     function __tostring() = $"Account({@owner}: {@balance})"
+**   end
+**
+** Free because 'class' followed by a name is two expressions with
+** nothing between them, which stock Lua refuses; 'class = 1',
+** 'class(...)', 'class.x' and 'class[k]' are programs it accepts and
+** they keep their meaning. 'extends', 'static' and 'super' are only
+** special inside a class body, which is already not Lua. '@' is not a
+** Lua token at all.
+**
+** The whole thing desugars to plain metatables, which is 5.1's own
+** requirement and the reason a class here interoperates with
+** hand-written Lua OOP and with existing class libraries:
+**
+**   local (super) = Base                          -- only with 'extends'
+**   local (defaults) = function (self) self.balance = 0 end
+**   local Account = _ENV.dv.class("Account", (super))
+**   Account["(defaults)"] = (defaults)
+**   Account.new = function (self, owner)
+**     (defaults)(self)                            -- the prologue
+**     (super).new(self, owner)                    -- 'super(owner)'
+**     self.owner = owner                          -- '@owner = owner'
+**   end
+**   Account.deposit = function (self, amt) ... end
+**   Account.empty = function (...) ... end        -- 'static': no self
+**   Account.__tostring = function (self) ... end
+**
+** What 'dv.class' does at run time -- copy the parent's '__'-prefixed
+** entries, install '__index', '__name', a '__call' constructor and a
+** default 'new' -- is in ddv.c, with the reason each is needed. It is
+** there rather than emitted here because thirty lines of C is a thing a
+** reader can check and two hundred instructions is not.
+**
+** Three hidden locals at most, and only the first is always paid for:
+** the class's own name, '(super)' when there is an 'extends', and
+** '(defaults)' when the body declares a field. They live in the
+** enclosing block, like the 'local' a class statement is, so a function
+** declaring very many classes reaches MAXVARS sooner than one declaring
+** the same number of plain locals.
+*/
+
+/* A name that has to be a local or an upvalue already. */
+static void hiddenvar (LexState *ls, TString *name, expdesc *v,
+                       const char *msg) {
+  init_exp(v, VGLOBAL, -1);
+  singlevaraux(ls->fs, name, v, 1);
+  if (v->k == VGLOBAL)
+    luaX_syntaxerror(ls, msg);
+}
+
+
+/*
+** Diluvium: '@' (syntax proposals 5.1).
+**
+**   @balance        self.balance
+**   @:deposit(5)    self:deposit(5)      -- through 'suffixedexp'
+**   @               self
+**
+** A name straight after '@' is a field, which is what the form is for.
+** Anything else and this is just 'self', so '@:m()', '@[k]' and '@.x'
+** are the ordinary suffixes applied to it.
+**
+** The consequence of binding a following name: '@' alone at the end of a
+** statement takes the next statement's first name as a field. No stock
+** Lua program contains '@' at all, so nothing that parsed before parses
+** differently; what it costs is a confusing error in a Diluvium program
+** that ends a line with a bare '@', which is rare and does not compile
+** either way.
+*/
+static void selfexp (LexState *ls, expdesc *v) {
+  FuncState *fs = ls->fs;
+  luaX_next(ls);  /* skip '@' */
+  hiddenvar(ls, ls->selfn, v,
+            "'@' is 'self', and there is no 'self' in scope here");
+  if (ls->t.token == TK_NAME) {
+    expdesc key;
+    luaK_exp2anyregup(fs, v);
+    codestring(&key, str_checkname(ls));
+    luaK_indexed(fs, v, &key);
+  }
+}
+
+
+/*
+** Diluvium: 'super' inside a class body (syntax proposals 5.1).
+**
+**   super(owner)      (super).new(self, owner)
+**   super.m(x)        (super).m(self, x)
+**
+** Both pass 'self', which is the whole point: a parent method called
+** through 'super' is being called on this instance. That is why
+** 'super:m(...)' is refused rather than accepted as a synonym -- it
+** would pass the parent table as 'self' and quietly do something else.
+**
+** 'self' goes into the register directly above the function, and then
+** 'funcargs' compiles the rest of the argument list on top of it and
+** counts them all. That is exactly the shape 'luaK_self' leaves behind
+** for an ordinary 'obj:m(...)', which is why this needs no special call
+** instruction.
+*/
+static void superexp (LexState *ls, expdesc *v) {
+  FuncState *fs = ls->fs;
+  expdesc key, selfv;
+  int line = ls->linenumber;
+  luaX_next(ls);  /* skip 'super' */
+  hiddenvar(ls, ls->supv, v,
+            "'super' needs a parent, and this class was declared without "
+            "'extends'");
+  luaK_exp2anyregup(fs, v);
+  if (testnext(ls, '.'))
+    codestring(&key, str_checkname(ls));
+  else if (ls->t.token == '(')
+    codestring(&key, luaX_newstring(ls, "new", 3));  /* 'super(...)' */
+  else if (ls->t.token == ':')
+    luaX_syntaxerror(ls, "'super.m(...)' rather than 'super:m(...)': the "
+                         "form already passes 'self'");
+  else
+    luaX_syntaxerror(ls, "'super' is either called or indexed");
+  luaK_indexed(fs, v, &key);
+  luaK_exp2nextreg(fs, v);
+  hiddenvar(ls, ls->selfn, &selfv, "'super' needs a 'self' in scope");
+  luaK_exp2nextreg(fs, &selfv);   /* the first argument, always */
+  if (ls->t.token != '(')
+    luaX_syntaxerror(ls, "'super' has to be called");
+  funcargs(ls, v);
+  luaK_fixline(fs, line);
+}
+
+
+/*
+** The field defaults, as one function taking 'self'.
+**
+** All of them, and before the first method: a default is an expression,
+** and an expression cannot be parked and re-emitted later without
+** re-reading the source, so the single-pass answer is to compile them
+** where they are. Fields first is also how 5.1's own example is
+** written, and a field after a method is refused with that sentence
+** rather than silently accepted into nothing.
+**
+** Per instance rather than shared, which is the Python trap 5.1 names:
+** the function runs in the constructor, so a table-valued default is a
+** new table for every object.
+*/
+static void defaultsbody (LexState *ls, expdesc *e, int line) {
+  FuncState new_fs;
+  BlockCnt bl;
+  new_fs.f = addprototype(ls);
+  new_fs.f->linedefined = line;
+  open_func(ls, &new_fs, &bl);
+  new_localvarliteral(ls, "self");
+  adjustlocalvars(ls, 1);
+  new_fs.f->numparams = cast_byte(new_fs.nactvar);
+  reserveparams(&new_fs);
+  do {
+    TString *fname = str_checkname(ls);
+    expdesc t, key, val;
+    checknext(ls, '=');
+    hiddenvar(ls, ls->selfn, &t, "no 'self' in a field default");
+    luaK_exp2anyregup(&new_fs, &t);
+    codestring(&key, fname);
+    luaK_indexed(&new_fs, &t, &key);
+    expr(ls, &val);
+    luaK_storevar(&new_fs, &t, &val);
+    new_fs.freereg = cast_byte(luaY_nvarstack(&new_fs));
+  } while (ls->t.token == TK_NAME && peekahead(ls) == '=');
+  new_fs.f->lastlinedefined = ls->lastline;
+  codeclosure(ls, e);
+  close_func(ls);
+}
+
+
+/*
+** A method's body, which is 'body' plus the constructor's prologue.
+**
+** Only 'new' gets the prologue, and only when this class declared a
+** field: it is the call that applies the defaults to the instance,
+** emitted after the parameter list so a default may mention a
+** parameter, and before the body so 'super(...)' runs after them. That
+** order is 5.1's -- own defaults, then the parent's when 'super' is
+** reached -- and it means a parent and a child that default the same
+** field leave the parent's value.
+*/
+static void classbodyfn (LexState *ls, expdesc *e, int ismethod,
+                         int prologue, int line) {
+  FuncState new_fs;
+  BlockCnt bl;
+  new_fs.f = addprototype(ls);
+  new_fs.f->linedefined = line;
+  open_func(ls, &new_fs, &bl);
+  checknext(ls, '(');
+  if (ismethod) {
+    new_localvarliteral(ls, "self");
+    adjustlocalvars(ls, 1);
+  }
+  parlist(ls);
+  checknext(ls, ')');
+  if (prologue) {  /* (defaults)(self) */
+    expdesc fn, selfv;
+    int base;
+    hiddenvar(ls, ls->dflv, &fn, "no field defaults in scope");
+    luaK_exp2nextreg(&new_fs, &fn);
+    base = fn.u.info;
+    hiddenvar(ls, ls->selfn, &selfv, "no 'self' in a constructor");
+    luaK_exp2nextreg(&new_fs, &selfv);
+    luaK_codeABC(&new_fs, OP_CALL, base, 2, 1);  /* one argument, no result */
+    luaK_fixline(&new_fs, line);
+    new_fs.freereg = cast_byte(base);
+  }
+  if (testnext(ls, '=')) {  /* an expression body, as anywhere else */
+    expbody(ls);
+    new_fs.f->lastlinedefined = ls->lastline;
+  }
+  else {
+    statlist(ls);
+    new_fs.f->lastlinedefined = ls->linenumber;
+    check_match(ls, TK_END, TK_FUNCTION, line);
+  }
+  codeclosure(ls, e);
+  close_func(ls);
+}
+
+
+/*
+** 'Class.name = function ...', for one method.
+**
+** The target is built before the body is parsed, which is what
+** 'a.b = f()' does everywhere else in this file: the class is a local,
+** so the register holding it does not move while a whole function is
+** compiled on top of it.
+*/
+static void classmethod (LexState *ls, int clsvidx, int isstatic,
+                         int hasdefaults) {
+  FuncState *fs = ls->fs;
+  expdesc t, key, val;
+  TString *mname;
+  int line = ls->linenumber;
+  int prologue;
+  luaX_next(ls);  /* skip 'function' */
+  mname = str_checkname(ls);
+  prologue = (hasdefaults && !isstatic &&
+              strcmp(getstr(mname), "new") == 0);
+  init_var(fs, &t, clsvidx);
+  codestring(&key, mname);
+  luaK_indexed(fs, &t, &key);
+  classbodyfn(ls, &val, !isstatic, prologue, line);
+  luaK_storevar(fs, &t, &val);
+  fs->freereg = cast_byte(luaY_nvarstack(fs));
+}
+
+
+/*
+** Diluvium: does a 'class' name at the start of a statement introduce a
+** class?
+*/
+static int isclassstat (LexState *ls) {
+  return ls->t.seminfo.ts == ls->clsn && peekahead(ls) == TK_NAME;
+}
+
+
+static void classstat (LexState *ls, int line) {
+  FuncState *fs = ls->fs;
+  TString *cname;
+  int savedin = ls->inclass;
+  int hassuper = 0, hasdefaults = 0;
+  int clsvidx;
+  luaX_next(ls);  /* skip 'class' */
+  cname = str_checkname(ls);
+  if (ls->t.token == TK_NAME && eqstr(ls->t.seminfo.ts, ls->extn)) {
+    /* The parent, evaluated once into a hidden local, so every method
+       closes over the same value and a parent expression with a side
+       effect has it once. */
+    expdesc parent;
+    luaX_next(ls);  /* skip 'extends' */
+    new_localvar(ls, ls->supv);
+    expr(ls, &parent);
+    adjust_assign(ls, 1, 1, &parent);
+    adjustlocalvars(ls, 1);
+    hassuper = 1;
+  }
+  /* local <Name> = _ENV.dv.class("<Name>", (super)) */
+  clsvidx = new_localvar(ls, cname);
+  {
+    expdesc fn, key, arg, call;
+    int base;
+    buildglobal(ls, luaX_newstring(ls, "dv", 2), &fn);
+    luaK_exp2anyregup(fs, &fn);
+    codestring(&key, luaX_newstring(ls, "class", 5));
+    luaK_indexed(fs, &fn, &key);
+    luaK_exp2nextreg(fs, &fn);
+    base = fn.u.info;
+    codestring(&arg, cname);
+    luaK_exp2nextreg(fs, &arg);
+    if (hassuper) {
+      expdesc sup;
+      hiddenvar(ls, ls->supv, &sup, "no parent in scope");
+      luaK_exp2nextreg(fs, &sup);
+    }
+    init_exp(&call, VCALL,
+             luaK_codeABC(fs, OP_CALL, base, hassuper ? 3 : 2, 2));
+    luaK_fixline(fs, line);
+    fs->freereg = cast_byte(base + 1);
+    adjust_assign(ls, 1, 1, &call);
+  }
+  adjustlocalvars(ls, 1);
+  ls->inclass = 1;
+  /* The field defaults, all of them, before the first method. */
+  if (ls->t.token == TK_NAME && peekahead(ls) == '=') {
+    expdesc t, key, dfl, src;
+    int dflvidx = new_localvar(ls, ls->dflv);
+    defaultsbody(ls, &dfl, ls->linenumber);
+    adjust_assign(ls, 1, 1, &dfl);
+    adjustlocalvars(ls, 1);
+    hasdefaults = 1;
+    /* Class["(defaults)"] = (defaults). In the table as well as in a
+       local, because 'dv.class''s default constructor is what applies
+       them for a class that declares no 'new' of its own. */
+    init_var(fs, &t, clsvidx);
+    codestring(&key, ls->dflv);
+    luaK_indexed(fs, &t, &key);
+    init_var(fs, &src, dflvidx);
+    luaK_storevar(fs, &t, &src);
+    fs->freereg = cast_byte(luaY_nvarstack(fs));
+  }
+  /* TK_EOS ends the loop too, so an unterminated body is reported by the
+     'end' check below -- which names the line the class opened on. */
+  while (ls->t.token != TK_END && ls->t.token != TK_EOS) {
+    int isstatic = 0;
+    if (ls->t.token == TK_NAME && eqstr(ls->t.seminfo.ts, ls->stcn) &&
+        peekahead(ls) == TK_FUNCTION) {
+      luaX_next(ls);  /* skip 'static' */
+      isstatic = 1;
+    }
+    if (ls->t.token != TK_FUNCTION) {
+      if (ls->t.token == TK_NAME && peekahead(ls) == '=')
+        luaX_syntaxerror(ls, "a field default comes before the first method "
+                             "in a class body");
+      luaX_syntaxerror(ls, "'function' or 'end' expected in a class body");
+    }
+    classmethod(ls, clsvidx, isstatic, hasdefaults);
+  }
+  if (!testnext(ls, TK_END))
+    luaX_syntaxerror(ls, luaO_pushfstring(ls->L,
+        "'end' expected (to close 'class' at line %d)", line));
+  ls->inclass = savedin;
+}
+
+
 static void statement (LexState *ls) {
   int line = ls->linenumber;  /* may be needed for error messages */
   enterlevel(ls);
@@ -3794,6 +4167,10 @@ static void statement (LexState *ls) {
       }
       if (isexportstat(ls)) {  /* Diluvium: stat -> exportstat */
         exportstat(ls, line);
+        break;
+      }
+      if (isclassstat(ls)) {  /* Diluvium: stat -> classstat */
+        classstat(ls, line);
         break;
       }
 #if LUA_COMPAT_GLOBAL

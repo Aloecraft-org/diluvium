@@ -106,6 +106,7 @@ strings|run||
 test_analysis|run||
 test_array|run||needs the 'numeric' build feature: build with NUMERIC=1|guard_no_numeric
 test_bytes|run||
+test_class|run||
 test_json|run||
 test_libm|run||needs the 'numeric' build feature: build with NUMERIC=1|guard_no_numeric
 test_time|run||
