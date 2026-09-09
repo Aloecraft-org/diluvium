@@ -19,6 +19,17 @@
 **     side of the bargain and it is bought with the flags in
 **     doc/Plan-2026-09.md 3.5, which test/contraction_check.c asserts.
 **   * Sorts are stable, the comparator is total, and NaN sorts last.
+**   * One thing the tier does NOT pin, and cannot: the sign of a NaN.
+**     IEEE 754 does not interpret it and does not say which NaN an
+**     invalid operation produces -- x86-64 answers '0.0/0.0' with
+**     fff8000000000000 and aarch64 with 7ff8000000000000, and both are
+**     correct. Every kernel here moves a NaN without touching its bits,
+**     so a program that computes one and then reads its bit pattern
+**     reads its target's choice. Where an answer has to be the same
+**     everywhere the NaN is canonicalised rather than carried:
+**     'dvn_key' does exactly that, which is why grouping puts every NaN
+**     in one group on every target. A program that needs a pinned NaN
+**     builds it from its bits, as test/numeric/corpus.lua does.
 **   * Group ids are assigned in first-appearance order, and the hash
 **     behind them is a fixed 64-bit mix -- never the string hash seed,
 **     which is a per-build constant.
