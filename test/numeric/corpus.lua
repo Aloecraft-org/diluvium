@@ -85,11 +85,27 @@ say("matmul", bits(array.matmul(m, n)))
 say("matmul_t", bits(array.matmul(n, m)))
 
 -- 5. Ordering: stable, total, NaN last.
-local nan = 0.0 / 0.0
+--
+-- The NaN is built from its bits rather than computed. IEEE 754 does not
+-- interpret the sign of a NaN and does not say which one an invalid
+-- operation produces: x86-64's '0.0/0.0' is fff8000000000000 and
+-- aarch64's is 7ff8000000000000, and both are correct. 'sort' moves
+-- values without touching them, so a computed NaN would put that choice
+-- into this file's output and report a divergence that is not one.
+--
+-- What is worth pinning is pinned: the ordering, and that a NaN carried
+-- through 'sort' comes out with the bits it went in with.
+local nan = string.unpack("<d", string.pack("<I8", 0x7ff8000000000000))
 local mixed = array.from{3.0, nan, 1.0, -0.0, 0.0, nan, 2.0, -1.0}
 say("sort", bits(array.sort(mixed)))
 say("argsort", bits(array.argsort(mixed)))
 say("argsort_ties", bits(array.argsort(array.from{2, 1, 2, 1, 2, 1})))
+-- The property the line above can no longer state: whatever NaN this
+-- target's FPU makes, it still sorts last. Reported as where it landed
+-- rather than as what it is, which is the part that is portable.
+local fpu = array.sort(array.from{1.0, 0.0 / 0.0, -1.0})
+local last = array.get(fpu, 3)
+say("sort_computed_nan_last", tostring(last ~= last))
 
 -- 6. Masks and selection.
 local mask = array.gt(a, 0.5)
