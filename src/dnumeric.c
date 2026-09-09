@@ -381,9 +381,20 @@ static dv_array *dvn_newview (lua_State *L, int baseidx, const dv_array *base) {
   return v;
 }
 
+/*
+** The credit half of the adopted-buffer accounting; 'diluvium_array_adopt'
+** below is the charge half, and dnumeric.h says why the pair lives here.
+**
+** The byte count is reconstructed rather than stored: adoption set 'nelem' to
+** 'len / width' after checking 'len % width == 0', so this is 'len' exactly
+** and a field that could disagree with the buffer is one that eventually
+** would.
+*/
 static int dvn_gc (lua_State *L) {
   dv_array *a = (dv_array *)luaL_checkudata(L, 1, DVN_MTNAME);
   if (a->owns == DVN_OWN_EXTERN && a->data != NULL) {
+    diluvium_memory_credit(L,
+                           (uint64_t)a->nelem * dvn_width(a->dtype));
     free(a->data);
     a->data = NULL;
   }
@@ -2775,10 +2786,22 @@ LUA_API int diluvium_array_adopt (lua_State *L, int dtype, size_t len,
      instead. */
   luaL_getmetatable(L, DVN_MTNAME);
   if (!lua_istable(L, -1)) {
+    /* No metatable means no '__gc', so this half-built array never frees
+       the host's buffer -- which is what makes returning 1 here safe, and
+       why nothing has been charged yet. */
     lua_pop(L, 2);  /* the metatable slot and the half-built array */
     return 1;
   }
   lua_setmetatable(L, -2);
+  /* Ownership is taken at exactly the line above, so the bytes are charged
+     at exactly this one; 'dvn_gc' credits them back. dv.h promises a host
+     that a column it hands over shows up in 'dv_memory', and this is that
+     promise -- the buffer never passes through the instance's allocator, so
+     nothing else counts it.
+     Nothing here may raise, and this call does not: 'dv_array_adopt' is the
+     caller, it releases the buffer when this call does not return, and a
+     raise after the line above would make that release a double free. */
+  diluvium_memory_charge(L, (uint64_t)len);
   return 0;
 }
 

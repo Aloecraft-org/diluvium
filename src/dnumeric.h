@@ -69,7 +69,7 @@ LUA_API int diluvium_array_adopt (lua_State *L, int dtype, size_t len,
 
 
 /*
-** 'LUA_API' rather than 'LUAI_FUNC' on these three, following dshim.h:
+** 'LUA_API' rather than 'LUAI_FUNC' on these five, following dshim.h:
 ** they cross translation units in the per-file build, which compiles
 ** each d*.c without LUA_CORE, and LUAI_FUNC is only defined there.
 **
@@ -101,6 +101,36 @@ LUA_API void diluvium_budget_charge (lua_State *L, void *cookie,
 ** with. Implemented in dv.c, for the same reason as the two above.
 */
 LUA_API void diluvium_numeric_touched (lua_State *L);
+
+
+/*
+** The adopted-memory seam, the same shape and here for the same reason.
+**
+** A buffer 'diluvium_array_adopt' takes never passes through the
+** instance's allocator, so nothing has counted it: without these,
+** 'dv_memory' reports an instance holding a gigabyte column as holding
+** a hundred-byte header, and dv.h's "the adopted bytes count against the
+** instance's memory limit from here on" is false on the one path it was
+** written for.
+**
+** They are a pair and the pair must net to zero. Charging without the
+** matching credit walks the counter upward forever; crediting without
+** the charge walks it downward, which is the drift that made a memory
+** budget evadable once before (see 'dv_alloc' in dv.c). So both calls
+** live beside the 'owns' field they mirror -- the charge where
+** 'DVN_OWN_EXTERN' is set, the credit where '__gc' acts on it -- and
+** nowhere else, which is what makes half of the pair impossible to
+** write. With no instance behind the state both do nothing.
+**
+** Neither allocates. Both reach the instance through
+** 'diluvium_budget_open', whose registry key is a string the registry
+** itself keeps alive, so interning it after 'dv_new' finds it rather
+** than building it. That matters because the charge runs while a host
+** is handing over a buffer and the credit runs inside a finaliser --
+** two places where raising is either an abort or a leak.
+*/
+LUA_API void diluvium_memory_charge (lua_State *L, uint64_t n);
+LUA_API void diluvium_memory_credit (lua_State *L, uint64_t n);
 
 
 #endif

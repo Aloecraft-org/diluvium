@@ -710,24 +710,19 @@ impl Instance {
     /// `free`. What is avoided is the second and third copy an encoded
     /// message would have cost.
     ///
-    /// # Two limits worth knowing before handing over a large column
+    /// # A large column and a budgeted instance
     ///
-    /// Both are in the core's `dv_array_adopt`, not in this wrapper, and both
-    /// are reported against this branch rather than fixed in it:
+    /// The bytes are the instance's from the moment it takes them, so
+    /// [`Instance::memory`] after this call includes the whole column and a
+    /// budget bounds what a host can hand over. Handing over more than the
+    /// budget has left is not refused here -- the limit is enforced on
+    /// allocations and this is not one -- so the instance is simply over its
+    /// limit afterwards and the next thing the program allocates fails. Read
+    /// `memory()` after adopting a column whose size you did not choose.
     ///
-    /// - **The adopted bytes are not charged.** `dv.h` says they count
-    ///   against the instance's memory limit; on the adopt path they are
-    ///   never added to it, because the buffer never passes through the
-    ///   instance's allocator. An 8 MB column handed to an instance budgeted
-    ///   at 256 KB is accepted and moves the counter by about 120 bytes. Do
-    ///   not rely on the memory budget to bound what a host hands over.
-    /// - **The copy path can take the process down.** Where the feature is
-    ///   off and the copy would exceed the budget, `lua_pushlstring` raises
-    ///   inside an unprotected call and the process dies rather than this
-    ///   returning. Reproducible at 240 KB against a 256 KB budget.
-    ///
-    /// Until both are fixed, treat a budgeted instance and a large column as
-    /// a combination the host has to bound itself.
+    /// A handover that cannot be made at all -- no room even for the array's
+    /// header, or for the string on the copy path -- is an [`Error::Program`]
+    /// carrying the core's message. The buffer is released either way.
     pub fn adopt<T: ArrayElement>(&mut self, values: &[T]) -> Result<Adopted, Error> {
         let len = std::mem::size_of_val(values);
         // Empty is not an error and needs no allocation: `dv.h` refuses a
@@ -749,15 +744,21 @@ impl Instance {
         // Every argument was checked on the way in -- the dtype comes from
         // the sealed trait, `len` is a whole number of elements by
         // construction, and `bytes` is null only when `len` is zero -- so the
-        // one return that means "invalid argument, nothing pushed, you still
-        // own the buffer" is unreachable from here. What is left is the
-        // documented pair: 0 adopted, 1 copied to a string.
+        // return that means "invalid argument, nothing pushed, you still own
+        // the buffer" is unreachable from here and `bytes` is never ours again
+        // whatever comes back. What is left is 0 adopted, 1 copied to a
+        // string, and 1 with a message, which is the handover having failed.
         let rc = unsafe { sys::dv_array_adopt(self.raw, T::DTYPE, len, bytes) };
-        Ok(if rc == 0 {
-            Adopted::Array
-        } else {
-            Adopted::StringCopy
-        })
+        if rc == 0 {
+            return Ok(Adopted::Array);
+        }
+        // `dv.h`: after this call, a message means nothing was pushed. Asked
+        // of the raw pointer rather than of `last_error`, which substitutes a
+        // string of its own when there is none.
+        if !unsafe { sys::dv_last_error(self.raw) }.is_null() {
+            return Err(Error::Program(self.last_error()));
+        }
+        Ok(Adopted::StringCopy)
     }
 
     /// Hibernate: write the instance's whole state -- the parked program, its

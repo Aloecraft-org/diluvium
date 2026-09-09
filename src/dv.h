@@ -603,13 +603,25 @@ typedef struct dv_numeric_backend {
 ** written against this today keeps working unchanged; the return value is how
 ** it learns which shape the guest is about to see.
 **
-** Returns 1 with nothing pushed *only* on invalid arguments -- a NULL
-** instance, an unknown 'dtype', a 'len' that is not a whole number of
-** elements, or a NULL 'bytes' with a non-zero 'len'. In that one case
-** ownership does not transfer (the caller still frees 'bytes') and
-** 'dv_last_error' says which argument was wrong. It is distinguishable from
-** the ordinary copy return by the stack depth, and a host that checks its own
-** arguments never sees it.
+** Returns 1 with *nothing* pushed in two cases, and both leave a message in
+** 'dv_last_error', which is how they are told from the ordinary copy: after
+** this call, 1 with an error means nothing was pushed and 1 without one means
+** a string was. Nothing else here sets a message, so the test is exact.
+**
+** The two cases are the arguments and the handover. Invalid arguments -- a
+** NULL instance, an unknown 'dtype', a 'len' that is not a whole number of
+** elements, or a NULL 'bytes' with a non-zero 'len' -- mean nothing happened
+** at all and the caller still frees 'bytes'. Good arguments and a handover
+** that could not be made -- in practice the instance had no memory left for
+** the array's header or for the string -- mean 'bytes' has been released like
+** any other accepted buffer. So the caller's rule is one sentence: if the
+** arguments were good, the buffer is gone. A host that checks its own
+** arguments only ever sees the second.
+**
+** The second case is a refusal and not a crash on purpose. Pushing a value can
+** fail, and this call is made from host code that is not running under any
+** protection of the runtime's, so the failure has to be turned into a return
+** here or it takes the process with it.
 **
 ** Call this while the instance is parked -- between 'dv_run' or 'dv_resume'
 ** returning and the next 'dv_resume'. That is the window a hostcall reply is
@@ -618,7 +630,16 @@ typedef struct dv_numeric_backend {
 **
 ** The adopted bytes count against the instance's memory limit from here on,
 ** the same as anything else it holds, so a host handing a large column to a
-** budgeted instance can see the cost in 'dv_memory'.
+** budgeted instance can see the cost in 'dv_memory'. They are charged when
+** ownership transfers and credited when the guest's last reference to the
+** column is collected, exactly like memory the instance allocated itself.
+**
+** A column larger than what is left of the budget is still taken -- the limit
+** is enforced on allocations, and this is not one -- and the instance is then
+** over its limit, so the next thing the program allocates fails and
+** 'dv_exceeded' says so. That is the same shape as any other way of going over
+** budget, and 'dv_memory' after the call is how a host that cares finds out
+** before its guest does.
 */
 int dv_array_adopt (dv_instance *inst, int dtype, size_t len, void *bytes);
 

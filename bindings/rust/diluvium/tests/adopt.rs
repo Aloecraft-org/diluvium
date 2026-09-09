@@ -70,26 +70,71 @@ fn a_column_is_adopted_or_copied_and_says_which() {
     }
 }
 
-/// Adoption takes the buffer; the copy path copies it. The memory counter is
-/// where the difference shows, and it is the whole reason the lane exists.
+/// A column the instance holds is on the instance's counter, whichever
+/// handover it went through.
+///
+/// This used to assert the opposite for the adopt path -- that the counter
+/// barely moved -- and passed, because the adopted bytes were never charged:
+/// the buffer does not pass through the instance's allocator, so nothing
+/// counted it. That made `memory()` report a header where a megabyte was, and
+/// a budget no bound at all on what a host hands over. The counter is not
+/// where zero-copy shows any more, and it never should have been: the
+/// instance holds the same number of bytes either way, and the difference
+/// between the two paths is the copy that is not made, not the memory that is
+/// not held.
 #[test]
-fn adoption_does_not_copy_and_the_copy_path_does() {
+fn an_adopted_column_is_charged_like_a_copied_one() {
     let mut inst = parked();
     let before = inst.memory().bytes_now;
-    let values: Vec<f64> = vec![1.5; 8192]; // 64 KB
+    let values: Vec<f64> = vec![1.5; 131072]; // 1 MB
     inst.adopt(&values).unwrap();
     let grew = inst.memory().bytes_now.saturating_sub(before);
-    if has_numeric() {
-        assert!(
-            grew < 4096,
-            "an adopted buffer is taken, not copied, so the guest heap grows \
-             by a header and not by 64 KB -- grew {grew}"
-        );
-    } else {
-        assert!(
-            grew >= 65536,
-            "the copy path copies: the string is in the guest heap -- grew {grew}"
-        );
+    assert!(
+        grew >= 1024 * 1024,
+        "the instance holds the column, so its counter says so -- grew {grew} \
+         under numeric = {}",
+        has_numeric()
+    );
+}
+
+/// A column bigger than the budget comes back, rather than taking the process
+/// with it.
+///
+/// Every way of putting the bytes in front of the guest allocates, and
+/// `dv_array_adopt` is called from host code with nothing protected above it:
+/// an allocation failure there used to reach the panic function and abort. A
+/// test for that is a test that the process is still alive to run the next
+/// line, so that is what this asserts. Which answer comes back depends on the
+/// build -- with the feature the array's header fits and the column is taken,
+/// leaving the instance over its limit; without it the copy is the whole
+/// column and the handover is refused -- and both are the documented answer.
+#[test]
+fn a_column_bigger_than_the_budget_returns() {
+    let mut inst = Config::new()
+        .budget(0, 256)
+        .load_source(
+            r#"
+            local inbox = queue.lookup("inbox")
+            local _, m = queue.wait({inbox})
+            return m
+            "#,
+            "adopter",
+        )
+        .unwrap();
+    assert!(matches!(inst.run().unwrap(), Step::Parked(_)));
+
+    let values: Vec<f64> = vec![1.5; 131072]; // 1 MB against 256 KB
+    match inst.adopt(&values) {
+        Ok(Adopted::Array) => assert!(
+            has_numeric() && inst.memory().bytes_now > 256 * 1024,
+            "the column was taken, so the instance is over its limit and \
+             says so"
+        ),
+        Ok(Adopted::StringCopy) => panic!("1 MB cannot be copied into 256 KB"),
+        Err(e) => assert!(
+            !has_numeric(),
+            "the copy path refuses; the adopt path had room for a header: {e}"
+        ),
     }
 }
 
