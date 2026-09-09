@@ -6,7 +6,7 @@ Status: brainstorm for review. Everything here is on the table; the tiers are a 
 
 **Freeness test.** Every new form must be a syntax error in stock Lua 5.5. Not "unlikely in practice," a hard parse error. The CI gate: a corpus of every new form is fed to stock `luac -p` and the build fails if any of it parses. The reverse corpus (the Lua test suite plus real-world code) must parse and run identically under diluvium.
 
-**Desugar only.** New syntax compiles to existing opcodes. No new opcodes, no dump/undump changes, `luac -l` output indistinguishable from hand-written Lua. This is how `??` landed (branch compilation, `OP_2Q` removed) and it is what keeps the bytecode identical across targets and the analyzer honest. Where a desugar needs a helper, it calls a registry function the way literal suffixes do (looked up outside `_ENV`, so it cannot be shadowed).
+**Desugar only.** New syntax compiles to existing opcodes. No new opcodes, no dump/undump changes, `luac -l` output indistinguishable from hand-written Lua. This is how `??` landed (branch compilation, `OP_2Q` removed) and it is what keeps the bytecode identical across targets and the analyzer honest. Where a desugar needs a helper, it calls a registry function looked up outside `_ENV`, so it cannot be shadowed. (This sentence used to cite literal suffixes as the precedent; they were never built -- see the correction in section 2. The helpers that do exist reach `dv.slice`, `dv.class` and `dv.isa` this way.)
 
 **Contextual keywords carry the risk.** Lua is whitespace-insensitive, so `NAME` followed by something must be unambiguous by token alone, never by line. Each contextual keyword below states its disambiguation rule. The pattern: the keyword is only special when the token after it makes stock Lua fail.
 
@@ -16,7 +16,15 @@ Status: brainstorm for review. Everything here is on the table; the tiers are a 
 
 ## 2. Shipped and planned
 
-Shipped: `$"..."` interpolation, `??` null coalescing, literal-suffix registry (`1.23d`), secure functions.
+Shipped: `$"..."` interpolation, `??` null coalescing, secure functions.
+
+> **Correction.** This line listed the literal-suffix registry (`1.23d`) as
+> shipped, and the sigil table in section 9 said the same. It is not: `1.23d` is a
+> `malformed number` in every build of this tree, there is no suffix machinery
+> in `llex.c`, and `doc/Guide.md` §9 has always said so. Ext `0x01` is reserved
+> for decQuad and unimplemented, which is what the registry was waiting on. The
+> Guide was right and this document was wrong; `doc/ROADMAP.md` records it as
+> not started, gated on decQuad semantics.
 
 Planned and recorded: `switch` (contextual, no fallthrough, multi-value arms, no destructuring match), compound assignment, `defer`, "decorator features" (see 5.6 for the sigil decision this forces), LuaCATS comment annotations.
 
@@ -293,7 +301,7 @@ Contextual `with` followed by an expression then `do`; leading `.x` inside the b
 |---|---|---|
 | `$"..."` | interpolation | shipped |
 | `??` | null coalesce | shipped |
-| `1.23d` (letters after a numeral) | literal suffix registry | shipped |
+| `1.23d` (letters after a numeral) | literal suffix registry | **not started** -- gated on decQuad; see the correction in section 2 |
 | `?.` `?[` `?:` `?(` | null-safe navigation | proposed |
 | `?` postfix | try | speculative |
 | `@` | `self` | proposed (see 8) |

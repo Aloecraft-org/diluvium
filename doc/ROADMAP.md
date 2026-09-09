@@ -34,7 +34,7 @@ out of upstream Lua's version space: upstream will never ship a
 | Compound assignment `+=` etc. | done (no `~=`; see below) |
 | Safe navigation `?.` / `?[` | done |
 | `switch` statement | done |
-| `match` (switch as an expression) | **dropped** -- see below |
+| `match` (the name) | dropped; the form shipped as a `switch` expression |
 | `defer` / `with` | done |
 | `continue` in loops | done (a contextual keyword; no bytecode change) |
 | F-string format specs `{x::%.2f}` | done |
@@ -491,8 +491,12 @@ Also unscheduled:
   the compiler hold you to it, rather than inferring from spelling. Design
   the registry around that: a suffix is a named claim about a literal's
   type and precision, decimal being the first entry, not the reason.
-- **`match`** -- switch in expression position. Dropped for now; the
-  statement form carries the README promise on its own.
+- ~~**`match`** -- switch in expression position.~~ **Landed**, as a
+  `switch` expression rather than a new word: `switch x case 1: "a" else "b"`.
+  A second keyword was not worth it once the statement form was contextual,
+  and reusing `switch` is what keeps `local match = 1` a legal program. The
+  expression form takes `:` and requires `else`, which is what distinguishes
+  it from the statement form at the parse point.
 - **Compile-time regex validation** -- a malformed pattern in a literal is
   caught where it is evaluated rather than where it is compiled. See the
   regex section below for what it would take, which is a validation entry

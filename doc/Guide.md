@@ -39,11 +39,15 @@ diluvium_compiler -r f.lua    # static analysis report as JSON, to luac.out
 Diluvium is Lua 5.5. Every Lua program is a Diluvium program. What follows is what
 it adds, and all of it is optional.
 
-The additions that read as keywords — `switch`, `case`, `default`, `defer`, `with` —
-are **contextual**: they are still ordinary names, so `local switch = 1` and
+The additions that read as keywords — `switch`, `case`, `default`, `defer`, `with`,
+`class`, `extends`, `static`, `super`, `const`, `continue`, `export` — are
+**contextual**: they are still ordinary names, so `local switch = 1` and
 `t.defer = 2` and `local function with() end` all still compile. That follows the
-precedent 5.5 set with its own `global`. The cost is that `switch (x)`, `switch "s"`
-and `switch {}` stay *function calls*, because they always were.
+precedent 5.5 set with its own `global`, and it is checked rather than asserted:
+`script/freeness_check.sh` compiles every form here against a pristine Lua 5.5 and
+requires it to be refused there and accepted here, for all 25 of them. The cost is
+that `switch (x)`, `switch "s"` and `switch {}` stay *function calls*, because they
+always were.
 
 ### String interpolation
 
@@ -172,6 +176,34 @@ than a surprise: in a `repeat`, a `continue` that jumps past a local the `until`
 then reads is refused by name, the same way an explicit `goto` into a local's scope
 is — move the `continue` below that local, or lift the local above the loop.
 
+### `if` and `switch` as expressions
+
+```lua
+local function sign (x) return if x < 0 then -1 elseif x > 0 then 1 else 0 end
+
+local code = 404
+local kind = switch code
+  case 200, 204: "ok"
+  case 301, 302: "redirect"
+  else "other"
+print(kind)                       --> other
+```
+
+Both are expressions: they produce a value and go anywhere a value goes — an
+argument, a table field, a lambda body, another arm.
+
+The expression forms are spelled differently from the statement forms on purpose,
+and the difference is not decoration. An expression must always produce a value, so
+`else` is **required** (`'else' is required in a 'switch' expression`) and the word
+is `else` rather than `default`; the arms take `:` rather than `then`, and there is
+no `end`, because an arm is one expression and ends where it ends. A statement need
+not produce anything, so `switch ... do ... end` keeps `then`, `default`, and the
+right to match nothing.
+
+`switch` is still an ordinary name. To keep `local switch = 1` and `switch (x)`
+working, a `switch` *expression* requires its subject to begin on the same line as
+the word; a `switch` on its own at the end of a line is the variable.
+
 ### `defer` and `with`
 
 ```lua
@@ -190,6 +222,229 @@ error, or falling off the end. It desugars to a to-be-closed local, so it surviv
 `coroutine.yield` in between and runs at the right time rather than at yield time.
 `with name = expr do ... end` binds a to-be-closed local directly, for a value with a
 `__close`. Several bindings may be separated by commas.
+
+### Numerals
+
+```lua
+print(1_000_000, 1_0.5_5, 0xFF_FF)   --> 1000000  10.55  65535
+print(0b1010, 0b1010_0001)           --> 10       161
+```
+
+An underscore may go **between digits**, on either side of the point and in the
+exponent, in any base. It may not trail (`1_`), double up (`1__0`), sit against
+the point (`1._5`) or follow the base prefix (`0x_FF`) — each of those is a
+syntax error rather than a number that quietly means something else. A *leading*
+underscore is not an error and not a numeral either: `_1` is an identifier, as
+it always was. `0b` is binary; there was no binary literal before.
+
+### `const`
+
+```lua
+const RATE = 0.05
+const A, B = 1, 2
+
+const T = {1, 2}
+T[1] = 9          -- fine: the binding is constant, the value is not
+```
+
+Assigning to one is a compile error — `attempt to assign to const variable 'A'`
+— not a runtime one. It is Lua's `<const>` attribute with a keyword in front of
+it, so the same constant-folding applies and there is no runtime cost.
+
+### Functions: defaults, expression bodies, spread
+
+```lua
+local function connect (host, port = 8080, tls = true)
+  return string.format("%s:%d:%s", host, port, tostring(tls))
+end
+print(connect("h"))          --> h:8080:true
+print(connect("h", 99))      --> h:99:true
+
+local function area (w, h) = w * h     -- an expression body: no return, no end
+print(area(3, 4))                      --> 12
+
+local args = {2, 3, 4}
+local function four (a, b, c, d) return a, b, c, d end
+print(four(...args))         --> 2  3  4  nil
+print(four(1, ...args))      --> 1  2  3  4
+```
+
+A default is evaluated **per call**, not once at definition, so
+`function f (t = {})` gives every call its own table — the opposite of the trap
+the same syntax sets in Python. It fires only for a missing or `nil` argument.
+
+`= expr` is a whole body: `function f(a) = expr` is `function f(a) return expr end`.
+It works for a `local function`, a global one, a method (`function P:len() = ...`)
+and an anonymous one.
+
+`...t` expands a table into an argument list. It is `table.unpack`, spelled where
+the arguments are, so it may appear at any position and only the last one expands
+to more than a single value.
+
+### Lambdas
+
+```lua
+print((|x| x * 2)(21))           --> 42
+print((|a, b| a + b)(3, 4))      --> 7
+print((|| 42)())                 --> 42
+
+local xs = {3, 1, 2}
+table.sort(xs, |a, b| a < b)
+```
+
+The body is **one expression**, so a lambda ends where its expression does: in
+`{half = |x| x / 2, name = "half"}` the comma belongs to the table, not to the
+lambda. That also means `|x| x | y` is a lambda returning a bitwise or — the `|`
+inside a body is the operator it always was.
+
+### Destructuring
+
+```lua
+local cfg = {host = "h", port = 8080}
+local {host, port} = cfg
+local {absent} = cfg              --> nil, not an error
+local [first, second] = {"a", "b", "c"}
+print(host, port, absent, first, second)   --> h  8080  nil  a  b
+
+for _, row in ipairs{{name = "a", n = 1}, {name = "b", n = 2}} do
+  local {name, n} = row
+  io.write(name, n, " ")                   --> a1 b2
+end
+```
+
+`{}` takes names out by key, `[]` by position. A name that is not there is `nil`,
+which is the rule indexing a table already follows. An empty pattern is refused —
+`a destructuring pattern needs at least one name` — because it can only be a typo.
+The right-hand side is evaluated once, so `local {a, b} = f()` calls `f` once.
+
+### Slicing
+
+```lua
+local list = {10, 20, 30, 40, 50}
+print(table.concat(list[2:4], ","))    --> 20,30,40
+print(table.concat(list[3:], ","))     --> 30,40,50
+print(table.concat(list[:2], ","))     --> 10,20
+print(table.concat(list[-2:], ","))    --> 40,50
+
+local s = "hello world"
+print(s[7:], s[1:5])                   --> world  hello
+```
+
+Both ends are inclusive and either may be left out. A negative index counts from
+the end. On a string it slices characters and on a table it builds a new table, so
+the original is untouched either way.
+
+It is a metamethod lookup (`__slice`), not a fixed rule, which is why an `array`
+slices to a **view** that shares storage while a table slices to a copy. Slicing a
+`nil` raises `cannot slice a nil value`, naming the operation rather than the
+indexing it desugars to.
+
+### Classes
+
+```lua
+class Account
+  balance = 0            -- a field default, evaluated per instance
+  owner = "nobody"
+
+  function new (owner)
+    @owner = owner       -- '@x' is 'self.x'
+  end
+
+  function deposit (n)
+    @balance += n
+    return self
+  end
+
+  static function empty () = Account("nobody")
+
+  function __tostring () = "Account(" .. @owner .. ":" .. @balance .. ")"
+end
+
+class Savings extends Account
+  function deposit (n) = super.deposit(n * 2)
+end
+
+local a = Account("bob"):deposit(5):deposit(6)
+print(tostring(a))              --> Account(bob:11)
+print(Account.empty().owner)    --> nobody
+print(dv.isa(a, Account))       --> true
+```
+
+Calling the class constructs; `new` is the constructor and takes no explicit
+`self`. `static` opts a function out of the implicit `self`, so it is called on
+the class. `super(...)` calls the parent's `new` and `super.m(...)` calls the
+parent's `m`, both passing `self`.
+
+`@` is `self`, in every spelling: `@name`, `@.name`, `@[k]`, `@:m()`, and `@` on
+its own. `@m()` is `self.m()` — a *field* call with no self — which is the same
+distinction Lua already draws between `obj.m()` and `obj:m()`. It works in any
+method, not only one in a class body.
+
+The desugar is plain metatables, so nothing new entered the object model: a class
+*is* a table, an instance's metatable is its class, `Account.__index` is `Account`,
+and `getmetatable` and the metamethods behave exactly as they always did.
+
+Three consequences worth knowing.
+
+A field default is re-evaluated **for each instance**, so `items = {}` gives every
+instance its own table rather than one shared between them — the mistake a
+hand-written class library usually makes once.
+
+A metamethod inherited from a parent is *copied down* at class-creation time,
+because Lua looks metamethods up raw and would otherwise not find one on a
+grandparent. So an inherited `__tostring` fires whether or not the subclass has a
+constructor of its own.
+
+**A parent's field defaults are applied by the parent's constructor**, and that is
+the one place the desugar can surprise you:
+
+```lua
+class Base
+  tag = "base"
+  function new () end
+end
+
+class Quiet extends Base            -- no 'new' of its own
+end
+class Loud extends Base
+  function new () super() end       -- calls up
+end
+class Silent extends Base
+  function new () end               -- does not call up
+end
+
+print(Quiet().tag, Loud().tag, Silent().tag)   --> base  base  nil
+```
+
+`Quiet` inherits `Base.new` and so runs its prologue; `Loud` reaches it through
+`super()`. `Silent` defines a constructor and never calls up, so `Base`'s defaults
+are never applied — the same thing that happens in hand-written Lua when a subclass
+forgets to chain, spelled the same way. If a subclass declares `new`, call
+`super(...)` from it unless you mean not to.
+
+### `export`
+
+```lua
+-- port.lua
+export PORT = 8080
+export function connect (url) return url .. ":" .. PORT end
+local hidden = "not exported"
+```
+
+```lua
+local m = dofile("port.lua")    -- or require, where 'package' is present
+print(m.PORT, m.connect("h"))   --> 8080  h:8080
+print(m.hidden)                 --> nil
+```
+
+A chunk with any `export` in it returns a table of exactly the exported names, and
+they see each other — a function can call another export, and itself. An export is
+not a global, and a `local` is not an export.
+
+`export` is only allowed at the top level of a chunk, never inside a function or a
+`do` block, and a chunk that exports may not also `return` something of its own.
+Both are refused at compile time, by name, because either would make what a chunk
+returns depend on where you looked.
 
 ### Secure functions
 
@@ -421,6 +676,123 @@ Seconds, not milliseconds — the unit `os.time` and a JWT's `exp` already speak
 `host:time` answers in milliseconds, so divide by 1000 at the boundary. `time.of`
 and `time.parse` refuse an impossible date (Feb 29 in a common year, a month past
 12) rather than rolling it over.
+
+### Numbers in bulk: `array`
+
+Present only when the build carries the `numeric` feature — `dv_features()` from a
+host, or `array ~= nil` from a program. A default build of the interpreter does not
+have it; the release builds do.
+
+```lua
+local a = array.from{3.0, 1.0, 2.0}
+print(array.dtype(a), #a, a[1])        --> f64  3  3.0
+print(a:sum(), a:mean(), a:max())      --> 6.0  2.0  3.0
+print(table.concat(a:sort():to_table(), ","))   --> 1.0,2.0,3.0
+```
+
+An array is typed and flat: `f64`, `i64`, `u8`, or `c128` for a complex pair. One
+or two dimensions. `array.from{...}` infers the dtype from the values (one float
+makes the whole thing `f64`) and takes an explicit one as a second argument;
+`array.new(dtype, d0, d1?)`, `zeros`, `ones`, `arange(dtype, from, to, step?)` and
+`linspace(a, b, n)` build one directly. Every function is also a method, so
+`array.sum(a)` and `a:sum()` are the same call.
+
+```lua
+local a, b = array.from{3.0, 1.0, 2.0}, array.from{10.0, 20.0, 30.0}
+print(table.concat((a + b):to_table(), ","))        --> 13.0,21.0,32.0
+print(table.concat(a:mul(2):to_table(), ","))       --> 6.0,2.0,4.0
+print(table.concat(a:gt(1.5):to_table(), ","))      --> 1,0,1
+```
+
+The operators do the obvious elementwise thing. The comparisons are **named calls**
+rather than operators — `gt`, `ge`, `lt`, `le`, `eq`, `ne` — because `a > b` on two
+arrays has to answer either "a mask" or "a boolean" and Lua's `__lt` must answer the
+second. Naming it means a mask is asked for rather than assumed.
+
+```lua
+local m = array.arange("i64", 0, 6)
+local v = m[3:5]                       -- elements 3..5
+print(array.isview(v))                 --> true
+v[1] = 99
+print(table.concat(m:to_table(), ","))  --> 0,1,99,3,4,5
+```
+
+**A slice of an array is a view, not a copy** — it shares storage, and writing
+through it writes to the base. That is the opposite of slicing a table, and it is
+the point: a column of ten million elements should not be copied to look at a
+window of it. `array.copy` when you want the copy, `array.isview` when you need to
+know which you are holding.
+
+```lua
+local keys = array.from{7, 7, 9}
+local vals = array.from{1.0, 2.0, 10.0}
+local ids, ngroups = array.group_index(keys)
+print(ngroups, table.concat(ids:to_table(), ","))              --> 2  1,1,2
+print(table.concat(array.group_sum(vals, ids, ngroups):to_table(), ","))
+                                                               --> 3.0,10.0
+```
+
+Grouping is two steps on purpose: `group_index` turns keys into dense ids once, and
+then any number of `group_sum`/`group_mean`/`group_count`/`group_min`/`group_max`
+reductions run against the same ids. Ids are assigned in **first-appearance order**,
+not sorted order, so the answer does not depend on how the keys compare.
+
+Also here: `sort`/`argsort`, `where`/`select` for masking, `dot`/`matmul`,
+`cumsum`, `var`/`std`, `argmin`/`argmax`, the complex accessors
+(`complex`/`real`/`imag`/`conj`/`magnitude`), and the transforms —
+`fft`/`ifft`, `rfft`/`irfft`, `ntt`/`intt`, `convolve`/`correlate`.
+
+```lua
+local h = array.rfft(array.from{1.0, 2.0, 3.0, 4.0})
+print(array.dtype(h), array.size(h))                    --> c128  3
+print(table.concat(array.real(h):to_table(), ","))      --> 10.0,-2.0,-2.0
+print(table.concat(array.irfft(h):to_table(), ","))     --> 1.0,2.0,3.0,4.0
+
+local c = array.convolve(array.from{1, 2}, array.from{1, 1})
+print(array.get(c, 1), array.get(c, 2), array.get(c, 3))   --> 1  3  2
+```
+
+`rfft` returns one `c128` array of the half spectrum, not a real/imaginary pair;
+`real` and `imag` take it apart. `convolve` picks its own route: two integer arrays
+go through the NTT and the answer is **exact**, anything else goes through the FFT.
+An integer convolution that would overflow is refused rather than wrapped.
+
+#### The same bits everywhere
+
+This is the reason to reach for `array` rather than a table and a loop. Every kernel
+here is *reproducible tier*: the same input gives the same bits on every target this
+runtime builds for — x86-64 and aarch64, gcc and clang, `-O0` through `-Os`, native
+and WebAssembly.
+
+That is enforced rather than hoped for. Reductions run in a canonical
+eight-accumulator order regardless of length, ordering is a total order with NaN
+last, group ids come from a fixed 64-bit mix rather than the string hash seed, and
+the transcendentals are a vendored libm rather than the platform's.
+`test/numeric/corpus.lua` prints 102 lines of raw IEEE bit patterns and CI diffs
+them across architectures on every change.
+
+```lua
+print(array.bits(array.from{1.0}))             --> 3ff0000000000000
+print(array.bits(array.from({1}, "u8")))       --> 01
+```
+
+`array.bits` is the exact answer to "did this change", which `print` on a float is
+not.
+
+**One limit, and it is IEEE 754's rather than ours.** The standard does not
+interpret the sign of a NaN, so a NaN produced by an invalid operation has a
+target-dependent sign bit. Every kernel here moves a NaN without touching its bits,
+so a program that computes one and then reads its bit pattern reads its target's
+choice. Where an answer has to be identical everywhere the NaN is canonicalised
+instead of carried — which is why grouping puts every NaN in one group on every
+target, and why a program that needs a pinned NaN should build it from its bits with
+`string.pack`.
+
+A kernel charges the instruction budget by **element count**, one instruction per 64
+elements, checked at a block boundary — not by time. So an instance that exceeds its
+budget does so at the same element of the same kernel on every target, which is what
+makes replaying a budget-exceeded run mean anything. `dv_numeric_set_max_elements`
+caps how many elements one call may touch.
 
 ### Reaching the host: `host`
 
@@ -961,8 +1333,8 @@ budget's count hook and silently disable the budget. Dispatch to both, or don't.
 
 ## 9. What not to rely on yet
 
-As of `v5.5.1_build3`. The full list with its reasoning is `doc/Messaging.md` §18;
-this is what it means for code you are writing now.
+As of `2.0.0`. The full list with its reasoning is `doc/Messaging.md` §18; this is
+what it means for code you are writing now.
 
 **Hibernation is on.** This paragraph used to say off-and-stay-off, because the thread
 record dropped `u2.funcidx` and an error raised in a *restored* program corrupted
