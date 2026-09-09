@@ -317,6 +317,25 @@ extern "C" {
     pub fn dv_numeric_touched_fast(inst: *mut dv_instance) -> c_int;
 }
 
+// The C allocator, for staging a buffer `dv_array_adopt` can take.
+//
+// `dv.h` says `malloc(len)` is what a host writes, and the runtime releases an
+// adopted buffer through the instance's allocator, which is `free` underneath.
+// So a buffer handed to `dv_array_adopt` has to come from here and not from
+// Rust's global allocator: the two are the same on most targets and are not
+// required to be, and freeing a Rust allocation with `free` is undefined
+// either way.
+//
+// Declared rather than taken from the `libc` crate because that would be a
+// dependency for two symbols already linked into every build of this crate.
+extern "C" {
+    /// Allocate `size` bytes for a buffer `dv_array_adopt` will take.
+    pub fn malloc(size: usize) -> *mut c_void;
+    /// Release a buffer `dv_array_adopt` refused, and nothing else: on
+    /// success the runtime owns it.
+    pub fn free(ptr: *mut c_void);
+}
+
 /// Element type of a buffer handed to [`dv_array_adopt`].
 pub const DV_DTYPE_F64: c_int = 0;
 pub const DV_DTYPE_I64: c_int = 1;
