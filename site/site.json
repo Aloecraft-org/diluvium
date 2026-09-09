@@ -1,7 +1,7 @@
 {
   "name":    "diluvium",
   "title":   "Diluvium",
-  "tagline": "Lua for modern development: a 100% backward-compatible extension of Lua 5.5 with string interpolation, null coalescing, switch, defer and secure functions -- blazing fast, under 1 MiB, and running just about everywhere. DRT, the runtime, shares this page.",
+  "tagline": "Lua for modern development: a 100% backward-compatible extension of Lua 5.5 with classes, lambdas, destructuring, regular expressions, string interpolation, switch, defer and secure functions, plus typed numeric arrays whose float results are bit-identical on every target -- blazing fast, under 1 MiB, and running just about everywhere. DRT, the runtime, shares this page.",
   "vhost":   "diluvium.aloecraft.org",
   "path":    "/",
   "source":  "https://github.com/Aloecraft-org/diluvium",
