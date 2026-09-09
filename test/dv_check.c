@@ -2663,6 +2663,134 @@ static void numeric_surface (void) {
 }
 
 
+/*
+** An adopted column is the instance's memory while it holds it, and stops
+** being the instance's when the guest lets go (3.1).
+**
+** dv.h has always said the adopted bytes count against the memory limit; on
+** the adopt path nothing counted them, because the buffer never passes through
+** 'dv_alloc'. An 8 MB column handed to an instance budgeted at 256 KB was
+** accepted and moved the counter by about a hundred bytes, so a supervisor
+** reading 'dv_memory' to decide whether a child was near its limit was reading
+** the header and not the column.
+**
+** Both halves are checked here, and they have to be checked together: a charge
+** with no matching credit is the same counter walking upward forever, and a
+** counter that only ever rises stops meaning anything just as thoroughly as
+** one that never moves. Nothing here is build-specific -- with the feature the
+** column becomes an array and the charge is explicit, without it the column
+** becomes a string and 'dv_alloc' charges it -- so the same two figures are
+** expected either way, which is the point: what a host is told it holds does
+** not depend on how the runtime was compiled.
+**
+** The guest collects twice because a finaliser needs two cycles: the first
+** runs '__gc' (which is where the credit is), the second frees the object.
+*/
+#define ADOPT_COLUMN_BYTES  (1024u * 1024u)
+
+static void an_adopted_column_is_charged_and_credited (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "for _ = 1, 2 do "
+    "  queue.wait({inb}) "
+    "  collectgarbage() "
+    "  collectgarbage() "
+    "end "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox;
+  uint64_t before = 0, held = 0, after = 0, peak = 0;
+  void *buf;
+  if (inst == NULL) { ok(0, "load for the adopt accounting"); return; }
+  inbox = dv_queue_lookup(inst, "inbox");
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks, which is the window "
+        "a column is handed over in");
+
+  buf = malloc(ADOPT_COLUMN_BYTES);
+  if (buf == NULL) { ok(0, "malloc a megabyte"); dv_free(inst); return; }
+  memset(buf, 0, ADOPT_COLUMN_BYTES);
+  dv_memory(inst, &before, &peak);
+  dv_array_adopt(inst, DV_DTYPE_F64, ADOPT_COLUMN_BYTES, buf);
+  ok(dv_last_error(inst) == NULL,
+     "a handover that worked leaves no message, which is what makes a message "
+     "mean 'nothing was pushed'");
+  dv_memory(inst, &held, &peak);
+  ok(held >= before + ADOPT_COLUMN_BYTES,
+     "a column the instance now holds is a megabyte on its own counter");
+  ok(peak >= held, "and the high-water mark saw it");
+
+  /* Let the program run on and collect. The adopted value is on the thread's
+     stack above the park's own results, and 'dv_resume' drops that many values
+     before it resumes, so by the time the guest collects nothing refers to the
+     column any more. Nothing consumes an adopted value yet -- the reply wiring
+     it is staged for does not exist -- so when that lands this is the line to
+     revisit: the guest will be holding the column and will have to drop it
+     itself for the credit to be observable here. */
+  eq_st(dv_queue_push(inst, inbox, MP_ONE, sizeof(MP_ONE)), DV_OK,
+        "the host answers the wait");
+  eq_st(dv_resume(inst, inbox), DV_IDLE, "and the program collects and parks "
+        "again");
+  dv_memory(inst, &after, &peak);
+  ok(after < before + (ADOPT_COLUMN_BYTES / 2),
+     "and once the guest has let go the megabyte is off the counter too, so "
+     "the charge and the credit net to zero");
+  dv_free(inst);
+}
+
+
+/*
+** A handover that will not fit is a refusal, not an abort (3.1).
+**
+** Everything that puts the bytes in front of the guest allocates -- the
+** array's header on the adopt path, the string on the copy path -- and
+** 'dv_array_adopt' is called from host code with no protected call anywhere
+** above it. An allocation failure there used to reach the panic function,
+** which aborts: a host that budgeted an instance at 256 KB and handed it a
+** larger column got no return value and no output, just a dead process. The
+** host is the thing that is supposed to survive its guest running out of
+** memory, so this is the one failure mode the ABI must not have.
+**
+** The check that matters is that control comes back at all. What it comes
+** back with differs by build and both are asserted: with the feature the
+** header is small enough to fit, so the column is taken and the instance is
+** simply over its limit afterwards -- which is what dv.h says happens and what
+** 'dv_memory' is for. Without it the copy is the whole column, it does not
+** fit, and the call refuses and says so.
+*/
+static void a_handover_that_does_not_fit_is_refused (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') queue.wait({inb}) return 0", 0);
+  dv_waitset ws;
+  uint64_t now = 0, peak = 0;
+  void *buf;
+  int rc;
+  if (inst == NULL) { ok(0, "load for the over-budget handover"); return; }
+  eq_st(dv_set_budget(inst, 0, 256), DV_OK, "256 KB, set before the run");
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks inside its budget");
+
+  buf = malloc(ADOPT_COLUMN_BYTES);
+  if (buf == NULL) { ok(0, "malloc a megabyte"); dv_free(inst); return; }
+  memset(buf, 0, ADOPT_COLUMN_BYTES);
+  rc = dv_array_adopt(inst, DV_DTYPE_F64, ADOPT_COLUMN_BYTES, buf);
+  ok(1, "a column four times the budget returns rather than aborting");
+#if defined(DV_NUMERIC)
+  eq_i(rc, 0, "the array's header fits, so the column is taken");
+  dv_memory(inst, &now, &peak);
+  ok(now > 256u * 1024u,
+     "and the instance is over its limit, where dv_memory can be read");
+#else
+  eq_i(rc, 1, "the copy does not fit, so the handover is refused");
+  ok(dv_last_error(inst) != NULL, "and the refusal says why");
+  dv_memory(inst, &now, &peak);
+  ok(peak <= 2u * 256u * 1024u,
+     "a refused column does not show up as a megabyte the instance once held");
+#endif
+  dv_free(inst);
+}
+
+
 #if defined(DV_NUMERIC)
 /*
 ** A kernel charges the instruction budget by element count (3.4).
@@ -2839,6 +2967,8 @@ int main (void) {
 
   printf("\n=== the numeric surface (Plan-2026-09 3.1) ===\n");
   numeric_surface();
+  an_adopted_column_is_charged_and_credited();
+  a_handover_that_does_not_fit_is_refused();
 #if defined(DV_NUMERIC)
   a_kernel_charges_the_budget_by_elements();
 #endif

@@ -449,29 +449,110 @@ static lua_State *dv_valuestack (dv_instance *inst) {
 
 
 /*
-** Release a buffer this call took ownership of, through the instance's own
-** allocator.
+** Take on bytes the instance holds that its allocator never saw.
 **
-** depth: the accounting, which is not decoration. 'dv_alloc' subtracts the
-** block's size from 'mem_used' on a free, and these bytes were never added to
-** it -- the host allocated them outside the instance. Freeing them without the
-** matching credit walks the counter downward against the truth, which is
-** exactly the drift documented at 'dv_alloc' above and exactly what made a
-** memory budget evadable there. So the bytes are charged first and released
-** second, and the pair nets to zero. Charging is also the honest answer for
-** the moment adoption becomes real: an adopted column is memory the instance
-** holds.
+** depth: the accounting, which is not decoration. Every other byte an instance
+** holds arrives through 'dv_alloc' and is counted there. An adopted buffer
+** does not -- the host allocated it outside the instance -- so 'dv_memory'
+** would report an instance holding a gigabyte column as holding the hundred
+** bytes of header that point at it, and dv.h's promise that adopted bytes
+** count against the memory limit would be false exactly where it matters.
+** This is the only place that promise is kept, and the credit in
+** 'diluvium_memory_credit' below is the only place it is unwound.
 */
+static void dv_charge_adopted (dv_instance *inst, uint64_t n) {
+  inst->mem_used += n;
+  if (inst->mem_used > inst->mem_peak)
+    inst->mem_peak = inst->mem_used;
+}
+
+
 static void dv_release_adopted (dv_instance *inst, void *bytes, size_t len) {
   lua_Alloc allocf;
   void *ud;
   if (bytes == NULL)
     return;
+  /*
+  ** A balancing entry, and deliberately not 'dv_charge_adopted': the free
+  ** below goes through 'dv_alloc', which subtracts 'len' from 'mem_used'
+  ** whether or not anything ever added it, so without this the counter walks
+  ** downward against the truth. The high-water mark must not move with it.
+  ** These bytes were the host's and are about to be nobody's; the instance
+  ** never held them as its own, and a peak that said otherwise would tell a
+  ** supervisor sizing this child's budget to make room for a column that was
+  ** copied or refused rather than kept.
+  */
   inst->mem_used += (uint64_t)len;
-  if (inst->mem_used > inst->mem_peak)
-    inst->mem_peak = inst->mem_used;
   allocf = lua_getallocf(inst->L, &ud);
   allocf(ud, bytes, len, 0);
+}
+
+
+/*
+** The seam the two ends of an adopted buffer's life reach this accounting
+** through.
+**
+** 'dv_release_adopted' above balances within one call because it takes and
+** frees in the same breath. A buffer that was really adopted cannot: the
+** instance holds it from the handover until the guest's last reference to its
+** array is collected, which is the whole point of adopting. So the charge is
+** made where ownership is taken and the credit where it ends, and both of
+** those are in dnumeric.c beside the 'owns' field they mirror -- see
+** dnumeric.h for why they live there rather than here.
+**
+** The credit clamps rather than wrapping, exactly as 'dv_alloc' does on a
+** free: a counter that went below zero would read as an enormous positive
+** number and hand the instance an unlimited budget.
+*/
+LUA_API void diluvium_memory_charge (lua_State *L, uint64_t n) {
+  dv_instance *inst = (dv_instance *)diluvium_budget_open(L);
+  if (inst != NULL)
+    dv_charge_adopted(inst, n);
+}
+
+
+LUA_API void diluvium_memory_credit (lua_State *L, uint64_t n) {
+  dv_instance *inst = (dv_instance *)diluvium_budget_open(L);
+  if (inst != NULL)
+    inst->mem_used -= (n < inst->mem_used) ? n : inst->mem_used;
+}
+
+
+/*
+** Both handovers, so they can run inside 'lua_pcall'. Arguments in, the value
+** and a flag saying which handover happened out.
+**
+** depth: why this is protected at all. Every way the bytes can reach the guest
+** allocates -- 'lua_newuserdatauv' for the array's header on the adopt path,
+** 'lua_pushlstring' for the string on the copy path -- and an allocation that
+** fails inside an unprotected C call has nowhere to throw to: 'luaD_throw'
+** with no error jump calls the panic function, which aborts the process. So a
+** host that budgeted an instance at 256 KB and handed it a 240 KB column did
+** not get a refusal, it got no return at all. That is the one failure mode an
+** embedding ABI must not have, because the host is the thing that was supposed
+** to survive its guest running out of memory.
+**
+** Three plain arguments rather than upvalues because 'lua_pushcclosure' with
+** upvalues allocates, and this runs precisely when allocation is what failed;
+** a light C function, a light userdata and two integers are all stores into a
+** stack slot. Same idiom as 'dv_save_body' further down.
+**
+** One invariant this rests on: nothing after 'diluvium_array_adopt' has taken
+** ownership may raise. A raise there unwinds past this and the caller frees a
+** buffer the array is already going to free, which is a double free rather
+** than a refusal. 'lua_pushboolean' cannot raise; the charge at the end of
+** 'diluvium_array_adopt' is the other statement inside that window, and
+** dnumeric.h says why it cannot either.
+*/
+static int dv_adopt_body (lua_State *L) {
+  void *bytes = lua_touserdata(L, 1);
+  size_t len = (size_t)lua_tointeger(L, 2);
+  int dtype = (int)lua_tointeger(L, 3);
+  int adopted = (diluvium_array_adopt(L, dtype, len, bytes) == 0);
+  if (!adopted)
+    lua_pushlstring(L, (const char *)bytes, len);
+  lua_pushboolean(L, adopted);
+  return 2;
 }
 
 
@@ -493,25 +574,71 @@ int dv_array_adopt (dv_instance *inst, int dtype, size_t len, void *bytes) {
     set_error(inst, "dv_array_adopt: NULL buffer with a non-zero length");
     return 1;
   }
+  /*
+  ** Every refusal above describes an argument and is the caller's to read.
+  ** From here the arguments are known good, so whatever 'dv_last_error' says
+  ** afterwards is about this handover and nothing earlier -- which is what
+  ** makes it the flag for "1, and nothing was pushed". Not at the top of the
+  ** function, for the reason 'clear_error' gives: the argument refusals set
+  ** errors of their own and a caller reading one back should still find it.
+  */
+  clear_error(inst);
   L = dv_valuestack(inst);
   /*
   ** Adoption proper, where the feature is built: the buffer becomes the
   ** array's elements with no copy at all, and the array's finaliser is
   ** what releases it. 'diluvium_array_adopt' reports 1 when it did not
   ** take the buffer, which is every build without DV_NUMERIC and any
-  ** state the library was never opened in.
+  ** state the library was never opened in; the copy into a string is what
+  ** happens then. The bytes reach the guest either way, and the return
+  ** value is how the caller learns which shape the guest is about to see,
+  ** so nothing a host wrote has to change when the feature is turned on.
+  **
+  ** Both run in 'dv_adopt_body' under 'lua_pcall', and on the main state
+  ** rather than on 'L'. Protected because either can fail; see the body.
+  ** On the main state because 'L' is the parked thread whenever there is
+  ** one, and lapi.c refuses a call on a suspended thread ("cannot do calls
+  ** on non-normal thread"). The value crosses afterwards, which is a stack
+  ** store and cannot fail once the room is reserved -- so the room is
+  ** reserved on both stacks before anything is attempted.
   */
-  if (diluvium_array_adopt(L, dtype, len, bytes) == 0)
-    return 0;
-  /*
-  ** The copy path otherwise. The bytes reach the guest either way; the
-  ** return value is how the caller learns whether it is holding an array
-  ** or a string, so nothing a host wrote has to change shape when the
-  ** feature is turned on.
-  */
-  lua_pushlstring(L, (const char *)bytes, len);
-  dv_release_adopted(inst, bytes, len);
-  return 1;
+  {
+    lua_State *M = inst->L;
+    int base = lua_gettop(M);
+    int adopted;
+    const char *why = NULL;
+    if (!lua_checkstack(M, 5) || (M != L && !lua_checkstack(L, 1)))
+      why = "dv_array_adopt: the stack cannot grow enough to take the buffer";
+    else {
+      lua_pushcfunction(M, dv_adopt_body);
+      lua_pushlightuserdata(M, bytes);
+      lua_pushinteger(M, (lua_Integer)len);
+      lua_pushinteger(M, (lua_Integer)dtype);
+      if (lua_pcall(M, 3, 2, 0) != LUA_OK) {
+        /* Only when it is already a string: converting the error object
+           would allocate, and allocation is what just failed. */
+        const char *msg = (lua_type(M, -1) == LUA_TSTRING)
+                          ? lua_tostring(M, -1) : NULL;
+        why = (msg != NULL) ? msg : "dv_array_adopt: the handover was refused";
+      }
+    }
+    if (why != NULL) {
+      /* Copied out before the stack is cut back, because 'why' may point
+         into the error object sitting on it. */
+      set_error(inst, why);
+      lua_settop(M, base);
+      dv_release_adopted(inst, bytes, len);
+      return 1;
+    }
+    adopted = lua_toboolean(M, -1);
+    lua_pop(M, 1);                        /* the flag; the value is on top */
+    if (M != L)
+      lua_xmove(M, L, 1);
+    if (adopted)
+      return 0;                 /* the array owns the buffer from here */
+    dv_release_adopted(inst, bytes, len);
+    return 1;
+  }
 }
 
 
