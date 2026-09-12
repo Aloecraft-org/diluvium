@@ -50,6 +50,13 @@ LUA_API void diluvium_openlibs (lua_State *L);
 */
 #define DILUVIUM_GUEST_UNSAFE_STDLIB	0x2u
 
+/*
+** Refuse a binary chunk in the guest's own `load`, the way DV_FLAG_TEXT_ONLY
+** already refuses one in 'dv_load'. Mirrors that flag; see dlibs.c for what it
+** does and dv.h for why a host sets it.
+*/
+#define DILUVIUM_GUEST_TEXT_ONLY	0x4u
+
 LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags);
 
 #endif

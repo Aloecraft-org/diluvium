@@ -505,6 +505,48 @@ static void text_only (void) {
 }
 
 
+/*
+** The other door DV_FLAG_TEXT_ONLY has to close.
+**
+** 'dv_load' refuses a precompiled chunk under the flag; the guest's own 'load'
+** took one anyway, which put bytes the host did not compile into the same VM
+** by a second route. A guest can build those bytes with 'string.dump' or out
+** of a string literal, and the flag exists precisely because the loader's
+** checks are not a verifier.
+*/
+static void text_only_reaches_the_guests_own_load (void) {
+  dv_instance *inst;
+  dv_waitset ws;
+  /* Well-formed bytecode, made by this very VM, because a malformed chunk
+     would be refused by the loader's own checks and prove nothing. */
+  inst = load(
+    "local dumped = string.dump(function() return 7 end)\n"
+    "local f, why = load(dumped)\n"
+    "if f then error('a binary chunk loaded under DV_FLAG_TEXT_ONLY') end\n"
+    "if not tostring(why):find('binary chunk') then\n"
+    "  error('refused, but not as a mode refusal: ' .. tostring(why))\n"
+    "end\n"
+    "return 0\n",
+    DV_FLAG_TEXT_ONLY);
+  if (inst == NULL) { ok(0, "the source program loads"); return; }
+  eq_st(dv_run(inst, &ws), DV_DONE,
+        "DV_FLAG_TEXT_ONLY refuses a binary chunk in the guest's 'load' too");
+  dv_free(inst);
+
+  /* And the flag is what did it: without it, the same program finds 'load'
+     will take the dump, which is the stock behaviour and stays. */
+  inst = load(
+    "local dumped = string.dump(function() return 7 end)\n"
+    "if not load(dumped) then error('no flag, so a dump should still load') end\n"
+    "return 0\n",
+    0);
+  if (inst == NULL) { ok(0, "the unflagged program loads"); return; }
+  eq_st(dv_run(inst, &ws), DV_DONE,
+        "and without the flag a binary chunk still loads, as in stock Lua");
+  dv_free(inst);
+}
+
+
 static void top_level_yield (void) {
   /* An ordinary yield is not a wait-set, and the host is told rather than
      having a meaning invented for it. */
@@ -2559,6 +2601,7 @@ int main (void) {
   a_guest_cannot_switch_its_own_budget_off();
   a_host_can_ask_for_the_whole_debug_library();
   a_snapshot_crosses_the_debug_flag();
+  text_only_reaches_the_guests_own_load();
   an_instance_is_sealed_by_default();
   a_sealed_instance_reaches_nothing_outside_itself();
   a_snapshot_does_not_cross_the_seal();

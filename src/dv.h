@@ -104,13 +104,28 @@ typedef struct dv_config {
 } dv_config;
 
 /*
-** Refuse precompiled chunks in 'dv_load', accepting source only.
+** Refuse precompiled chunks, accepting source only.
 **
 ** Worth setting whenever the bytes did not come from your own compiler. The
 ** loader checks an instruction's operands against the prototype that owns them
 ** and refuses malformed chunks rather than crashing, but Lua 5.1 shipped a
 ** fuller checker than that one and still had escapes. Source-only removes the
 ** question instead of answering it.
+**
+** Both doors, not one. 'dv_load' refuses a precompiled chunk, and so does the
+** guest's own 'load' -- the same bytes entering the same VM by a second route,
+** which this flag covered for a while only at the first. The guest keeps
+** 'load' itself: what it may compile is what this decides.
+**
+** So 'load(string.dump(f))' stops working under this flag, a round trip
+** through bytecode the VM produced itself. That is deliberate: nothing can
+** tell that string from one a program assembled byte by byte, so a host that
+** asked for source gets source. 'string.dump' still works and its output still
+** crosses a queue to a host that wants it.
+**
+** Under DV_FLAG_UNSAFE_STDLIB the `package` searchers can still reach a
+** precompiled *file*, which this does not close -- see that flag for why an
+** instance carrying it is not a boundary to begin with.
 */
 #define DV_FLAG_TEXT_ONLY	0x1u
 

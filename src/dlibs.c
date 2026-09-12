@@ -222,15 +222,57 @@ static int db_openrestricted (lua_State *L) {
 ** `package` leaves them behind -- which the test found before this line existed,
 ** and is the reason it enumerates rather than checking the three module names.
 **
-** Not 'load'. It compiles bytes the program already holds and reaches nothing;
-** that it accepts a binary chunk even under DV_FLAG_TEXT_ONLY is a real defect,
-** but it is that flag's and not this one's.
+** Not 'load'. It compiles bytes the program already holds and reaches nothing,
+** so it stays here whatever this flag says. What it may compile is a different
+** question and DV_FLAG_TEXT_ONLY's; 'seal_load_mode' below is that flag's
+** answer, and it applies sealed or not.
 */
 static void seal_base (lua_State *L) {
   lua_pushnil(L);
   lua_setglobal(L, "dofile");
   lua_pushnil(L);
   lua_setglobal(L, "loadfile");
+}
+
+
+/*
+** 'load', with the mode forced to source.
+**
+** DV_FLAG_TEXT_ONLY refuses a precompiled chunk at 'dv_load' because the
+** loader's operand checks are not a verifier -- Lua 5.1 shipped a fuller one
+** and still had escapes. The guest's own 'load' is the same door into the same
+** VM, and it took a binary chunk regardless, so the flag covered one route and
+** not the other. It covers both now.
+**
+** A wrapper rather than a change to 'luaB_load', so that lbaselib.c stays the
+** stock file and merging a future Lua release stays a merge of upstream's
+** diff. The real 'load' is the upvalue; everything else is passed through.
+**
+** The one thing this takes away: 'load(string.dump(f))', a round trip through
+** bytecode this VM produced itself. That is the correct casualty. Nothing can
+** tell that string from one the guest assembled byte by byte, so a host that
+** said "source only" gets source only -- 'string.dump' still works, and its
+** output still crosses a queue to a host that wants it.
+*/
+static int load_text_only (lua_State *L) {
+  int n = lua_gettop(L);
+  while (n < 3) {  /* make sure there is a mode argument to overwrite */
+    lua_pushnil(L);
+    n++;
+  }
+  lua_pushliteral(L, "t");
+  lua_replace(L, 3);
+  lua_pushvalue(L, lua_upvalueindex(1));  /* the real 'load' */
+  lua_insert(L, 1);
+  lua_call(L, n, LUA_MULTRET);
+  return lua_gettop(L);
+}
+
+
+static void seal_load_mode (lua_State *L) {
+  lua_getglobal(L, "load");
+  lua_pushcclosure(L, load_text_only, 1);
+  lua_setglobal(L, "load");
 }
 
 
@@ -253,5 +295,13 @@ LUA_API void diluvium_openguestlibs (lua_State *L, unsigned int flags) {
   }
   if (!(flags & DILUVIUM_GUEST_UNSAFE_STDLIB))
     seal_base(L);
+  /* Independent of the seal: a host sets DV_FLAG_TEXT_ONLY because it did not
+     compile the bytes, which is as true of an unsealed instance as a sealed
+     one. (Under DILUVIUM_GUEST_UNSAFE_STDLIB the `package` searchers are a
+     second way in for a precompiled file, and this does not close that one --
+     that flag's own documentation is that the instance stops being a
+     boundary.) */
+  if (flags & DILUVIUM_GUEST_TEXT_ONLY)
+    seal_load_mode(L);
   diluvium_openlibs(L);
 }
