@@ -1,0 +1,49 @@
+# syntax=docker/dockerfile:1
+
+# Diluvium CLI -- the dlua interpreter/REPL and the bytecode compiler, built as
+# static musl binaries so the runtime image links nothing and runs anywhere.
+#
+# The recipe is build_linux_static's (see the Makefile), run natively here
+# rather than through podman: the alpine toolchain, drop the (commented-out)
+# -march=native line, then `make all` with a fully-overridden MYCFLAGS so none
+# of src/makefile's test or warning flags leak in, and the compiler as a
+# second static link. Reproduced instead of calling `make build_linux_static`
+# because that target shells out to podman, which a Docker build has no daemon
+# for -- the flags below are identical to it.
+#
+#   docker build -f docker/Dockerfile.cli -t diluvium .
+#   docker run --rm -it diluvium                          # REPL
+#   docker run --rm -i  diluvium - < script.dl            # a script on stdin
+#   docker run --rm -v "$PWD:/work" -w /work diluvium script.dl
+
+FROM alpine:3.20 AS build
+RUN apk add --no-cache gcc make musl-dev
+WORKDIR /build
+COPY . .
+# One RUN so the layer is the built binaries, nothing intermediate. The version
+# is read from VERSION and baked in as DILUVIUM_BUILD, so _DILUVIUM.version in
+# the image matches the release it was cut from.
+RUN set -eux; \
+    V="$(tr -d '[:space:]' < VERSION)"; \
+    cd src; \
+    sed -i 's/-march=native//g' makefile; \
+    make clean; \
+    make all CC=gcc \
+        MYCFLAGS="-static -Os -std=c99 -DLUA_USE_LINUX -DMAKE_LUAC -DDILUVIUM_BUILD='\"$V\"'" \
+        MYLDFLAGS='-static' \
+        MYLIBS=''; \
+    gcc -o luac onelua.c analyze.c diluvium_api.c -static -Os -std=c99 -DMAKE_LUAC -lm; \
+    ./lua -e 'assert(_DILUVIUM.version); io.write("built ", _DILUVIUM.version, "\n")'
+
+FROM alpine:3.20
+LABEL org.opencontainers.image.title="Diluvium CLI" \
+      org.opencontainers.image.description="The dlua interpreter/REPL and bytecode compiler, as static musl binaries." \
+      org.opencontainers.image.source="https://github.com/Aloecraft-org/diluvium" \
+      org.opencontainers.image.licenses="MIT"
+COPY --from=build /build/src/lua  /usr/local/bin/diluvium
+COPY --from=build /build/src/luac /usr/local/bin/diluvium-compiler
+# A non-root user with a writable home for the REPL's history file.
+RUN adduser -D -h /home/diluvium diluvium
+USER diluvium
+WORKDIR /home/diluvium
+ENTRYPOINT ["diluvium"]

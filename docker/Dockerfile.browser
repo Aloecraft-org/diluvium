@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1
+
+# Diluvium in the browser -- the demo page, served. The build stage runs
+# `make build_browser` exactly as CI does (the distro's own clang and a
+# wasm32-wasi sysroot, no podman and no wasi-sdk container), producing
+# web/diluvium_browser.wasm; nginx then serves it next to the page and loader.
+#
+# The build stage is pinned to $BUILDPLATFORM: diluvium_browser.wasm is wasm32
+# and byte-identical whatever the host arch, so a multi-arch image compiles it
+# once on the native builder and varies only the tiny nginx runtime.
+#
+#   docker build -f docker/Dockerfile.browser -t diluvium-demo .
+#   docker run --rm -p 8080:80 diluvium-demo      # then open http://localhost:8080
+
+FROM --platform=$BUILDPLATFORM ubuntu:24.04 AS build
+# clang-20 and lld-20 are in noble's universe; libclang-rt-20-dev-wasm32 is the
+# wasm builtins; wasi-libc is the sysroot the module links (real allocator,
+# snprintf, strtod). The Makefile's BROWSER_* vars point at all of these.
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+        make clang-20 lld-20 libclang-rt-20-dev-wasm32 wasi-libc; \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY . .
+RUN make build_browser
+
+FROM nginx:1.27-alpine
+LABEL org.opencontainers.image.title="Diluvium browser demo" \
+      org.opencontainers.image.description="The Diluvium wasm build served as a static demo page." \
+      org.opencontainers.image.source="https://github.com/Aloecraft-org/diluvium" \
+      org.opencontainers.image.licenses="MIT"
+# The page imports ./diluvium.js, which fetches ./diluvium_browser.wasm -- all
+# three sit together at the web root, no server code, no config.
+COPY --from=build /build/web/demo.html             /usr/share/nginx/html/index.html
+COPY --from=build /build/web/diluvium.js           /usr/share/nginx/html/diluvium.js
+COPY --from=build /build/web/diluvium_browser.wasm /usr/share/nginx/html/diluvium_browser.wasm
+EXPOSE 80

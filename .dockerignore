@@ -1,0 +1,15 @@
+# The image builds want src/ and VERSION (CLI) and the Makefile and web/
+# page + loader (browser); the wasm is rebuilt in the container. Everything
+# below is either version-control noise or unrelated to the two builds, so
+# keeping it out of the context makes the build faster and the layers smaller.
+.git
+.github
+.data/
+dist/
+site/
+bindings/
+host/
+plugins/
+editors/
+web/*.wasm
+.DS_Store
