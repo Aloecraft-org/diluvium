@@ -293,42 +293,42 @@ and debugger, `doc/Determinism.md` an open design for a replayable scheduler, an
 
 **Linux (Portable AMD64) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_linux_static_x86_64
-cp diluvium_linux_static_x86_64 diluvium && chmod +x diluvium
+wget https://github.com/Aloecraft-org/diluvium/releases/latest/download/diluvium_linux_x86_64_musl
+cp diluvium_linux_x86_64_musl diluvium && chmod +x diluvium
 ./diluvium
 ```
 
-**Linux (aarch64/Raspberry Pi 3/4/5) Installation**
+**Linux (arm64/Raspberry Pi 3/4/5) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_linux_static_aarch64
-cp diluvium_linux_static_aarch64 diluvium && chmod +x diluvium
+wget https://github.com/Aloecraft-org/diluvium/releases/latest/download/diluvium_linux_arm64_musl
+cp diluvium_linux_arm64_musl diluvium && chmod +x diluvium
 ./diluvium
 ```
 
-**Linux (32bit armv7l/Raspberry Pi 1/2/Zero/Zero W) Installation**
+**Linux (32-bit armv7/Raspberry Pi 1/2/Zero/Zero W) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_linux_static_armv7l
-cp diluvium_linux_static_armv7l diluvium && chmod +x diluvium
+wget https://github.com/Aloecraft-org/diluvium/releases/latest/download/diluvium_linux_armv7_musl
+cp diluvium_linux_armv7_musl diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **MacOS (ARM64) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_darwin_arm64
+wget https://github.com/Aloecraft-org/diluvium/releases/latest/download/diluvium_darwin_arm64
 cp diluvium_darwin_arm64 diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **MacOS (Intel) Installation**
 ``` sh
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_darwin_x86_64
+wget https://github.com/Aloecraft-org/diluvium/releases/latest/download/diluvium_darwin_x86_64
 cp diluvium_darwin_x86_64 diluvium && chmod +x diluvium
 ./diluvium
 ```
 
 **Windows Installation**
 ``` ps
-wget https://github.com/Aloecraft-org/diluvium/releases/download/v5.5.1_build1/diluvium_windows_x86_64.exe -OutFile diluvium.exe
+wget https://github.com/Aloecraft-org/diluvium/releases/latest/download/diluvium_windows_x86_64.exe -OutFile diluvium.exe
 ./diluvium
 ```
 

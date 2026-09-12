@@ -56,6 +56,17 @@ It also collects the ergonomics work that landed since build14.
   both built from source, with a workflow to publish them to GHCR. See
   `docker/README.md`.
 
+### Changed
+
+- **Release artifact names follow the shared Aloecraft scheme.** The
+  static Linux binaries drop the `static` link-mode token for the `musl`
+  libc slot, and take the `arm64`/`armv7` arch spelling:
+  `diluvium_linux_static_x86_64` is now `diluvium_linux_x86_64_musl`, and
+  the same for the `_compiler`, `_host` and `_rest_plugin` binaries and
+  the aarch64/armv7l builds. The macOS, Windows and wasm names already
+  conformed. See `doc/ALIGNMENT.md` §4; releases already published keep
+  the names they shipped with.
+
 ### Removed
 
 - **The old `libdiluvium_wasm_unknown.a` "Browser" download.** A ~9 MB

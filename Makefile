@@ -22,6 +22,17 @@ UNAME_S := $(shell uname -s)
 UNAME_Sl := $(shell uname -s | tr 'A-Z' 'a-z')
 ARCHl := $(shell uname -m | tr 'A-Z' 'a-z')
 
+# Canonical arch token for release artifact names (doc/ALIGNMENT.md §4):
+# arm64 not aarch64, armv7 not armv7l. Derived from ARCHl (which build.yml
+# overrides per target); only artifact NAMES use it, never the build itself.
+ARCH_CANON := $(ARCHl)
+ifeq ($(ARCHl),aarch64)
+  ARCH_CANON := arm64
+endif
+ifeq ($(ARCHl),armv7l)
+  ARCH_CANON := armv7
+endif
+
 PLAT_CFLAGS  := -std=c99 -DLUA_USE_LINUX
 PLAT_LDFLAGS := -Wl,-E
 PLAT_LIBS    := -ldl
@@ -317,8 +328,8 @@ build_linux_static: _build_step0 _portable_static_lib
 		echo '--- Building Compiler (luac) ---' && \
 		gcc -o /data/luac onelua.c analyze.c diluvium_api.c -static -Os -std=c99 -DMAKE_LUAC -lm"
 
-	cp .data/luac dist/diluvium_compiler_linux_static_$(ARCHl)
-	cp .data/lua dist/diluvium_linux_static_$(ARCHl)
+	cp .data/luac dist/diluvium_compiler_linux_$(ARCH_CANON)_musl
+	cp .data/lua dist/diluvium_linux_$(ARCH_CANON)_musl
 
 build_static_libs: _wasi_static_lib _native_static_lib _portable_static_lib _wasm_unknown_build
 

@@ -229,9 +229,9 @@ jobs:
             echo "| :--- | :--- | :--- |"
           } >> release_notes.md
 
-          row diluvium_linux_static_x86_64     "**Linux (standard)**"    "Static; works on Ubuntu, Fedora, CentOS, Arch"
-          row diluvium_linux_static_aarch64    "**Raspberry Pi 3/4/5**"  "64-bit OS only"
-          row diluvium_linux_static_armv7l     "**Raspberry Pi Zero**"   "32-bit ARM"
+          row diluvium_linux_x86_64_musl       "**Linux (standard)**"    "Static musl; works on Ubuntu, Fedora, CentOS, Arch"
+          row diluvium_linux_arm64_musl        "**Raspberry Pi 3/4/5**"  "64-bit OS only"
+          row diluvium_linux_armv7_musl        "**Raspberry Pi Zero**"   "32-bit ARM"
           row diluvium_darwin_arm64            "**macOS (Apple silicon)**" "M1/M2/M3/M4"
           row diluvium_darwin_x86_64           "**macOS (Intel)**"       ""
           row diluvium_windows_x86_64.exe      "**Windows**"             "64-bit"

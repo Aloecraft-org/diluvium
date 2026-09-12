@@ -112,7 +112,8 @@ jobs:
 
       - name: Build Linux static (aarch64 / Raspberry Pi 3-5)
         run: |
-          # --platform triggers QEMU emulation; ARCHl names the output file.
+          # --platform triggers QEMU emulation; ARCHl is the build arch, which
+          # the Makefile maps to the arm64 artifact name (doc/ALIGNMENT.md §4).
           make build_linux_static \
             PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm64 -v $(pwd)/.data:/data -w /data alpine:latest" \
             ARCHl=aarch64
@@ -139,23 +140,23 @@ jobs:
         run: |
           set -eu
           sh host/build-musl.sh
-          cp dist/diluvium-host-musl dist/diluvium_host_linux_static_x86_64
+          cp dist/diluvium-host-musl dist/diluvium_host_linux_x86_64_musl
           cp dist/diluvium-rest-plugin-musl \
-             dist/diluvium_rest_plugin_linux_static_x86_64
+             dist/diluvium_rest_plugin_linux_x86_64_musl
           rm -f dist/diluvium-host-musl dist/diluvium-rest-plugin-musl
 
       - name: Smoke test the x86_64 static binary
         run: |
           set -eu
-          ./dist/diluvium_linux_static_x86_64 -v
-          ./dist/diluvium_linux_static_x86_64 script/smoke.lua
-          ./dist/diluvium_compiler_linux_static_x86_64 -v
+          ./dist/diluvium_linux_x86_64_musl -v
+          ./dist/diluvium_linux_x86_64_musl script/smoke.lua
+          ./dist/diluvium_compiler_linux_x86_64_musl -v
           # The host answers --version as of build 8, which is what lets a
           # consumer tell an old binary from a bad config.
-          ./dist/diluvium_host_linux_static_x86_64 --version
+          ./dist/diluvium_host_linux_x86_64_musl --version
           # The plugin speaks a framed protocol on fd 3 and has no CLI, so
           # the check that means anything is that it is static and executes.
-          test -x ./dist/diluvium_rest_plugin_linux_static_x86_64
+          test -x ./dist/diluvium_rest_plugin_linux_x86_64_musl
 
       # aarch64 and armv7l were built here and shipped without ever being
       # run. QEMU and the container are already set up from building them,
@@ -163,10 +164,11 @@ jobs:
       - name: Smoke test the ARM static binaries
         run: |
           set -eu
-          for spec in "linux/arm64 aarch64" "linux/arm/v7 armv7l"; do
+          # spec: <podman platform> <build arch> <artifact arch token (§4)>
+          for spec in "linux/arm64 aarch64 arm64" "linux/arm/v7 armv7l armv7"; do
             set -- $spec
-            plat=$1; arch=$2
-            bin="dist/diluvium_linux_static_$arch"
+            plat=$1; arch=$2; name=$3
+            bin="dist/diluvium_linux_${name}_musl"
             [ -f "$bin" ] || { echo "::error::$bin missing"; exit 1; }
             echo "--- $arch (under QEMU)"
             podman run --rm --platform "$plat" -v "$(pwd):/w" -w /w \
@@ -200,7 +202,7 @@ jobs:
           set -eu
           script/wasi_check.sh \
             --wasm dist/diluvium_wasi.wasm \
-            --native ./dist/diluvium_linux_static_x86_64
+            --native ./dist/diluvium_linux_x86_64_musl
 
       - uses: actions/upload-artifact@v4
         with:
@@ -352,7 +354,7 @@ jobs:
       - name: Build statistics
         run: |
           set -eu
-          BENCH=release_dist/diluvium_linux_static_x86_64
+          BENCH=release_dist/diluvium_linux_x86_64_musl
           if [ -x "$BENCH" ]; then
             script/build_stats.sh record --dist release_dist \
               --bench "./$BENCH" --out release_dist/BUILDSTATS.json
