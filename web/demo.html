@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Diluvium in the browser</title>
+<style>
+  :root {
+    --bg: #0d0f14; --panel: #171a21; --code: #0b0d11; --line: #262b35;
+    --ink: #d7dae0; --dim: #8a919e; --accent: #7fd1b9; --warn: #e0a458;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 var(--sans); }
+  main { max-width: 920px; margin: 0 auto; padding: 32px 20px 64px; }
+  h1 { font-size: 1.6rem; margin: 0 0 4px; }
+  h1 .v { color: var(--accent); font: 0.55em var(--mono); vertical-align: middle; margin-left: 8px; }
+  p.lede { color: var(--dim); margin: 0 0 28px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 0 0 18px; }
+  h2 { font-size: 1rem; margin: 0 0 4px; }
+  h2 .what { color: var(--dim); font-weight: 400; }
+  textarea { width: 100%; background: var(--code); color: var(--ink); border: 1px solid var(--line);
+             border-radius: 8px; font: 13px/1.5 var(--mono); padding: 10px; resize: vertical; min-height: 76px; }
+  .row { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+  button { background: var(--accent); color: #06231c; border: 0; border-radius: 7px; padding: 7px 14px;
+           font: 600 13px var(--sans); cursor: pointer; }
+  button.ghost { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+  .chips { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip { background: transparent; color: var(--dim); border: 1px solid var(--line); border-radius: 999px;
+          padding: 3px 10px; font: 12px var(--mono); cursor: pointer; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 10px;
+        font: 12px/1.45 var(--mono); overflow-x: auto; margin: 10px 0 0; white-space: pre-wrap; word-break: break-word; }
+  pre.err { color: var(--warn); }
+  .muted { color: var(--dim); font-size: 0.85em; }
+  code { font-family: var(--mono); color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Diluvium in the browser <span class="v" id="version">loading…</span></h1>
+  <p class="lede">
+    One <code>.wasm</code> and a little JavaScript. Real numbers and a real
+    allocator underneath, and Lua errors are caught, not crashes. The whole
+    host is the <code>fetch</code> in <code>diluvium.js</code> — no server, no
+    framework, nothing to install.
+  </p>
+
+  <section>
+    <h2>Run <span class="what">— hand JavaScript a bit of dlua logic</span></h2>
+    <textarea id="eval-src">-- string interpolation, switch, continue, regex, all in the page
+local function classify(n)
+  switch n % 15 do
+    case 0 then return "fizzbuzz"
+    case 3, 6, 9, 12 then return "fizz"
+    case 5, 10 then return "buzz"
+    default return tostring(n)
+  end
+end
+local out = {}
+for i = 1, 20 do
+  if i % 7 == 0 then continue end        -- skip multiples of 7
+  out[#out + 1] = classify(i)
+end
+print(table.concat(out, "  "))
+print($"pi to 3 places is {math.pi::%.3f}")</textarea>
+    <div class="row">
+      <button id="eval-run">Run</button>
+      <div class="chips" id="eval-examples"></div>
+    </div>
+    <pre id="eval-out" hidden></pre>
+  </section>
+
+  <section>
+    <h2>Compile <span class="what">— source to a portable bytecode chunk</span></h2>
+    <textarea id="compile-src">return function(a, b) return a * b + 1 end</textarea>
+    <div class="row"><button id="compile-run">Compile</button>
+      <span class="muted" id="compile-info"></span></div>
+    <pre id="compile-out" hidden></pre>
+  </section>
+
+  <section>
+    <h2>Analyze <span class="what">— what the compiler sees, as JSON</span></h2>
+    <textarea id="analyze-src">local function greet(name, times)
+  for i = 1, times do print($"hello, {name}") end
+end
+return greet</textarea>
+    <div class="row"><button id="analyze-run">Analyze</button></div>
+    <pre id="analyze-out" hidden></pre>
+  </section>
+</main>
+
+<script type="module">
+  import { loadDiluvium } from "./diluvium.js";
+
+  const $ = (id) => document.getElementById(id);
+  const show = (el, text, isErr) => { el.hidden = false; el.textContent = text; el.classList.toggle("err", !!isErr); };
+
+  let dl;
+  try {
+    dl = await loadDiluvium("./diluvium_browser.wasm");
+    $("version").textContent = dl.version();
+  } catch (e) {
+    $("version").textContent = "failed to load";
+    document.body.insertAdjacentHTML("afterbegin",
+      `<pre class="err" style="margin:16px">Could not load the runtime. Build it first: <code>make build_browser</code>.\n${e}</pre>`);
+    throw e;
+  }
+
+  // Run
+  const EXAMPLES = {
+    "interpolation": 'local who = "world"\nprint($"Hello, {who}! {1+1} and {math.pi::%.2f}")',
+    "regex": 'for u, host in (`(\\w+)@(\\w+\\.\\w+)`):gmatch("a@x.io b@y.dev") do print(u, host) end',
+    "defer": 'do\n  defer print("cleaned up")\n  print("working")\nend',
+    "error": 'print(pcall(function() error("caught, not a crash") end))',
+  };
+  const ex = $("eval-examples");
+  for (const [label, code] of Object.entries(EXAMPLES)) {
+    const b = document.createElement("button");
+    b.className = "chip"; b.textContent = label;
+    b.onclick = () => { $("eval-src").value = code; $("eval-run").click(); };
+    ex.appendChild(b);
+  }
+  $("eval-run").onclick = () => {
+    const { ok, output } = dl.eval($("eval-src").value);
+    show($("eval-out"), output || "(no output)", !ok);
+  };
+
+  // Compile
+  $("compile-run").onclick = () => {
+    const bc = dl.compile($("compile-src").value);
+    if (!bc) { show($("compile-out"), "compile error", true); $("compile-info").textContent = ""; return; }
+    $("compile-info").textContent = `${bc.length} bytes · header ${[...bc.slice(0,4)].map(b=>b.toString(16).padStart(2,"0")).join(" ")}`;
+    const hex = [...bc].map(b => b.toString(16).padStart(2, "0"));
+    const rows = [];
+    for (let i = 0; i < hex.length; i += 16) rows.push(hex.slice(i, i + 16).join(" "));
+    show($("compile-out"), rows.join("\n"));
+  };
+
+  // Analyze
+  $("analyze-run").onclick = () => {
+    const rep = dl.analyze($("analyze-src").value);
+    show($("analyze-out"), rep ? JSON.stringify(rep, null, 2) : "compile error", !rep);
+  };
+
+  $("eval-run").click();
+</script>
+</body>
+</html>

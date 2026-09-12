@@ -326,6 +326,47 @@ build_static_libs: _wasi_static_lib _native_static_lib _portable_static_lib _was
 
 verify_wasm: _wasm_verify_step1 _wasm_verify_step2 _wasm_verify_step3
 
+# The browser build: web/diluvium_browser.wasm, a module a page drives from
+# JavaScript (the language, the compiler, the analyzer -- not the WASI command
+# module and not the swarm). It links wasi-libc, so numbers format correctly
+# and the allocator is real and grows, and it lowers setjmp/longjmp onto the
+# wasm exception-handling proposal (so Lua's pcall catches rather than traps),
+# exactly as the WASI build does. See web/README.md.
+#
+# Deliberately built with the distro's own LLVM rather than the wasi-sdk
+# container the targets above use -- no podman -- so the browser artifact is
+# reproducible from apt packages alone. Override any path on the make line.
+BROWSER_CC      ?= clang-20
+BROWSER_LD      ?= wasm-ld-20
+BROWSER_SYSROOT ?= /usr/include/wasm32-wasi
+BROWSER_LIBC    ?= /usr/lib/wasm32-wasi
+BROWSER_RT      ?= $(shell $(BROWSER_CC) -print-resource-dir 2>/dev/null)/lib/wasi/libclang_rt.builtins-wasm32.a
+# -Oz for size; native wasm EH for setjmp/longjmp (matches WASM_LLVM_OPT).
+# Recursive '=', not ':=': it reads HOST_VERSION, which is defined further down.
+BROWSER_CFLAGS   = --target=wasm32-wasi -isystem $(BROWSER_SYSROOT) -Oz \
+	-DMAKE_LIB -DLUA_USE_C89 -DL_tmpnam=32 \
+	-D_WASI_EMULATED_SIGNAL -D_WASI_EMULATED_PROCESS_CLOCKS \
+	-DDILUVIUM_BUILD='"$(HOST_VERSION)"' -Wno-deprecated-declarations \
+	-mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false
+BROWSER_OBJS := onelua analyze diluvium_api wasm_browser wasm_browser_sjlj
+
+build_browser: _build_step0
+	@echo '=== Building the browser wasm (web/diluvium_browser.wasm) ==='
+	@cd $(CURDIR)/.data && for f in $(BROWSER_OBJS); do \
+		echo "  cc $$f.c" ; \
+		$(BROWSER_CC) $(BROWSER_CFLAGS) -I. -I./wasm-shim -c $$f.c -o web_$$f.o || exit 1 ; \
+	done
+	@mkdir -p $(CURDIR)/web
+	$(BROWSER_LD) --no-entry --strip-debug --import-undefined \
+		--export=malloc --export=free --export=__wasm_call_ctors \
+		$(addprefix $(CURDIR)/.data/web_,$(addsuffix .o,$(BROWSER_OBJS))) \
+		$(BROWSER_LIBC)/libc.a \
+		$(BROWSER_LIBC)/libwasi-emulated-signal.a \
+		$(BROWSER_LIBC)/libwasi-emulated-process-clocks.a \
+		$(BROWSER_RT) \
+		-o $(CURDIR)/web/diluvium_browser.wasm
+	@echo "web/diluvium_browser.wasm ($$(( $$(stat -c%s $(CURDIR)/web/diluvium_browser.wasm)/1024 )) KB)"
+
 test_build: _build_step0 test_libs
 	gcc $(TEST_CFLAGS) -o $(TEST_BIN) $(CURDIR)/.data/onelua.c -lm
 

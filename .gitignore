@@ -41,3 +41,7 @@ examples/discofetch/swarmd
 site/_out/
 site/node_modules/
 site/test/.out/
+
+# Built browser wasm (produced by `make build_browser`)
+web/diluvium_browser.wasm
+web/*.wasm

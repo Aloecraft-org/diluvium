@@ -393,6 +393,26 @@ diluvium_api.o` (`Makefile:199`), so the browser has every tier except
 the swarm. That is not a decision about wasm — it is a side effect of one
 about the amalgamation. See `doc/Lab.md` §1.
 
+## In the browser
+
+`make build_browser` produces `web/diluvium_browser.wasm`, a module a page
+drives from JavaScript — run dlua, compile a chunk to bytecode, run the
+analyzer — with a small ES module (`web/diluvium.js`) and no framework.
+
+``` js
+const dl = await loadDiluvium("./diluvium_browser.wasm");
+dl.eval('print($"hi {1+1}")');   // { ok: true, output: "hi 2\n" }
+dl.compile("return 1 + 1");      // Uint8Array of bytecode
+dl.analyze("local x = 1");       // the analysis report as an object
+```
+
+It links `wasi-libc`, so numbers format correctly and the allocator is real
+and grows rather than a fixed heap, and it lowers `setjmp`/`longjmp` onto the
+wasm exception-handling proposal, so a Lua `error` is caught rather than
+trapping the module. It is **not** `diluvium_wasi.wasm` (the wasmtime command
+module) and carries no swarm. `web/demo.html` exercises it; `web/README.md`
+has the build details and the (podman-free) toolchain.
+
 ## Compiler Features
 
 **Bytecode analysis report**
