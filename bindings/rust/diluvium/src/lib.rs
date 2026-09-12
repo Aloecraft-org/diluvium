@@ -221,7 +221,8 @@ impl Config {
     /// Refuse precompiled chunks, accepting source only.
     ///
     /// Worth setting whenever the bytes did not come from your own compiler.
-    /// Note it binds `dv_load` and not the program's own `load()`.
+    /// It binds both doors: `dv_load`, and the program's own `load()`, which
+    /// is forced to source mode -- so `load(string.dump(f))` is refused too.
     pub fn text_only(mut self, yes: bool) -> Self {
         self.text_only = yes;
         self

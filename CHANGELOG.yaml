@@ -56,13 +56,111 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "5.5.1_build14"
+    tag: v5.5.1_build14
+    date: 2026-09-12
+    status: released
+    stable: true
+    mirror: true
+    latest: true
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **`DV_FLAG_TEXT_ONLY` now covers the guest's own `load`.**
+      The flag refused a precompiled chunk at `dv_load` and nowhere else, so
+      a program running under it could still hand `load` a binary chunk --
+      the same bytes entering the same VM by a second door, one the host
+      that asked for source only was not watching. That is the whole of this
+      release: build13's content plus one fix, no new surface, no ABI or
+      format movement.
+    upgrading: |
+      Nothing to do for a host, and no format movement. `DV_ABI_VERSION`
+      stands, `LUAC_FORMAT` stays `0x46`, and the snapshot permanents
+      fingerprint is unmoved: it is a hash over the sorted *names* the
+      permanents walk finds, `load` keeps its name and only the function
+      under it changes, so a snapshot crosses build13 and build14 in both
+      directions. The restoring runtime's `load` is the one a woken program
+      gets, which is the behaviour to want.
+
+      One behaviour change, and only under the flag: `load(string.dump(f))`
+      is refused, a round trip through bytecode the VM produced itself. That
+      is deliberate. Nothing can tell that string from one a program
+      assembled byte by byte, so a host that asked for source gets source;
+      `string.dump` itself still works and its output still crosses a queue
+      to a host that wants it. A program that relied on reloading its own
+      dump under `DV_FLAG_TEXT_ONLY` was relying on the defect. A host that
+      does not set the flag sees stock Lua, as before -- and that includes
+      every instance in a swarm, and so `diluvium-host`: the swarm layer's
+      one flag authority is `dvs_allow_unsafe_stdlib`, which never sets this
+      one. The Python binding's `from_source` and the JS binding's default
+      (`allowBytecode: false`) do set it, so programs under those see the
+      change.
+    security:
+      - |
+        **`DV_FLAG_TEXT_ONLY` did not reach the guest's own `load`.** The flag
+        exists because the loader's operand checks are not a verifier -- Lua
+        5.1 shipped a fuller one and still had escapes -- so a host that did
+        not compile the bytes can refuse precompiled chunks outright. It
+        refused them at `dv_load` only. The guest's `load` took a binary
+        chunk regardless, and a guest can make one with `string.dump` or out
+        of a string literal, so "source only" held at one door and not the
+        other. `dlibs.c` had said as much in a comment beside `seal_base`,
+        filed it under this flag, and left it; this is the flag's answer.
+
+        `dv_new` now maps the flag to `DILUVIUM_GUEST_TEXT_ONLY`, and
+        `diluvium_openguestlibs` replaces `load` with a closure over the real
+        one that forces the mode to `"t"`. A wrapper rather than an edit to
+        `luaB_load`, so `lbaselib.c` stays the stock file and merging a
+        future Lua release stays a merge of upstream's diff. It applies
+        sealed or not: a host sets the flag because it did not compile the
+        bytes, which is as true of an unsealed instance as of a sealed one,
+        and the stdlib seal already has its own flag.
+
+        `text_only_reaches_the_guests_own_load` in `test/dv_check.c` holds
+        it. The chunk it feeds `load` is built with `string.dump`, so the
+        bytes are well-formed and made by this very VM -- a malformed chunk
+        would be caught by the loader's own checks and prove nothing -- and
+        the second half asserts that without the flag a dump still loads,
+        which is stock Lua and stays.
+
+        What it does not close: under `DV_FLAG_UNSAFE_STDLIB` the `package`
+        searchers can still reach a precompiled *file*. That flag's own
+        documentation is that an instance carrying it stops being a
+        boundary, so closing one hole in a wall that has a door would be
+        tidying. Recorded so that "both doors" is not read as "every door".
+    changed:
+      - |
+        **The Rust binding's `Config::text_only` no longer documents the
+        defect as the design.** Its doc comment said the flag "binds
+        `dv_load` and not the program's own `load()`", which was an accurate
+        description of the hole. It now says both doors, and names the
+        `load(string.dump(f))` casualty. Comment only; the crate passes the
+        flag through and always did.
+    known_issues:
+      - |
+        **Carried forward from 5.5.1_build12p1, because it is still true: a
+        guest that catches its budget error in a loop still spins.** build12p1
+        bounded the *work* a guest can do past its budget; it did not make the
+        error uncatchable and does not return control to the host.
+
+        ```lua
+        while true do pcall(function() while true do end end) end
+        ```
+
+        still never leaves `dv_run` -- each catch buys `DV_HOOK_STEP`
+        instructions and the loop repeats. Lua has no uncatchable error.
+        Closing it needs a `pcall`/`xpcall` that refuses to catch once
+        `exceeded` is set, which is a core-file patch and so a
+        `CORE_PATCH_ALLOWLIST` decision, or a process-level watchdog, since a
+        host inside `dv_run` has no way in. The practical bound today is
+        operational: run the host under a supervisor that restarts it, and
+        alert on the restart count rather than absorbing it.
   - version: "5.5.1_build13"
     tag: v5.5.1_build13
     date: 2026-09-06
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
