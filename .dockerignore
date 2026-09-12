@@ -1,15 +1,17 @@
-# The image builds want src/ and VERSION (CLI) and the Makefile and web/
-# page + loader (browser); the wasm is rebuilt in the container. Everything
-# below is either version-control noise or unrelated to the two builds, so
-# keeping it out of the context makes the build faster and the layers smaller.
+# Shared by every docker build whose context is the repo root: docker/
+# Dockerfile.cli, docker/Dockerfile.browser, and host/Dockerfile.musl (the
+# generic host's static-musl build, run from the root by host/build-musl.sh).
+# So exclude ONLY what none of them needs.
+#
+# Do NOT add host/ or plugins/ here: host/Dockerfile.musl compiles host/*.c
+# and the rest plugin from plugins/, and a root .dockerignore applies to every
+# build in this context. Excluding them breaks `make build_host_musl`.
 .git
 .github
 .data/
 dist/
 site/
 bindings/
-host/
-plugins/
 editors/
 web/*.wasm
 .DS_Store
