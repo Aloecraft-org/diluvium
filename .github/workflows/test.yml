@@ -504,6 +504,43 @@ jobs:
         working-directory: bindings/js
         run: node test/instance.integration.mjs ../../dist/diluvium_wasi.wasm
 
+  browser:
+    name: Browser build
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # web/diluvium_browser.wasm is built with the distro's own LLVM and a
+      # wasm32-wasi sysroot, NOT the wasi-sdk container the other wasm targets
+      # use -- so this job needs no podman, just apt. clang-20 and lld-20 are in
+      # noble's universe; libclang-rt-20-dev-wasm32 is the wasm builtins; and
+      # wasi-libc is the sysroot (libc.a + headers) the module links, which is
+      # what makes the allocator, snprintf and strtod real rather than stubs.
+      # See web/README.md; the makefile's BROWSER_* vars point at all of these.
+      - name: Install the wasm toolchain (no container)
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-20 lld-20 libclang-rt-20-dev-wasm32 wasi-libc
+
+      - name: Build the browser wasm
+        run: make build_browser
+
+      # Drive it through web/diluvium.js -- the same loader and surface a page
+      # uses, so a break here is a break in the shipped artifact: real numbers,
+      # a real allocator, and Lua errors caught rather than trapping the module.
+      - name: Drive it from JavaScript
+        run: node web/test.mjs
+
   site:
     name: Landing page
     needs: resolve

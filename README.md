@@ -580,7 +580,7 @@ the `ref` box and every job builds that exact tree.
 
 | Workflow | Fires on | Does |
 | :--- | :--- | :--- |
-| **Tests** | every push and PR, or manually | Test suite on Linux and macOS, analysis-report validation, obfuscation audit |
+| **Tests** | every push and PR, or manually | Test suite on Linux and macOS, the bindings, the browser build driven from JavaScript, analysis-report validation, obfuscation audit |
 | **Build** | manually, or called by Release | Every platform artifact plus `SHA256SUMS.txt` and `BUILDINFO.txt`, uploaded to the run |
 | **Release** | a `v*` tag push, or manually | Tests, then a full build, then optionally publishes |
 
