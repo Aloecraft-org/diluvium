@@ -236,7 +236,8 @@ jobs:
           row diluvium_darwin_x86_64           "**macOS (Intel)**"       ""
           row diluvium_windows_x86_64.exe      "**Windows**"             "64-bit"
           row diluvium_wasi.wasm               "**WASI**"                "Needs a runtime with wasm exception-handling (wasmtime 28+ with \`-W exceptions=y\`)"
-          row libdiluvium_wasm_unknown.a       "**Browser**"             "wasm32-unknown-unknown static library"
+          row diluvium_browser.wasm            "**Browser**"             "Drive it from a page; pair with \`diluvium.js\`. Real numbers, a real allocator, errors caught. See \`web/README.md\`"
+          row diluvium.js                      "**Browser loader**"      "The dependency-free ES module for \`diluvium_browser.wasm\`"
 
           {
             echo ""

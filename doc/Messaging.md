@@ -1656,8 +1656,10 @@ deletes `dvs.c` once that port passes acceptance.
 
 The swarm line above is therefore **half met, and should not be completed**.
 The wasm half exists: `diluvium_swarm_wasi.wasm` ships as a standalone module
-(deliberately separate — see `Makefile:218`), and `libdiluvium_wasi.a` and
-`libdiluvium_wasm_unknown.a` both carry `dvs.c`. The native half does not:
+(deliberately separate — see `Makefile:218`), and `libdiluvium_wasi.a`
+carries `dvs.c`. (The browser download, `diluvium_browser.wasm`, does not —
+it replaced `libdiluvium_wasm_unknown.a` and leaves the swarm out.) The
+native half does not:
 `libdiluvium_<os>_<arch>.a` holds onelua, wasm_stubs, diluvium_api and analyze
 only, and `make build_swarm_lib`'s `libdiluvium-swarm.a` is never run by
 `build.yml`. Adding the native artifacts would commit us to supporting a layer

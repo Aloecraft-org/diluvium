@@ -87,12 +87,25 @@ jobs:
       - name: Build WASM
         run: make build_wasm
 
-      # The browser target is not currently exercised by any release, so treat
-      # it as advisory: a regression here should be visible but must not block
-      # shipping the other artifacts. Make it blocking once it has been green.
-      - name: Build wasm32-unknown-unknown (browser, advisory)
-        continue-on-error: true
-        run: make _wasm_unknown_build
+      # The browser wasm (web/diluvium_browser.wasm): the language, the compiler
+      # and the analyzer for a page to drive from JavaScript, with real
+      # wasi-libc underneath. It replaces the old libdiluvium_wasm_unknown.a --
+      # a 9 MB static archive nothing shipped could run -- as the "Browser"
+      # download. Built with the distro's own LLVM, no container; the Tests
+      # workflow's 'browser' job (which the release gate runs) validates it, so
+      # here it is only built and staged into the bundle alongside its loader.
+      - name: Install the browser wasm toolchain (no container)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            clang-20 lld-20 libclang-rt-20-dev-wasm32 wasi-libc
+
+      - name: Build the browser wasm and stage it
+        run: |
+          set -eu
+          make build_browser
+          cp web/diluvium_browser.wasm web/diluvium.js dist/
+          ls -l dist/diluvium_browser.wasm dist/diluvium.js
 
       - name: Build Linux static (x86_64)
         run: make build_linux_static ARCHl=x86_64

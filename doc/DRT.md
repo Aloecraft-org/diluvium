@@ -61,15 +61,14 @@ with tests naming them, and `drt-bench` runs this repository's
 An earlier revision of this document said the swarm layer "ships to nobody".
 That was wrong, and the mistake is worth recording because it is easy to
 repeat: `grep swarm .github/workflows/build.yml` matches only a comment, but
-build.yml calls `make build_wasm` and `_wasm_unknown_build`, and those targets
-carry `dvs.c` in. As of `5.5.1_build12` the released artifacts contain it in
-three places:
+build.yml calls `make build_wasm`, which carries `dvs.c` in. The released
+artifacts contain the swarm in two wasm places:
 
 | artifact | carries `dvs.c` |
 |---|---|
 | `diluvium_swarm_wasi.wasm` | yes — a standalone module, built separately *on purpose* (`Makefile:218`): `dvs_shim.c` declares three `env` imports, and linking it into `diluvium_wasi.wasm` would break every pure-WASI consumer at instantiation. A host on the far side of the boundary — the JS binding, lab — loads this one. |
 | `libdiluvium_wasi.a` | yes (`dvs_wasi.o`, `dvs_shim_wasi.o`) |
-| `libdiluvium_wasm_unknown.a` | yes |
+| `diluvium_browser.wasm` | **no** — the browser build (which replaced the retired `libdiluvium_wasm_unknown.a` as the "Browser" download) deliberately omits the swarm |
 | `libdiluvium_<os>_<arch>.a`, `libdiluvium_musl_*.a` | **no** — onelua, wasm_stubs, diluvium_api, analyze only |
 
 So §12.1's `diluvium-swarm-<version>-<triple>` is *met for wasm and unmet for
