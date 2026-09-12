@@ -6,7 +6,9 @@ name: Docker images
 # Three ways in, matching release.yml's idiom:
 #   1. Push a tag matching v*            -- builds and publishes that tag.
 #   2. Actions -> Docker images -> Run   -- a rehearsal by default (builds both
-#      images for every platform, pushes nothing); set publish=true to push.
+#      images, pushes nothing); set publish=true AND a version to push. Use
+#      this to publish images for a tag whose release was cut by the Actions
+#      bot (a bot-created tag does not fire the push trigger above).
 #   3. A pull request touching the build -- builds both images, pushes nothing.
 #
 # GHCR auth is the run's own GITHUB_TOKEN (packages: write below); no secret to
@@ -18,6 +20,11 @@ on:
       - 'v*'
   workflow_dispatch:
     inputs:
+      version:
+        description: 'Image version to tag, e.g. 0.15.0 or v0.15.0 (required to publish)'
+        type: string
+        required: false
+        default: ''
       publish:
         description: 'Push to GHCR. Leave off for a build-only rehearsal.'
         type: boolean
@@ -57,17 +64,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Whether this run pushes: tag pushes do; a manual run does only when
-      # publish=true; pull requests never do.
-      - name: Decide whether to publish
+      # Whether this run pushes and the version to tag: a tag push publishes
+      # that tag (refs/tags/vX.Y.Z -> X.Y.Z); a manual run publishes only with
+      # publish=true and a version; pull requests never push.
+      - name: Decide whether to publish, and the version
         id: gate
         run: |
-          if [ "${{ github.event_name }}" = "push" ] || \
-             { [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
-               [ "${{ inputs.publish }}" = "true" ]; }; then
+          set -eu
+          if [ "${{ github.event_name }}" = "push" ]; then
             echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "workflow_dispatch" ] && \
+               [ "${{ inputs.publish }}" = "true" ]; then
+            v="${{ inputs.version }}"; v="${v#v}"
+            [ -n "$v" ] || { echo "::error::publish=true needs a version input"; exit 1; }
+            echo "push=true" >> "$GITHUB_OUTPUT"
+            echo "version=$v" >> "$GITHUB_OUTPUT"
           else
             echo "push=false" >> "$GITHUB_OUTPUT"
+            echo "version=" >> "$GITHUB_OUTPUT"
           fi
 
       - uses: docker/setup-qemu-action@v3
@@ -87,9 +102,9 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository_owner }}/${{ matrix.image }}
           tags: |
-            type=ref,event=tag
+            type=raw,value=${{ steps.gate.outputs.version }},enable=${{ steps.gate.outputs.version != '' }}
+            type=raw,value=latest,enable=${{ steps.gate.outputs.push == 'true' }}
             type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
 
       - name: Build${{ steps.gate.outputs.push == 'true' && ' and push' || '' }}
         uses: docker/build-push-action@v6
