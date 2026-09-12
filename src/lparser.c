@@ -53,6 +53,7 @@ typedef struct BlockCnt {
   short nactvar;  /* number of active declarations at block entry */
   lu_byte upval;  /* true if some variable in the block is an upvalue */
   lu_byte isloop;  /* 1 if 'block' is a loop; 2 if it has pending breaks */
+  lu_byte hascont;  /* Diluvium: true if the loop has pending 'continue's */
   lu_byte insidetbc;  /* true if inside the scope of a to-be-closed var. */
 } BlockCnt;
 
@@ -719,6 +720,7 @@ static void solvegotos (FuncState *fs, BlockCnt *bl) {
 
 static void enterblock (FuncState *fs, BlockCnt *bl, lu_byte isloop) {
   bl->isloop = isloop;
+  bl->hascont = 0;  /* Diluvium: no pending 'continue' yet */
   bl->nactvar = fs->nactvar;
   bl->firstlabel = fs->ls->dyd->label.n;
   bl->firstgoto = fs->ls->dyd->gt.n;
@@ -1773,6 +1775,33 @@ static void breakstat (LexState *ls, int line) {
 
 
 /*
+** Diluvium: continue statement. Like 'break', it is a goto -- to the
+** "continue" label, which each loop plants at the point where the next
+** iteration begins (a while re-tests its condition, a numeric or generic
+** for runs its step, a repeat evaluates its 'until'). It rides the same
+** goto machinery, so it closes upvalues and to-be-closed variables on the
+** way out exactly as 'break' and an explicit 'goto' do -- there is no
+** separate close path to keep in step with 'defer' and 'with'.
+**
+** 'continue' is a contextual keyword (see 'iscontinuestat'), so it stays a
+** usable name; the label is only planted when a loop actually contains
+** one, so ordinary code using '::continue::' as a label is untouched.
+*/
+static void continuestat (LexState *ls, int line) {
+  BlockCnt *bl;  /* to look for an enclosing loop */
+  for (bl = ls->fs->bl; bl != NULL; bl = bl->previous) {
+    if (bl->isloop)  /* found one? */
+      goto ok;
+  }
+  luaX_syntaxerror(ls, "continue outside loop");
+ ok:
+  bl->hascont = 1;  /* signal that the loop has pending continues */
+  luaX_next(ls);  /* skip continue */
+  newgotoentry(ls, ls->contn, line);
+}
+
+
+/*
 ** Check whether there is already a label with the given 'name' at
 ** current function.
 */
@@ -1806,6 +1835,10 @@ static void whilestat (LexState *ls, int line) {
   enterblock(fs, &bl, 1);
   checknext(ls, TK_DO);
   block(ls);
+  /* Diluvium: 'continue' lands here and falls into the back-edge, so it
+     re-tests the condition -- the loop block's own leaveblock resolves it. */
+  if (bl.hascont)
+    createlabel(ls, ls->contn, line, 0);
   luaK_jumpto(fs, whileinit);
   check_match(ls, TK_END, TK_WHILE, line);
   leaveblock(fs);
@@ -1824,6 +1857,11 @@ static void repeatstat (LexState *ls, int line) {
   luaX_next(ls);  /* skip REPEAT */
   statlist(ls);
   check_match(ls, TK_UNTIL, TK_REPEAT, line);
+  /* Diluvium: 'continue' in a repeat lands on the 'until' test, with the
+     body's locals still live -- which is what the condition may read. The
+     scope block's leaveblock resolves it. */
+  if (bl1.hascont)
+    createlabel(ls, ls->contn, line, 0);
   condexit = cond(ls);  /* read condition (inside scope block) */
   if (bl2.upval) {  /* upvalues? */
     int exit = luaK_jump(fs);  /* normal exit must jump over fix */
@@ -1885,6 +1923,12 @@ static void forbody (LexState *ls, int base, int line, int nvars, int isgen) {
   luaK_reserveregs(fs, nvars);
   block(ls);
   leaveblock(fs);  /* end of scope for declared variables */
+  /* Diluvium: 'continue' lands on the step/next instruction, the same
+     point 'forprep' jumps to -- so it advances the loop rather than
+     skipping it. fs->bl is now the enclosing loop block, which carries the
+     'hascont' flag 'continuestat' set, and whose leaveblock resolves it. */
+  if (fs->bl->hascont)
+    createlabel(ls, ls->contn, line, 0);
   fixforjump(fs, prep, luaK_getlabel(fs), 0);
   if (isgen) {  /* generic for? */
     luaK_codeABC(fs, OP_TFORCALL, base, 0, nvars);
@@ -2626,6 +2670,32 @@ static void retstat (LexState *ls) {
 }
 
 
+/*
+** Diluvium: does a 'continue' name at the start of a statement introduce a
+** continue statement? Only when what follows cannot continue a call, an
+** index, or an assignment -- so 'continue', 'continue()', 'continue.x',
+** 'continue = 1', 'continue, y = ...' and even 'continue += 1' all keep
+** treating it as an ordinary name, exactly as stock Lua and this fork do.
+** Everything else (a statement terminator, or the first token of the next
+** statement) makes it the keyword. 'continue' takes no operand, so unlike
+** 'switch x' there is nothing after it to admit.
+*/
+static int iscontinuestat (LexState *ls) {
+  int lk;
+  if (ls->t.seminfo.ts != ls->contn)
+    return 0;
+  lk = luaX_lookahead(ls);
+  switch (lk) {
+    case '=': case ',': case '.': case '[': case '(': case ':':
+    case '{': case TK_STRING:
+      return 0;  /* a plain assignment, index, method or call */
+    default:
+      /* a compound assignment ('continue += 1') is 'v op= e' */
+      return getcompoundopr(lk) == OPR_NOBINOPR;
+  }
+}
+
+
 static void statement (LexState *ls) {
   int line = ls->linenumber;  /* may be needed for error messages */
   enterlevel(ls);
@@ -2723,6 +2793,10 @@ static void statement (LexState *ls) {
       }
       if (iswithstat(ls)) {  /* Diluvium: stat -> withstat */
         withstat(ls, line);
+        break;
+      }
+      if (iscontinuestat(ls)) {  /* Diluvium: stat -> continuestat */
+        continuestat(ls, line);
         break;
       }
 #if LUA_COMPAT_GLOBAL

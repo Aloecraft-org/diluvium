@@ -36,6 +36,7 @@ out of upstream Lua's version space: upstream will never ship a
 | `switch` statement | done |
 | `match` (switch as an expression) | **dropped** -- see below |
 | `defer` / `with` | done |
+| `continue` in loops | done (a contextual keyword; no bytecode change) |
 | F-string format specs `{x::%.2f}` | done |
 | Regular expressions: `` `\d+` `` and the `regex` library | done |
 | Literal suffix registry (`1.23d`) | not started; gated on decQuad semantics |

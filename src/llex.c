@@ -90,6 +90,7 @@ void luaX_init (lua_State *L) {
   luaC_fix(L, obj2gco(luaS_newliteral(L, "switch")));
   luaC_fix(L, obj2gco(luaS_newliteral(L, "defer")));
   luaC_fix(L, obj2gco(luaS_newliteral(L, "with")));
+  luaC_fix(L, obj2gco(luaS_newliteral(L, "continue")));
 }
 
 
@@ -208,6 +209,7 @@ void luaX_setinput (lua_State *L, LexState *ls, ZIO *z, TString *source,
   ls->swtn = luaS_newliteral(L, "switch");  /* get "switch" string */
   ls->dfrn = luaS_newliteral(L, "defer");   /* get "defer" string */
   ls->wthn = luaS_newliteral(L, "with");    /* get "with" string */
+  ls->contn = luaS_newliteral(L, "continue"); /* get "continue" string */
 #if LUA_COMPAT_GLOBAL
   /* compatibility mode: "global" is not a reserved word */
   ls->glbn = luaS_newliteral(L, "global");  /* get "global" string */

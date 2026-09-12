@@ -101,6 +101,7 @@ test_json|run||
 test_time|run||
 test_host|run||
 test_compound|run||
+test_continue|run||
 test_defer|run||
 test_determinism|run||
 test_endpoint|run||

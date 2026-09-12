@@ -294,6 +294,7 @@ static int diluvium_help (lua_State *L) {
     "  x += 1               and -= *= /= //= %= ^= ..= |= &= <<= >>= ?\?=\n"
     "  switch x do ... end  case a, b then ... default ... end\n"
     "  defer stat           runs however the block is left\n"
+    "  continue             skip to the next pass of a loop\n"
     "  ~function f() end    obfuscated at rest\n"
     "\n"
     "In this REPL:\n"

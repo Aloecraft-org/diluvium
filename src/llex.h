@@ -76,6 +76,7 @@ typedef struct LexState {
   TString *source;  /* current source name */
   TString *envn;  /* environment variable name */
   TString *brkn;  /* "break" name (used as a label) */
+  TString *contn;  /* Diluvium: "continue" name (a contextual keyword and label) */
   TString *glbn;  /* "global" name (when not a reserved word) */
   TString *swtn;  /* Diluvium: "switch" name (a contextual keyword) */
   TString *dfrn;  /* Diluvium: "defer" name (a contextual keyword) */

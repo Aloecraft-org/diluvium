@@ -287,7 +287,7 @@ build_wasm: _wasm_build_step0 _wasm_build_step1 _wasm_build_step2 _wasi_static_l
 build_platform: _build_step0 _native_static_lib
 	@echo "Building for $(UNAME_S)..."
 	cd src && make clean && make all \
-		MYCFLAGS='$(PLAT_CFLAGS)' \
+		MYCFLAGS="$(PLAT_CFLAGS) -DDILUVIUM_BUILD='\"$(HOST_VERSION)\"'" \
 		MYLDFLAGS='$(PLAT_LDFLAGS)' \
 		MYLIBS='$(PLAT_LIBS)'
 

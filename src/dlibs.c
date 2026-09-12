@@ -11,6 +11,7 @@
 
 #include "lauxlib.h"
 #include "lualib.h"
+#include "lundump.h"
 #include "dlibs.h"
 #include "dtask.h"
 #include "dmsgpack.h"
@@ -21,6 +22,20 @@
 #include "dregex.h"
 #include "dtime.h"
 #include "dhostlib.h"
+
+
+/*
+** The Diluvium build string, e.g. "5.5.1_build14". Passed in from the
+** VERSION file by the makefile (as it already is for the host), so there is
+** no second copy to drift. A build that does not pass it -- an embedder
+** compiling these sources directly -- still gets a truthful, if less
+** specific, answer: the Lua base version 'lua.h' carries, which the
+** changelog's consistency check keeps in step.
+*/
+#ifndef DILUVIUM_BUILD
+#define DILUVIUM_BUILD \
+	LUA_VERSION_MAJOR "." LUA_VERSION_MINOR "." LUA_VERSION_RELEASE
+#endif
 
 
 static const luaL_Reg diluvium_libs[] = {
@@ -45,6 +60,27 @@ LUA_API void diluvium_openlibs (lua_State *L) {
     luaL_requiref(L, lib->name, lib->func, 1);  /* set a global too */
     lua_pop(L, 1);  /* 'luaL_requiref' leaves the module on the stack */
   }
+  /*
+  ** '_DILUVIUM': what a program can ask about the runtime it runs in,
+  ** alongside stock '_VERSION'. A table rather than a bare string, because
+  ** the questions a program actually has are separate facts: which Diluvium
+  ** build, which Lua base it forks, and which bytecode format its dumps
+  ** carry (a program that ships '.luac' cares whether a peer can load it).
+  ** Set here, from outside 'lbaselib.c', so that file stays stock and
+  ** rebasing onto a future Lua stays a merge of upstream's diff. It is an
+  ** ordinary table in '_G', so it does not enter a snapshot (which restores
+  ** '_G' as a permanent) and does not move the permanents fingerprint (10.4
+  ** hashes named C functions, not a table of strings).
+  */
+  lua_createtable(L, 0, 3);
+  lua_pushliteral(L, DILUVIUM_BUILD);
+  lua_setfield(L, -2, "version");
+  lua_pushliteral(L,
+    LUA_VERSION_MAJOR "." LUA_VERSION_MINOR "." LUA_VERSION_RELEASE);
+  lua_setfield(L, -2, "lua");
+  lua_pushinteger(L, LUAC_FORMAT);
+  lua_setfield(L, -2, "bytecode_format");
+  lua_setglobal(L, "_DILUVIUM");
 }
 
 
