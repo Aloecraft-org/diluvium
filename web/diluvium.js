@@ -5,7 +5,7 @@
 // allocator, and Lua errors caught rather than trapping) and hands back four
 // calls:
 //
-//   dl.version()        -> "5.5.1_buildNN"
+//   dl.version()        -> "0.15.0"   (Diluvium's own version; see _DILUVIUM)
 //   dl.eval(src)        -> { ok, output }   run dlua, collect what it printed
 //   dl.compile(src)     -> Uint8Array | null   source -> bytecode chunk
 //   dl.analyze(src)     -> object | null        the JSON analysis report

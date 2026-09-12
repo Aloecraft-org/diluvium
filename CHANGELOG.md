@@ -6,9 +6,72 @@ Generated from `CHANGELOG.yaml`, which is the source of truth --
 edit that file, then run `script/changelog.py generate`.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
-Note that tags carry suffixes (`_release`, `_build1`) because this
-repository also holds upstream Lua's tags, and a bare `v5.4.7` is
-Lua's rather than Diluvium's.
+Diluvium versions independently of Lua from `0.15.0` on; the fourteen
+`5.5.1_build*` releases before it are its history. The repository also
+holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
+are the tags recorded here, and the Lua base each release embeds is the
+`Lua x.y.z` fact on its entry.
+
+## [0.15.0] - unreleased
+
+`v0.15.0` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**Diluvium versions on its own line now.** Through build14 the version
+*was* Lua's -- `5.5.1_buildNN`, three digits that belonged to upstream
+and a build counter welded on for everything Diluvium itself had to
+say. Fourteen builds of `5.5.1` were fourteen releases with something to
+report and no free digit to report it in; `5.5.1_build12p1`, a patch on
+a build, is where that finally showed. This release takes Diluvium's own
+number -- `0.15.0`, the fourteen builds carried forward as fourteen
+minors -- and `build14` stays the last `_build` release, unrewritten.
+
+The Lua release Diluvium embeds and the bytecode format it speaks are
+unchanged, and still recorded: `lua_base` and `bytecode_format` below,
+facts you read off the release rather than digits the version is hostage
+to. `_DILUVIUM` already drew the same line at runtime -- `.version` is
+Diluvium's, `.lua` the base -- so nothing in the language moves.
+
+It also collects the ergonomics work that landed since build14.
+
+### Added
+
+- **`continue`, in every loop form.** A contextual keyword like `switch`
+  and `defer`: it skips to the next iteration of the enclosing `while`,
+  `repeat`, numeric `for` or generic `for`, closing any to-be-closed
+  variables and running `defer` blocks on the way out. It stays an
+  ordinary identifier everywhere it is not the first word of a statement,
+  so `continue = 1` and `t.continue` keep working.
+- **`_DILUVIUM`, a version global.** A table the runtime installs:
+  `version` is Diluvium's own (`0.15.0`), `lua` the Lua base it forks
+  (`5.5.1`), and `bytecode_format` the `LUAC_FORMAT` byte. The split
+  between `version` and `lua` is the one this release draws in the
+  version scheme -- what is Diluvium's, and what is recorded about Lua.
+- **A browser build with a real allocator.** `diluvium_browser.wasm` and
+  the dependency-free `diluvium.js` loader run the language, compiler and
+  analyzer in a page over wasi-libc, so numbers format correctly, the
+  allocator is real and grows, and `pcall` catches rather than trapping
+  the module. See `web/README.md`.
+- **Docker images.** A CLI image (the interpreter and compiler as static
+  musl binaries) and a browser-demo image (the wasm served as a page),
+  both built from source, with a workflow to publish them to GHCR. See
+  `docker/README.md`.
+
+### Removed
+
+- **The old `libdiluvium_wasm_unknown.a` "Browser" download.** A ~9 MB
+  freestanding archive with a bump allocator and stubbed libc; the real
+  `diluvium_browser.wasm` above replaces it.
+
+### Upgrading
+
+No format movement: `LUAC_FORMAT` stays `0x46`, `DV_ABI_VERSION` stands,
+and a snapshot crosses build14 and 0.15.0 in both directions. What
+changes is spelling. The release tag is `v0.15.0`, not `v5.5.1_build15`;
+`_DILUVIUM.version` reads `0.15.0`; and the Lua base is `_DILUVIUM.lua`
+rather than welded into the one version string. A consumer that parsed
+`5.5.1_buildNN` off a Diluvium tag keeps working for the releases already
+published and needs a branch for `0.15.0`-shaped tags going forward.
+
 
 ## [5.5.1_build14] - 2026-09-12
 

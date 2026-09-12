@@ -227,9 +227,11 @@ def render_md(doc, tag=None):
         "Generated from `CHANGELOG.yaml`, which is the source of truth --\n"
         "edit that file, then run `script/changelog.py generate`.\n\n"
         "The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).\n"
-        "Note that tags carry suffixes (`_release`, `_build1`) because this\n"
-        "repository also holds upstream Lua's tags, and a bare `v5.4.7` is\n"
-        "Lua's rather than Diluvium's.\n"
+        "Diluvium versions independently of Lua from `0.15.0` on; the fourteen\n"
+        "`5.5.1_build*` releases before it are its history. The repository also\n"
+        "holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's\n"
+        "are the tags recorded here, and the Lua base each release embeds is the\n"
+        "`Lua x.y.z` fact on its entry.\n"
     )
     return head + "\n" + "\n\n".join(render_release(r) for r in doc["releases"])
 
@@ -264,10 +266,34 @@ def read(path):
         return f.read()
 
 
+def _repo_checks(doc, base):
+    """Diluvium's own invariants live in script/checks.py, under the same
+    contract the shared changelog engine uses: consistency(doc, ctx), ctx a
+    dict carrying read, root and base. Loaded if the file exists, so the
+    bespoke Lua checks are not welded into this tool -- adopting the shared
+    engine later moves this call, not the checks."""
+    path = os.path.join(ROOT, "script", "checks.py")
+    if not os.path.exists(path):
+        return []
+    ns = {}
+    try:
+        with open(path) as f:
+            exec(compile(f.read(), path, "exec"), ns)  # noqa: S102
+    except Exception as e:  # noqa: BLE001
+        return ["script/checks.py: failed to load (%s)" % e]
+    fn = ns.get("consistency")
+    if not callable(fn):
+        return ["script/checks.py: no consistency(doc, ctx) function"]
+    return list(fn(doc, {"read": read, "root": ROOT, "base": base}))
+
+
 def consistency(doc):
-    """The newest entry describes the tree as it stands, so the tree has to
-    agree with it. Version numbers live in three files here and drift
-    quietly; this is what makes that loud. -> list of problems."""
+    """The newest entry describes the tree, so the tree must agree with it.
+    Diluvium's OWN version lives in VERSION and .technoproj and is checked
+    here; the Lua release and bytecode format it embeds are recorded facts,
+    checked by name in script/checks.py -- never equated to Diluvium's version
+    (that weld is what let fourteen builds share one Lua number). -> list of
+    problems."""
     bad = []
     r = doc["releases"][0]
     version = r["version"]
@@ -277,11 +303,12 @@ def consistency(doc):
     if got != version:
         bad.append("VERSION is %r but %s says %r" % (got, where, version))
 
-    m = re.match(r"^(\d+)\.(\d+)\.(\d+)", version)
+    m = re.match(r"^(\d+)\.(\d+)\.(\d+)(?:-(dev|alpha|beta|rc)\.(\d+))?$", version)
     if not m:
-        bad.append("%s: version does not start with X.Y.Z" % where)
+        bad.append("%s: version %r is not <major>.<minor>.<patch>[-<kind>.<n>]"
+                   % (where, version))
         return bad
-    major, minor, patch = m.groups()
+    major, minor, patch, kind, n = m.groups()
 
     try:
         proj = json.loads(read(".technoproj"))["TECHNO_VERSION"]
@@ -293,27 +320,19 @@ def consistency(doc):
             if proj.get(key) != want:
                 bad.append(".technoproj TECHNO_VERSION.%s is %r but %s implies %r"
                            % (key, proj.get(key), where, want))
-        build = re.search(r"_build(\d+)$", version)
-        if build and str(proj.get("build")) != build.group(1):
-            bad.append(".technoproj TECHNO_VERSION.build is %r but %s implies %r"
-                       % (proj.get("build"), where, build.group(1)))
+        # pre: null for a release, {kind, n} for a prerelease. Replaces the old
+        # `build` field, which spelled a Lua build counter.
+        pre = proj.get("pre")
+        if kind is None:
+            if pre is not None:
+                bad.append(".technoproj TECHNO_VERSION.pre is %r but %s is a "
+                           "release -- pre should be null" % (pre, where))
+        elif not (isinstance(pre, dict) and pre.get("kind") == kind
+                  and str(pre.get("n")) == n):
+            bad.append(".technoproj TECHNO_VERSION.pre is %r but %s implies "
+                       "{kind: %r, n: %s}" % (pre, where, kind, n))
 
-    fmt = re.search(r"^#define\s+LUAC_FORMAT\s+(\S+)", read("src/lundump.h"),
-                    re.M)
-    if not fmt:
-        bad.append("src/lundump.h: no LUAC_FORMAT")
-    elif int(fmt.group(1), 0) != r["bytecode_format"]:
-        bad.append("src/lundump.h LUAC_FORMAT is %s but %s says %s"
-                   % (fmt.group(1), where, hex(r["bytecode_format"])))
-
-    lua_h = read("src/lua.h")
-    for key, want in (("MAJOR", major), ("MINOR", minor), ("RELEASE", patch)):
-        m = re.search(r"^#define\s+LUA_VERSION_%s_N\s+(\d+)" % key, lua_h, re.M)
-        if not m:
-            bad.append("src/lua.h: no LUA_VERSION_%s_N" % key)
-        elif m.group(1) != want:
-            bad.append("src/lua.h LUA_VERSION_%s_N is %s but %s says lua_base "
-                       "%s" % (key, m.group(1), where, r.get("lua_base")))
+    bad += _repo_checks(doc, "%s.%s.%s" % (major, minor, patch))
     return bad
 
 
@@ -381,8 +400,8 @@ def main():
             for p in problems:
                 print("inconsistent: " + p, file=sys.stderr)
             return 1
-        print("OK: VERSION, .technoproj, lua.h and LUAC_FORMAT agree with %s"
-              % doc["releases"][0]["version"])
+        print("OK: VERSION, .technoproj and the recorded Lua facts agree "
+              "with %s" % doc["releases"][0]["version"])
     elif args.command == "release-check":
         if not args.tag:
             sys.exit("changelog.py: release-check needs --tag")

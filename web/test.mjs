@@ -21,7 +21,7 @@ const ok = (cond, name, detail = "") => {
 const out = (src) => dl.eval(src);
 
 // -- version ---------------------------------------------------------------
-ok(/^5\.5\.1/.test(dl.version()), "version() is a 5.5.1 build", dl.version());
+ok(/^\d+\.\d+\.\d+/.test(dl.version()), "version() is an X.Y.Z version", dl.version());
 
 // -- real libc: numbers format through wasi-libc's snprintf ----------------
 let r = out('print(1/3, ("%.4f"):format(math.pi))');

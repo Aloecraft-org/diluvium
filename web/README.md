@@ -44,7 +44,7 @@ trapping. The wasi-sdk's wasi-libc already ships these; Debian's does not.
 import { loadDiluvium } from "./diluvium.js";
 const dl = await loadDiluvium("./diluvium_browser.wasm");
 
-dl.version();                       // "5.5.1_buildNN"
+dl.version();                       // "0.15.0"
 dl.eval('print($"hi {1+1}")');      // { ok: true, output: "hi 2\n" }
 dl.compile("return 1 + 1");         // Uint8Array of bytecode, or null on error
 dl.analyze("local x = 1 return x"); // the analysis report as an object, or null
