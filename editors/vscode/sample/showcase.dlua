@@ -44,6 +44,12 @@ switch port do
         print($"unexpected: {port}")
 end
 
+-- Continue (contextual keyword; skips to the next pass of the loop)
+for _, port in ipairs({ 22, 80, 443 }) do
+    if port == 80 then continue end
+    print($"scanning {port}")
+end
+
 -- Defer
 do
     defer print("second")

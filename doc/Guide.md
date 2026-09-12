@@ -148,6 +148,30 @@ real syntax. Cases do not fall through, and the subject is evaluated once and fr
 at entry, so a `case` expression with a side effect cannot change what is being
 matched. Nothing runs when no case matches and there is no `default`.
 
+### `continue`
+
+```lua
+for _, row in ipairs(rows) do
+  if row.skip then continue end
+  emit(row)
+end
+```
+
+`continue` jumps to the next pass of the innermost loop — a `while` or `for`
+re-tests its condition and runs its step, a `repeat` evaluates its `until`. It is a
+`goto` underneath, to a label each loop plants at that point, so it closes `defer`,
+`with` and any other to-be-closed local, and any per-iteration upvalue, on the way
+out — exactly as reaching the end of the block does. It compiles to existing
+opcodes, so the bytecode format does not move.
+
+It is a contextual keyword, so `continue` is still an ordinary name: a variable, a
+field, a call, and even a compound-assignment target (`continue += 1`). A
+hand-written `::continue::` label is untouched, because the loop plants its own
+label only when the keyword is actually used. One edge is a compile error rather
+than a surprise: in a `repeat`, a `continue` that jumps past a local the `until`
+then reads is refused by name, the same way an explicit `goto` into a local's scope
+is — move the `continue` below that local, or lift the local above the loop.
+
 ### `defer` and `with`
 
 ```lua

@@ -87,6 +87,22 @@ that a subject cannot start with `(`, a string or a table constructor --
 `switch x do` (the usual Lua shape, as in `if x then` and `while x do`),
 or bind the subject to a local first.
 
+**Continue**
+
+``` lua
+-- skip to the next pass of the innermost loop
+for _, line in ipairs(lines) do
+    if line:sub(1, 1) == "#" then continue end   -- skip comment lines
+    process(line)
+end
+```
+
+`continue` moves to the next iteration: a `while` or `for` re-tests and
+takes its step, a `repeat` evaluates its `until`. Any pending `defer` runs
+and any to-be-closed variable is closed on the way, exactly as reaching the
+end of the block would. Like `switch` and `defer` it is a contextual
+keyword, so `continue` keeps working as an ordinary name.
+
 **Compound Assignment**
 
 ``` lua
@@ -489,8 +505,9 @@ What this fork promises, so that "stable" means something specific:
 
 **Source compatibility with stock Lua is absolute.** Every construct
 Diluvium adds is a syntax error in stock Lua, and none of them takes a
-reserved word — `switch`, `case`, `default`, `defer` and `with` are
-contextual keywords and stay usable as ordinary names. Lua code runs
+reserved word — `switch`, `case`, `default`, `defer`, `with` and
+`continue` are contextual keywords and stay usable as ordinary names. Lua
+code runs
 unmodified. This will not change.
 
 **Diluvium's own syntax is settled for the 5.5 line.** The constructs

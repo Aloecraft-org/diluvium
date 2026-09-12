@@ -230,7 +230,7 @@
           "name": "keyword.control.dlua"
         },
         {
-          "match": "\\b(switch|case|default|defer|with)\\b",
+          "match": "\\b(switch|case|default|defer|with|continue)\\b",
           "name": "keyword.control.diluvium.dlua"
         },
         {

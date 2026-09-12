@@ -21,7 +21,7 @@ language servers no longer attach to these files, so Diluvium syntax such as
 - `??` and `??=` null coalescing, `?.` and `?[` safe navigation
 - Compound assignment: `+=`, `-=`, `*=`, `/=`, `//=`, `%=`, `^=`, `..=`,
   `&=`, `|=`, `<<=`, `>>=`, `??=`
-- Contextual keywords: `switch` / `case` / `default`, `defer`, `with`
+- Contextual keywords: `switch` / `case` / `default`, `defer`, `with`, `continue`
 - The `global` keyword and `~function` secure functions
 - The Diluvium standard libraries: `queue`, `json`, `msgpack`, `endpoint`,
   `bytes`, `regex`, `time` alongside the stock Lua ones
