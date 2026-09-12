@@ -326,15 +326,39 @@ jobs:
             | sed 's| \./| |' > SHA256SUMS.txt
           cd ..
 
+          SHA='${{ needs.resolve.outputs.sha }}'
+          VERSION='${{ needs.resolve.outputs.version }}'
+          # The tag this build corresponds to. On a release the tag is created
+          # after the build, so it is not in the tree yet -- v<version> is what
+          # it will be (tag_rule: prefix); a commit already tagged wins.
+          TAG=$(git tag --points-at "$SHA" 2>/dev/null | head -n1)
+          [ -n "$TAG" ] || TAG="v$VERSION"
+          # A tag-triggered run carries no branch, so derive it from the commit
+          # (doc/ALIGNMENT.md §5). checkout's fetch-depth: 0 gives the remote
+          # refs this needs.
+          BRANCH=$(git branch -r --contains "$SHA" --format='%(refname:lstrip=3)' \
+                   2>/dev/null | grep -vx HEAD | head -n1)
+          # The compatibility facts, read by NAME from the recorded changelog
+          # entry -- never off the version string (doc/ALIGNMENT.md §1, §5).
+          LUA_BASE=$(jq -r '.releases[0].lua_base' changelog.json)
+          BYTECODE=$(printf '0x%x' "$(jq -r '.releases[0].bytecode_format' changelog.json)")
+
           {
             echo "Diluvium build manifest"
             echo "======================="
-            echo "version    : ${{ needs.resolve.outputs.version }}"
-            echo "commit     : ${{ needs.resolve.outputs.sha }}"
-            echo "subject    : $(git log -1 --pretty=%s ${{ needs.resolve.outputs.sha }})"
-            echo "committed  : $(git log -1 --pretty=%cI ${{ needs.resolve.outputs.sha }})"
+            echo "tag        : $TAG"
+            echo "version    : $VERSION"
+            echo "commit     : $SHA"
+            echo "branch     : ${BRANCH:-(detached)}"
+            echo "subject    : $(git log -1 --pretty=%s "$SHA")"
+            echo "committed  : $(git log -1 --pretty=%cI "$SHA")"
             echo "built      : $(date -u +%Y-%m-%dT%H:%M:%SZ)"
             echo "run        : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            echo ""
+            echo "Compatibility"
+            echo "-------------"
+            echo "lua_base        : $LUA_BASE"
+            echo "bytecode_format : $BYTECODE"
             echo ""
             echo "Artifacts"
             echo "---------"

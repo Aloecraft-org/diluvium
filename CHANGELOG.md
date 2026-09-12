@@ -66,6 +66,12 @@ It also collects the ergonomics work that landed since build14.
   the aarch64/armv7l builds. The macOS, Windows and wasm names already
   conformed. See `doc/ALIGNMENT.md` §4; releases already published keep
   the names they shipped with.
+- **`BUILDINFO.txt` records the tag, branch and Lua compatibility
+  facts.** Every release already shipped a build manifest; it now carries
+  `tag` and `branch` alongside `commit` and `built`, and a Compatibility
+  block naming `lua_base` and `bytecode_format` -- the same facts the
+  changelog entry records, read by name off the release rather than off
+  the version string (doc/ALIGNMENT.md §5).
 
 ### Removed
 
