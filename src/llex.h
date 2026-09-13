@@ -81,6 +81,27 @@ typedef struct LexState {
   TString *swtn;  /* Diluvium: "switch" name (a contextual keyword) */
   TString *dfrn;  /* Diluvium: "defer" name (a contextual keyword) */
   TString *wthn;  /* Diluvium: "with" name (a contextual keyword) */
+  TString *cstn;  /* Diluvium: "const" name (a contextual keyword) */
+  TString *expn;  /* Diluvium: "export" name (a contextual keyword) */
+  TString *modn;  /* Diluvium: "(export)", the chunk's hidden module table */
+  TString *clsn;  /* Diluvium: "class" name (a contextual keyword) */
+  TString *extn;  /* Diluvium: "extends", only inside a class header */
+  TString *stcn;  /* Diluvium: "static", only inside a class body */
+  TString *supn;  /* Diluvium: "super", only inside a class body */
+  TString *selfn; /* Diluvium: "self", which '@' expands to */
+  TString *supv;  /* Diluvium: "(super)", the hidden local holding a parent */
+  TString *dflv;  /* Diluvium: "(defaults)", the hidden local holding a
+                     class's field-default function, and the key the class
+                     table keeps it under */
+  int inclass;    /* Diluvium: nonzero while a class body is being parsed,
+                     which is what makes 'static' and 'super' special. Saved
+                     and restored around each body, so a class declared
+                     inside a method sees its own. */
+  int exportv;    /* Diluvium: the module table's variable index, or -1.
+                     In the lexer state rather than in 'FuncState' because
+                     'export' is a chunk-level form and there is one main
+                     function per parse -- and because 'lparser.h' is
+                     pristine against upstream, which is worth keeping. */
   int fstring_del;  /* Diluvium: delimiter of the f-string just opened
                        (handed to the parser, which then keeps its own
                        copy, so nested f-strings do not clobber it) */

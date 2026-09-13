@@ -12,9 +12,9 @@
 //! moves msgpack across the boundary. `dv_abi_version` is called first and its
 //! answer refused on mismatch.
 //!
-//! Configurable values: [`DV_ABI_VERSION`] and [`DV_WAIT_MAX`], which are
-//! transcribed rather than chosen, and the `DV_FLAG_*` set, which is what a
-//! host actually decides.
+//! Configurable values: [`DV_ABI_VERSION`], [`DV_BUILD`] and [`DV_WAIT_MAX`],
+//! which are transcribed rather than chosen, and the `DV_FLAG_*` set, which is
+//! what a host actually decides.
 //!
 //! Fan-out points: two modules, and the reason there are two is a boundary.
 //! This one is `dv.h` -- sealed, bytes in and bytes out, no Lua type crossing.
@@ -27,8 +27,14 @@ pub mod lua;
 
 use std::os::raw::{c_char, c_int, c_void};
 
-pub const DV_ABI_VERSION: u32 = 1;
+pub const DV_ABI_VERSION: u32 = 2;
 pub const DV_WAIT_MAX: usize = 32;
+
+/// The build number, the N in 5.5.1_buildN. Transcribed from `DV_BUILD` in
+/// `src/dv.h`; `dv_build()` is the same number read out of the library, and
+/// the two disagreeing means this crate is compiled against a different tree
+/// than it is linked to.
+pub const DV_BUILD: c_int = 13;
 
 /// Refuse precompiled chunks in `dv_load`, accepting source only.
 pub const DV_FLAG_TEXT_ONLY: u32 = 0x1;
@@ -268,6 +274,98 @@ extern "C" {
         cb: Option<unsafe extern "C" fn(ud: *mut c_void, id: dv_queue_id)>,
         ud: *mut c_void,
     );
+
+    /// The build number, the N in 5.5.1_buildN.
+    pub fn dv_build() -> c_int;
+
+    /// Newline-separated feature names this build carries, e.g.
+    /// `"regex\njson\nmsgpack\nsnapshot"` plus `"\nnumeric"` when the numeric
+    /// feature is compiled in. Never NULL, no trailing newline, and stable for
+    /// the life of the process -- it is a compile-time string, so the pointer
+    /// may be held.
+    pub fn dv_features() -> *const c_char;
+
+    /// Adopt a host-owned buffer as a value on the instance's stack.
+    ///
+    /// `bytes` must hold exactly `len` bytes, allocated with the instance's
+    /// allocator (plain `malloc` underneath), and `len` must be a whole number
+    /// of elements for `dtype`. Returns 0 when it was adopted as an `array`
+    /// and 1 when it was copied into a Lua string instead -- which is what a
+    /// build without the numeric feature does, and what every build does until
+    /// the `array` type lands. Either way a value is pushed and the buffer is
+    /// released.
+    ///
+    /// Returns 1 with nothing pushed only on invalid arguments, and in that
+    /// one case ownership does not transfer. Call it while the instance is
+    /// parked.
+    pub fn dv_array_adopt(
+        inst: *mut dv_instance,
+        dtype: c_int,
+        len: usize,
+        bytes: *mut c_void,
+    ) -> c_int;
+
+    /// Cap how many elements one kernel call may process; 0 for no limit.
+    pub fn dv_numeric_set_max_elements(inst: *mut dv_instance, n: u64);
+
+    /// The weakest tier this instance may reach. Attenuating only: a
+    /// supervisor narrows a child, never widens it.
+    pub fn dv_numeric_set_max_tier(inst: *mut dv_instance, t: dv_tier);
+
+    /// Did anything in this instance run at `DV_TIER_FAST`? Sticky, never
+    /// cleared, and always 0 while no fast backend exists.
+    pub fn dv_numeric_touched_fast(inst: *mut dv_instance) -> c_int;
+}
+
+// The C allocator, for staging a buffer `dv_array_adopt` can take.
+//
+// `dv.h` says `malloc(len)` is what a host writes, and the runtime releases an
+// adopted buffer through the instance's allocator, which is `free` underneath.
+// So a buffer handed to `dv_array_adopt` has to come from here and not from
+// Rust's global allocator: the two are the same on most targets and are not
+// required to be, and freeing a Rust allocation with `free` is undefined
+// either way.
+//
+// Declared rather than taken from the `libc` crate because that would be a
+// dependency for two symbols already linked into every build of this crate.
+extern "C" {
+    /// Allocate `size` bytes for a buffer `dv_array_adopt` will take.
+    pub fn malloc(size: usize) -> *mut c_void;
+    /// Release a buffer `dv_array_adopt` refused, and nothing else: on
+    /// success the runtime owns it.
+    pub fn free(ptr: *mut c_void);
+}
+
+/// Element type of a buffer handed to [`dv_array_adopt`].
+pub const DV_DTYPE_F64: c_int = 0;
+pub const DV_DTYPE_I64: c_int = 1;
+pub const DV_DTYPE_U8: c_int = 2;
+
+/// What a kernel promises about its result.
+///
+/// Ordered strongest to weakest, so `tier <= max_tier` is the admission test
+/// and the discriminants are load-bearing.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum dv_tier {
+    /// Integer or fixed-point: one answer, no rounding.
+    DV_TIER_EXACT = 0,
+    /// Floating point, bit-identical on every target this runtime builds for.
+    DV_TIER_REPRODUCIBLE = 1,
+    /// Floating point, whatever the machine is quickest at. Reproducible
+    /// across runs on one machine, not across machines.
+    DV_TIER_FAST = 2,
+}
+
+/// The kernel backend vtable.
+///
+/// Declared so its shape is fixed before anything depends on it; only the
+/// portable implementation exists, and it is not reachable through here yet.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct dv_numeric_backend {
+    pub abi: c_int,
+    pub name: *const c_char,
 }
 
 #[cfg(test)]
@@ -281,6 +379,35 @@ mod tests {
     #[test]
     fn version_matches_the_header() {
         assert_eq!(unsafe { dv_abi_version() }, DV_ABI_VERSION);
+    }
+
+    /// The same check for the build number, which is transcribed the same way
+    /// and drifts the same way.
+    #[test]
+    fn build_number_matches_the_header() {
+        assert_eq!(unsafe { dv_build() }, DV_BUILD);
+    }
+
+    /// The feature string is a contract, not a log line: a DRT profile reads
+    /// it. Check the shape it promises -- non-empty, no trailing newline --
+    /// and that `numeric` tracks the cargo feature in both directions, which
+    /// is what says the define reached the C compiler.
+    #[test]
+    fn features_report_this_build() {
+        let s = unsafe { std::ffi::CStr::from_ptr(dv_features()) }
+            .to_str()
+            .expect("the feature string is ASCII");
+        assert!(!s.is_empty());
+        assert!(!s.ends_with('\n'), "no trailing newline: {s:?}");
+        let names: Vec<&str> = s.split('\n').collect();
+        for want in ["regex", "json", "msgpack", "snapshot"] {
+            assert!(names.contains(&want), "{want} missing from {s:?}");
+        }
+        assert_eq!(
+            names.contains(&"numeric"),
+            cfg!(feature = "numeric"),
+            "the numeric feature and the compiled library disagree: {s:?}"
+        );
     }
 
     /// The transcription check `dv_layout` makes possible on a native target:

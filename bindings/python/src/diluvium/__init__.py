@@ -58,7 +58,7 @@ __all__ = [
     "library_abi_version",
 ]
 
-ABI_VERSION = 1
+ABI_VERSION = 2
 
 _DV_OK = 0
 _DV_QUEUE_FULL = 1

@@ -15,5 +15,10 @@ default = []
 # should be asked for. The symbols are in the archive either way; this gates
 # the declarations, not the code.
 lua = []
+# The numeric build feature (doc/Plan-2026-09.md 2). Off by default, matching
+# the Makefile's NUMERIC. Unlike `lua` this gates *code*, not declarations:
+# every function in `dv.h` is linked either way, and this decides what the
+# numeric ones do. Ask `dv_features()` at run time rather than reading this.
+numeric = []
 
 [dependencies]
