@@ -1333,7 +1333,7 @@ budget's count hook and silently disable the budget. Dispatch to both, or don't.
 
 ## 9. What not to rely on yet
 
-As of `2.0.0`. The full list with its reasoning is `doc/Messaging.md` §18; this is
+As of `0.15.0`. The full list with its reasoning is `doc/Messaging.md` §18; this is
 what it means for code you are writing now.
 
 **Hibernation is on.** This paragraph used to say off-and-stay-off, because the thread
