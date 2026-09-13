@@ -29,9 +29,66 @@
 // target's own toolchain (`x86_64-w64-mingw32-gcc` and friends) rather than the
 // host's, refusing when it is absent. MSVC is refused by name: every flag here
 // is spelled the GCC way.
+//
+// The `numeric` feature carries compiler flags, not only a define
+// (doc/Plan-2026-09.md 3.5). Two build systems compile this same amalgamation
+// -- the repository's Makefile and this file -- and a flag that reaches only
+// one of them is a cross-target divergence with no visible cause. `NUMERIC`
+// in the Makefile and the `numeric` cargo feature here must stay the same
+// list; `make NUMERIC=1 contraction_check` is what says whether they did.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The numeric feature's flags that every compiler in the matrix accepts.
+///
+/// `-ffp-contract=off` is the one that matters most: GCC on aarch64 fuses
+/// `a*b+c` by default and x86-64 does not, so without it the same source
+/// produces different last digits on two targets that are both "correct".
+/// `-fno-builtin` keeps the compiler from substituting or constant-folding
+/// the libm calls the embedded libm exists to replace.
+const NUMERIC_FLAGS: [&str; 3] = [
+    "-ffp-contract=off",
+    "-fno-fast-math",
+    "-fno-builtin",
+];
+
+/// The fourth flag, which is probed rather than assumed.
+///
+/// It is GCC's spelling and Clang only learned it in 17, so a macOS runner
+/// with an older Apple clang would fail the build over it. Probing costs
+/// nothing real: excess precision is an x87 phenomenon and none of this
+/// project's targets (x86-64, aarch64, wasm32) has any, so where the flag is
+/// missing there is nothing for it to have done. The Makefile probes the same
+/// flag the same way, which is what keeps the two build systems compiling the
+/// same configuration.
+const NUMERIC_EXCESS_PRECISION: &str = "-fexcess-precision=standard";
+
+/// Whether cargo turned the feature on for this build.
+///
+/// Read from the environment rather than `cfg!(feature = ...)`: a build
+/// script's `cfg!` describes the machine compiling it, and the whole of the
+/// header comment above is about not making that mistake again.
+fn numeric_enabled() -> bool {
+    std::env::var_os("CARGO_FEATURE_NUMERIC").is_some()
+}
+
+/// `-DDV_NUMERIC` and the flags, or nothing at all.
+///
+/// Nothing at all is load-bearing: principle 4 of the plan is that a build
+/// without the feature is byte-identical to one from before the feature
+/// existed, and an empty vector here is what makes that literally true.
+fn numeric_flags(toolchain: &Toolchain) -> Vec<String> {
+    if !numeric_enabled() {
+        return Vec::new();
+    }
+    let mut v = vec!["-DDV_NUMERIC".to_string()];
+    v.extend(NUMERIC_FLAGS.iter().map(|s| s.to_string()));
+    if toolchain.accepts(NUMERIC_EXCESS_PRECISION) {
+        v.push(NUMERIC_EXCESS_PRECISION.to_string());
+    }
+    v
+}
 
 fn main() {
     let target = std::env::var("TARGET").expect("cargo sets TARGET");
@@ -48,6 +105,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=CC");
     println!("cargo:rerun-if-env-changed=AR");
     println!("cargo:rerun-if-env-changed=WASI_SDK_PATH");
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_NUMERIC");
 
     let plat = Platform::of(&target);
     let toolchain = Toolchain::resolve(&plat, &target);
@@ -403,6 +461,7 @@ impl Platform {
             }
         }
         flags.extend(toolchain.target_flags.clone());
+        flags.extend(numeric_flags(toolchain));
         flags
     }
 }
@@ -590,6 +649,28 @@ impl Toolchain {
             .as_ref()
             .expect("wasm targets always have a sysroot")
             .join(self.wasi_lib_subdir)
+    }
+
+    /// Does this compiler accept `flag`?
+    ///
+    /// Compiles a one-line program with it, the same way `probe_eh` does. A
+    /// flag that is merely a no-op on this target still passes, which is the
+    /// answer wanted: the question is whether passing it breaks the build,
+    /// not whether it changes the code.
+    fn accepts(&self, flag: &str) -> bool {
+        let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+        let probe_c = out.join("flag_probe.c");
+        if std::fs::write(&probe_c, "int probe(void) { return 0; }\n").is_err() {
+            return false;
+        }
+        let mut cc = self.cc();
+        cc.args(&self.target_flags)
+            .arg(flag)
+            .arg("-c")
+            .arg(&probe_c)
+            .arg("-o")
+            .arg(out.join("flag_probe.o"));
+        cc.output().map(|o| o.status.success()).unwrap_or(false)
     }
 
     /// Check the EH flags before compiling 30k lines with them, so an old

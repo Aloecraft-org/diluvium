@@ -88,9 +88,29 @@ Specified in the handoff; recorded here against the code above.
 
 1. **Taint sources.** Mark the calls that make a function
    nondeterministic: `math.random`, `os.*` (clock, date, time), `io.*`,
-   float transcendentals (`math.exp`, `log`, `pow`, `sin`, …), host calls,
-   and float-to-string formatting. Note `sqrt`, `floor`, `ceil`, `abs` and
-   `fmod` are IEEE-exact and stay clean.
+   host calls, and float-to-string formatting. Note `sqrt`, `floor`,
+   `ceil`, `abs` and `fmod` are IEEE-exact and stay clean.
+
+   **The float transcendentals are no longer on this list.** They were:
+   `math.exp`, `log`, `pow`, `sin` and the rest were taint sources
+   because the platform's libm answered them, and glibc, musl, Apple's,
+   wasi-libc's and mingw's are five correct implementations that disagree
+   in the last bit — measured at 1,695 of 32,000 sampled arguments
+   against glibc, so about one call in twenty. Stage 1 of the numeric
+   spec removed the reason: with the `numeric` feature these route
+   through the embedded libm (`src/dlibm.c`, openlibm vendored under
+   `dv_` prefixes), which is one implementation on every target. A
+   contract that calls `math.exp` can carry a green verdict, which is
+   what that stage was for.
+
+   Two caveats the verdict has to carry when it is built:
+
+   - The clean list is `exp log pow sin cos tan asin acos atan atan2
+     sinh cosh tanh expm1 log1p`, and only under a build carrying the
+     feature. `dv_features()` is how a tool asks; without it the
+     platform's libm is back and so is the taint.
+   - `math.fmod`, `math.modf`, `math.ldexp` and `math.frexp` were never
+     tainted and are not routed, because they are exact.
 2. **Propagation.** Walk the existing call graph so a function that calls
    a tainted function is itself tainted.
 3. **Three values.** `deterministic`, `nondeterministic`, `indeterminate`
@@ -99,6 +119,15 @@ Specified in the handoff; recorded here against the code above.
    per-state flag records what an execution *actually* touched. Static
    says *could*, runtime says *did*, and nothing is forbidden either way:
    the verdict is reported, not enforced.
+
+   Half of this exists. `dv_numeric_touched_fast` (`dv.h`) is the
+   per-instance, sticky, one-way flag for the numeric half: a kernel that
+   runs at `DV_TIER_FAST` sets it, a host reads it, and nothing clears
+   it. No fast backend exists yet — every portable kernel is reproducible
+   tier by construction — so what is wired today is the path, proved end
+   to end in `test/dv_check.c` through a debug-build-only hook. The
+   remaining stdlib entries (`math.random`, `os.*`, `io.*`) need the same
+   treatment and do not have it.
 
 The **boundedness verdict** discussed alongside it — is a function's
 execution statically bounded? — reuses the same walk but needs the

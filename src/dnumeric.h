@@ -1,0 +1,136 @@
+/*
+** dnumeric.h
+** The 'array' guest library: typed arrays and portable numeric kernels.
+**
+** Stage 0 of doc/diluvium-numeric-spec.md, behind the 'numeric' build
+** feature (C define DV_NUMERIC). Without the feature this file's
+** translation unit compiles to nothing a program can reach: 'dlibs.c'
+** does not register the library and 'diluvium_array_adopt' reports that
+** it did not adopt, so a build without the feature is the build that came
+** before it.
+**
+** Why a library and not a hostcall: an array is a value the program owns
+** and computes with, in its own address space and against its own memory
+** budget. Nothing here reaches outside the instance.
+**
+** What the tier means, in one line, because it is the whole point of the
+** implementation being this specific: every kernel here is *reproducible*
+** tier -- bit-identical on every target this runtime builds for -- and
+** the numeric spec's section 4 is the list of things that had to be true
+** for that, from the reduction order down to the compiler flags in
+** doc/Plan-2026-09.md 3.5.
+*/
+
+#ifndef dnumeric_h
+#define dnumeric_h
+
+#include <stddef.h>
+#include <stdint.h>
+
+#include "lua.h"
+
+
+/*
+** Element types, in the order the ABI numbers them ('dv_array_adopt' in
+** dv.h takes these values, and they are part of that contract).
+**
+** 'c128' is the exception and deliberately so: it is a guest-side dtype
+** only. doc/Plan-2026-09.md 3.1 fixes 'dv_array_adopt''s dtype argument
+** at "0=f64 1=i64 2=u8", and that header is what session B compiled
+** against at A0 -- adding a fourth number to it would move a published
+** contract for a type no host has a buffer of. A host with complex data
+** adopts it as 'f64' pairs and the guest calls 'array.complex'.
+*/
+#define DVN_F64		0
+#define DVN_I64		1
+#define DVN_U8		2
+#define DVN_C128	3	/* interleaved re/im doubles; not in dv.h */
+
+
+LUAMOD_API int luaopen_dnumeric (lua_State *L);
+
+
+/*
+** Adopt a host-owned buffer as an 'array' on the stack, without copying.
+**
+** 'bytes' must hold exactly 'len' bytes, must be a whole number of
+** elements for 'dtype', and must have been allocated so that 'free' can
+** release it -- which is what the instance's allocator does underneath.
+** On success this takes ownership and returns 0; the array's finaliser
+** releases the buffer.
+**
+** Returns 1 without taking ownership and without pushing anything when
+** the arguments do not describe an array, and 1 in every build that has
+** no 'numeric' feature. 'dv_array_adopt' in dv.c is the caller and it is
+** what turns a 1 into the documented string copy.
+*/
+LUA_API int diluvium_array_adopt (lua_State *L, int dtype, size_t len,
+                                    void *bytes);
+
+
+/*
+** 'LUA_API' rather than 'LUAI_FUNC' on these five, following dshim.h:
+** they cross translation units in the per-file build, which compiles
+** each d*.c without LUA_CORE, and LUAI_FUNC is only defined there.
+**
+** The budget seam (doc/Plan-2026-09.md 3.4). Implemented in dv.c, which
+** is the only file that can see 'dv_instance'; declared here because the
+** kernels are the only callers and dv.h is a published ABI these two are
+** deliberately not part of.
+**
+** 'diluvium_budget_open' returns a cookie for the instance this state
+** belongs to, or NULL when there is none. 'diluvium_budget_charge' adds
+** 'n' instructions and raises exactly as the instruction hook does when
+** the budget is spent; with a NULL cookie it does nothing.
+*/
+LUA_API void *diluvium_budget_open (lua_State *L);
+LUA_API void diluvium_budget_charge (lua_State *L, void *cookie,
+                                       uint64_t n);
+
+
+/*
+** Record that something ran at DV_TIER_FAST, which is what
+** 'dv_numeric_touched_fast' reports.
+**
+** Sticky and one-way: the flag is the audit trail's answer to "was this
+** run reproducible", and a call that could clear it would answer that
+** wrongly. No backend calls this yet -- the portable kernels are all
+** reproducible tier by construction -- so the only caller today is the
+** test hook in dnumeric.c, which exists so the wiring from a kernel to
+** the host's question is proved before there is a kernel to prove it
+** with. Implemented in dv.c, for the same reason as the two above.
+*/
+LUA_API void diluvium_numeric_touched (lua_State *L);
+
+
+/*
+** The adopted-memory seam, the same shape and here for the same reason.
+**
+** A buffer 'diluvium_array_adopt' takes never passes through the
+** instance's allocator, so nothing has counted it: without these,
+** 'dv_memory' reports an instance holding a gigabyte column as holding
+** a hundred-byte header, and dv.h's "the adopted bytes count against the
+** instance's memory limit from here on" is false on the one path it was
+** written for.
+**
+** They are a pair and the pair must net to zero. Charging without the
+** matching credit walks the counter upward forever; crediting without
+** the charge walks it downward, which is the drift that made a memory
+** budget evadable once before (see 'dv_alloc' in dv.c). So both calls
+** live beside the 'owns' field they mirror -- the charge where
+** 'DVN_OWN_EXTERN' is set, the credit where '__gc' acts on it -- and
+** nowhere else, which is what makes half of the pair impossible to
+** write. With no instance behind the state both do nothing.
+**
+** Neither allocates. Both reach the instance through
+** 'diluvium_budget_open', whose registry key is a string the registry
+** itself keeps alive, so interning it after 'dv_new' finds it rather
+** than building it. That matters because the charge runs while a host
+** is handing over a buffer and the credit runs inside a finaliser --
+** two places where raising is either an abort or a leak.
+*/
+LUA_API void diluvium_memory_charge (lua_State *L, uint64_t n);
+LUA_API void diluvium_memory_credit (lua_State *L, uint64_t n);
+
+
+#endif

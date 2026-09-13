@@ -21,6 +21,9 @@
 #include "djson.h"
 #include "dregex.h"
 #include "dtime.h"
+#include "dnumeric.h"
+#include "dlibm.h"
+#include "ddv.h"
 #include "dhostlib.h"
 
 
@@ -46,6 +49,16 @@ static const luaL_Reg diluvium_libs[] = {
   {"json", luaopen_djson},
   {"regex", luaopen_dregex},
   {"time", luaopen_dtime},
+  /* The desugars' runtime half. Not gated on any feature: the syntax it
+     serves is in every build, so the helper has to be too. */
+  {"dv", luaopen_ddv},
+#if defined(DV_NUMERIC)
+  /* Only where the feature is built. A program that needs arrays on a
+     build without them finds no 'array' global, which is the same shape
+     of failure the numeric spec's section 2 asks for: by name, at the
+     point of use, rather than a wrong answer. */
+  {"array", luaopen_dnumeric},
+#endif
   {"host", luaopen_dhostlib},
   {NULL, NULL}
 };
@@ -81,6 +94,21 @@ LUA_API void diluvium_openlibs (lua_State *L) {
   lua_pushinteger(L, LUAC_FORMAT);
   lua_setfield(L, -2, "bytecode_format");
   lua_setglobal(L, "_DILUVIUM");
+
+  /*
+  ** The embedded libm goes on last, over 'math' as the standard library
+  ** left it. On-top by construction: 'lmathlib.c' is untouched and stays
+  ** out of the core patch series, which is what the numeric spec's stage
+  ** 1 asks for. Without the 'numeric' feature this is a no-op and 'math'
+  ** keeps the platform's functions.
+  **
+  ** Guarded on 'math' being there at all: a host that opened a narrower
+  ** set of standard libraries has no table to install into, and adding
+  ** one would be this file inventing a library.
+  */
+  if (lua_getglobal(L, "math") == LUA_TTABLE)
+    diluvium_libm_install(L, -1);
+  lua_pop(L, 1);
 }
 
 

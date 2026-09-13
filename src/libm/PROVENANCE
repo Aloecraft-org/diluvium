@@ -1,0 +1,12 @@
+openlibm, https://github.com/JuliaMath/openlibm
+commit 5fe399749f9276eaa0b8403e507470da05cbbb3f
+
+The files here are src/*.c from that commit, changed only by
+script/vendor_libm.sh: the four upstream includes replaced by
+dvlibm_private.h, every exported symbol prefixed 'dv_', OLM_DLLEXPORT
+removed, and the trailing long-double weak-reference blocks removed. No
+constant, branch or algorithm is altered. Re-run that script to update.
+
+LICENSE.md is upstream's, verbatim. The vendored files are BSD, ISC, MIT
+and public domain; openlibm's LGPL parts are its test files, which are
+not vendored.

@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Diluvium — a small language that runs anywhere</title>
-<meta name="description" content="Diluvium is a small, sealed, portable language. DRT is the runtime around it, and dollup installs the programs. Modern syntax, one portable bytecode, under 1 MiB — and running in your browser right now.">
+<meta name="description" content="Diluvium is a small, sealed, portable language. Classes, lambdas, destructuring, regular expressions and string interpolation, compiled to one portable bytecode under 1 MiB — with float results that are bit-identical on every target. DRT is the runtime around it, dollup installs the programs, and it is running in your browser right now.">
 <meta property="og:title" content="Diluvium — a small language that runs anywhere">
-<meta property="og:description" content="A small, sealed, portable language and the runtime around it. Try it in the browser, no install.">
+<meta property="og:description" content="A small, sealed, portable language and the runtime around it. Modern syntax, one bytecode, and the same bits on every target. Try it in the browser, no install.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://diluvium.aloecraft.org/">
 <link rel="icon" href="favicon.ico">
@@ -69,12 +69,13 @@ try {
       <h1>Small language. Sealed runtime. Runs anywhere.</h1>
       <p class="lede">
         Diluvium is a general-purpose language and the runtime underneath it.
-        Modern syntax — string interpolation, regular expressions,
-        <code>switch</code>, <code>defer</code>, safe navigation — compiled to
-        <strong>one portable bytecode</strong> that behaves the same in a browser
-        tab, on a server, or on hardware with a few hundred kilobytes to spare.
-        The whole runtime is under a megabyte, and a program can reach nothing
-        you did not hand it.
+        Modern syntax — classes, lambdas, destructuring, regular expressions,
+        string interpolation, <code>switch</code>, <code>defer</code> — compiled
+        to <strong>one portable bytecode</strong> that behaves the same in a
+        browser tab, on a server, or on hardware with a few hundred kilobytes to
+        spare. The whole runtime is under a megabyte, a program can reach nothing
+        you did not hand it, and a float computed here is bit-for-bit the float
+        computed there.
       </p>
       <p class="lede-note">
         The syntax is a compatible superset of Lua 5.5, so existing Lua code runs
@@ -98,7 +99,7 @@ try {
     <a class="tile current" href="#language">
       <span class="tile-name">Diluvium</span>
       <span class="tile-what">The language and its core: compiler, portable bytecode, the
-        instance ABI. Under a megabyte, and running in this page.</span>
+        instance ABI, the numeric kernels. Under a megabyte, and running in this page.</span>
       <span class="tile-where">this page</span>
     </a>
     <a class="tile" href="#drt">
@@ -138,7 +139,9 @@ try {
     <h2>The language</h2>
     <p class="section-lede">
       Small, plain, and readable on sight. Everything below compiles straight to
-      bytecode and none of it takes a reserved word, so existing code keeps
+      bytecode, and <strong>none of it takes a reserved word</strong> — every
+      form here is a name you can still use as a name, checked against a
+      pristine Lua 5.5 for all twenty-five of them. So existing code keeps
       working and adoption is as gradual as you want it.
     </p>
 
@@ -232,6 +235,107 @@ port  ??= 8080</code></pre>
       </article>
 
       <article class="feature">
+        <h3>Classes</h3>
+        <pre><code class="language-lua">class Account
+    balance = 0        -- a default, per instance
+
+    function new(owner)
+        @owner = owner -- '@x' is 'self.x'
+    end
+
+    function deposit(n)
+        @balance += n
+        return self
+    end
+end
+
+class Savings extends Account
+    function deposit(n) = super.deposit(n * 1.01)
+end</code></pre>
+        <p>The desugar is plain metatables, so a class <em>is</em> a table and
+        an instance's metatable is its class. Nothing new entered the object
+        model — <code>getmetatable</code>, <code>__tostring</code> and the rest
+        behave exactly as they always did.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Functions, shorter</h3>
+        <pre><code class="language-lua">-- a default, evaluated per call
+local function connect(host, port = 8080)
+    return host .. ":" .. port
+end
+
+-- an expression body: no 'return', no 'end'
+local function area(w, h) = w * h
+
+-- a lambda, where a function is an argument
+table.sort(rows, |a, b| a.n &lt; b.n)</code></pre>
+        <p>A lambda's body is one expression, so <code>|x| x | y</code> is a
+        lambda returning the bitwise or — the <code>|</code> inside the body is
+        the operator it always was.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Destructuring &amp; spread</h3>
+        <pre><code class="language-lua">local {host, port} = cfg
+local [first, second] = list
+
+for _, row in ipairs(rows) do
+    local {name, count} = row
+end
+
+local args = {2, 3, 4}
+print(...args)   -- the whole list, as arguments</code></pre>
+        <p>A name that is not there is <code>nil</code>, not an error — the same
+        rule indexing a table already follows. An empty pattern is refused,
+        because it can only be a typo.</p>
+      </article>
+
+      <article class="feature">
+        <h3><code>if</code> and <code>switch</code>, as expressions</h3>
+        <pre><code class="language-lua">local label = if n &lt; 0 then "neg" else "pos"
+
+local kind = switch code
+    case 200, 204: "ok"
+    case 301, 302: "redirect"
+    else "other"
+
+print($"{code} is {kind}")</code></pre>
+        <p>The expression forms take <code>:</code> and require an
+        <code>else</code>; the statement forms take <code>then</code> and allow
+        a <code>default</code>. Two spellings because an expression must always
+        produce a value and a statement need not.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Slicing</h3>
+        <pre><code class="language-lua">local rest = list[2:]     -- from 2 to the end
+local mid  = list[2:4]
+local tail = list[-2:]    -- counts back
+
+local word = text[7:]     -- strings too</code></pre>
+        <p>Either end may be left out, and a negative index counts from the
+        end. On a string it slices characters; on a table it makes a new table,
+        so the original is untouched.</p>
+      </article>
+
+      <article class="feature">
+        <h3>Small things that add up</h3>
+        <pre><code class="language-lua">const RATE = 0.05     -- the binding, not the value
+
+local big  = 1_000_000
+local mask = 0b1010_0001
+
+for _, row in ipairs(rows) do
+    if row.skip then continue end
+end
+
+export function fact(n) = if n &lt;= 1 then 1 else n * fact(n - 1)</code></pre>
+        <p><code>const</code> freezes the name, not what it points at — a
+        <code>const</code> table is still a table you can write to.</p>
+      </article>
+
+      <article class="feature">
         <h3>Secure functions</h3>
         <pre><code class="language-lua">~function check()
     local key = "not-in-the-clear"
@@ -262,7 +366,8 @@ end</code></pre>
         semantics behind it. The same file runs under WebAssembly in this page,
         on x86_64 and ARM64 natively, and on hardware smaller than either.
         Natively it is one static binary under a megabyte, with nothing to
-        install alongside it.</p>
+        install alongside it — typed numeric arrays, regular expressions and
+        the transforms included.</p>
       </article>
 
       <article class="feature">
@@ -272,6 +377,18 @@ end</code></pre>
         in the runtime to call. Everything it can touch is handed in from
         outside, nothing can pass on more than it was given, and the trusted
         base enforcing that is small enough to read end to end.</p>
+      </article>
+
+      <article class="feature">
+        <h3>The same bits, every target</h3>
+        <p>A float computed here is bit-for-bit the float computed there. Not a
+        promise about a platform — a property the build enforces: a canonical
+        reduction order, a total order with NaN last, and a vendored libm, so a
+        sum, a sort or a Fourier transform does not depend on which CPU or
+        which compiler ran it. CI diffs 102 lines of raw IEEE bit patterns
+        across x86-64 and aarch64 on every change, and the same corpus still
+        comes out <em>different</em> under <code>-ffast-math</code>, which is
+        how we know it can still see a divergence.</p>
       </article>
 
       <article class="feature">
@@ -500,7 +617,8 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
       <a class="card" href="/lab/">
         <h3>Lab <span aria-hidden="true">→</span></h3>
         <p>Notebooks in the browser. Cells and a console over one live kernel,
-        stored as <code>.ipynb</code>, running whichever release you pick.</p>
+        stored as <code>.ipynb</code>, running whichever release you pick from
+        the mirror.</p>
       </a>
       <a class="card" href="https://software.aloecraft.org/releases/">
         <h3>Releases <span aria-hidden="true">→</span></h3>
@@ -510,11 +628,11 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
       </a>
       <a class="card" href="https://github.com/Aloecraft-org/diluvium/blob/main/doc/Guide.md" rel="noopener">
         <h3>Programmer's guide <span aria-hidden="true">→</span></h3>
-        <p>What the language adds, the <code>msgpack</code>, <code>queue</code>,
-        <code>endpoint</code>, <code>bytes</code>, <code>json</code>,
-        <code>regex</code> and <code>time</code> libraries, embedding an
-        instance from C, and running a swarm. The Lua 5.5 manual covers the
-        rest.</p>
+        <p>What the language adds, the <code>array</code>, <code>msgpack</code>,
+        <code>queue</code>, <code>endpoint</code>, <code>bytes</code>,
+        <code>json</code>, <code>regex</code> and <code>time</code> libraries,
+        embedding an instance from C, and running a swarm. The Lua 5.5 manual
+        covers the rest.</p>
       </a>
       <a class="card" href="https://software.aloecraft.org/">
         <h3>Aloecraft software <span aria-hidden="true">→</span></h3>

@@ -38,9 +38,9 @@ FORK_POINT=7579fc9d7ed90240487251dfb69168f8e64e9294
 # Core files that are allowed to differ from upstream, one per line:
 #   <file>  <reason>
 CORE_PATCH_ALLOWLIST='
-llex.c      f-strings ($"..."), regex literals (`...`), ?? token, $ must introduce a string, contextual keyword names
+llex.c      f-strings ($"..."), regex literals (`...`), ?? token, $ must introduce a string, contextual keyword names, numeral separators and 0b literals
 llex.h      TK_2Q/TK_FPART/TK_REGEX tokens, fstring_del/encrypted_flag, contextual keyword names
-lparser.c   ~function forms, f-string codegen, regex literal codegen, switch, defer, with, compound assignment, ?? and ?.
+lparser.c   ~function forms, f-string codegen, regex literal codegen, switch, defer, with, compound assignment, ?? and ?., continue, const, default parameters, expression-bodied functions, spread
 lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_skipifnil for ?.
 lcode.h     OPR_2Q enum entry, luaK_skipifnil export
 lobject.h   is_encrypted flag on Proto
@@ -53,7 +53,7 @@ ltm.c       same table type-test for the vararg-table path in luaT_getvarargs
 luaconf.h   fixed string hash seed (deterministic pairs order)
 lua.h       Diluvium version/branding strings
 lua.c       Diluvium branding; REPL input handling moved to drepl.c; --task delegates to dtask.c
-onelua.c    include analyze.c; rename ltests.c resetCI (amalgamation clash)
+onelua.c    include analyze.c and the d*.c runtime files; rename ltests.c resetCI (amalgamation clash)
 '
 
 usage() { sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }

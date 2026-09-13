@@ -58,10 +58,51 @@ extern "C" {
 ** snapshot format. The three move together on purpose: a host that can call
 ** every function correctly and still misdecode a message is worse off than one
 ** that refused to start.
+**
+** 2 is the numeric round: 'dv_features', 'dv_build', 'dv_array_adopt' and the
+** 'dv_numeric_*' block below are new, so a wrapper built against 1 does not
+** know the surface it is holding. A build13 snapshot does not restore into a
+** version-2 runtime and a version-1 host is refused by 'dv_new'; both are the
+** intended consequence rather than collateral, which is what this number is
+** for.
 */
-#define DV_ABI_VERSION	1u
+#define DV_ABI_VERSION	2u
 
 uint32_t dv_abi_version (void);
+
+
+/*
+** The build number, the N in 5.5.1_buildN.
+**
+** Kept here rather than passed in by each build system because there are four
+** of them -- the Makefile, src/makefile, diluvium-sys's build.rs and the
+** wasi-sdk lines -- and a define that only three of them set is a field that
+** lies in the fourth. 'script/changelog.py consistency' fails when this and
+** VERSION disagree, which is the same guard the other version numbers in this
+** tree already have.
+*/
+#define DV_BUILD	13
+
+int dv_build (void);
+
+
+/*
+** Newline-separated feature names this build carries:
+** "regex\njson\nmsgpack\nsnapshot", plus "\nnumeric" when the numeric
+** feature is compiled in. Never NULL, never empty, no trailing newline.
+** Stable for the life of the process: it is a compile-time string, so a host
+** may hold the pointer.
+**
+** The order is fixed -- the unconditional set first, in the order above, then
+** the gated ones -- so a caller may compare two builds' strings directly
+** rather than parsing and sorting first. A new name is appended to its group,
+** never inserted.
+**
+** This is a *build* fact, not a capability grant. A feature named here is
+** compiled in; whether a given instance may reach it is what the flags in
+** 'dv_config' and the capability layer decide.
+*/
+const char *dv_features (void);
 
 
 /* ---------------------------------------------------------------- status -- */
@@ -487,6 +528,149 @@ dv_status dv_memory (dv_instance *inst, uint64_t *bytes_now,
 
 /* Did this instance stop because it ran out of budget? */
 int dv_exceeded (dv_instance *inst);
+
+
+/* ---------------------------------------------------------------- numeric -- */
+
+/*
+** The typed-array lane (doc/Plan-2026-09.md 3.1).
+**
+** Everything here is declared unconditionally and linked in every build. What
+** the 'numeric' feature (C define 'DV_NUMERIC') decides is what the functions
+** *do*, not whether they exist -- a host must be able to link one binary and
+** ask, rather than fail to link and guess. 'dv_features' is the ask.
+**
+** A build without 'DV_NUMERIC' is byte-identical to a build from before this
+** section existed, apart from these few functions: the feature carries its own
+** compiler flags (see 3.5 and the Makefile's NUMERIC_CFLAGS), and with the
+** feature off not one of them is passed.
+*/
+
+/*
+** What a kernel promises about its result.
+**
+**   DV_TIER_EXACT          integer or fixed-point; one answer, no rounding.
+**   DV_TIER_REPRODUCIBLE   floating point, bit-identical on every target this
+**                          runtime builds for. The portable kernels are all
+**                          this tier by construction.
+**   DV_TIER_FAST           floating point, whatever the machine is quickest
+**                          at. Reproducible across runs on one machine, not
+**                          across machines.
+**
+** Ordered from strongest to weakest, so 'tier <= max_tier' is the admission
+** test and the enum values are load-bearing.
+*/
+typedef enum dv_tier {
+  DV_TIER_EXACT = 0,
+  DV_TIER_REPRODUCIBLE = 1,
+  DV_TIER_FAST = 2
+} dv_tier;
+
+/*
+** The kernel backend vtable.
+**
+** Declared now so its shape is fixed before anything depends on it; only the
+** portable implementation exists this round, and it is not reachable through
+** here yet. Function pointers are added as kernels land, each paired with the
+** 'dv_tier' it answers at.
+*/
+typedef struct dv_numeric_backend {
+  int abi;              /* 1 */
+  const char *name;     /* "portable" */
+} dv_numeric_backend;
+
+/*
+** Element type of an adopted buffer.
+*/
+#define DV_DTYPE_F64	0
+#define DV_DTYPE_I64	1
+#define DV_DTYPE_U8	2
+
+/*
+** Adopt a host-owned buffer as a value on the instance's stack, without
+** copying it.
+**
+** 'bytes' must hold exactly 'len' bytes and must have been allocated with the
+** instance's allocator -- which is 'realloc'/'free' underneath, so an ordinary
+** 'malloc(len)' is what a host writes. 'len' must be a whole number of
+** elements for 'dtype'. On success this call takes ownership: do not free it,
+** and do not read it afterwards.
+**
+** Returns 0 when the buffer was adopted as an 'array', and 1 when it was
+** copied into a Lua string instead -- which is what a build without
+** 'DV_NUMERIC' does, and what every build does until the 'array' type itself
+** lands. Either way a value is pushed and the buffer is released, so a caller
+** written against this today keeps working unchanged; the return value is how
+** it learns which shape the guest is about to see.
+**
+** Returns 1 with *nothing* pushed in two cases, and both leave a message in
+** 'dv_last_error', which is how they are told from the ordinary copy: after
+** this call, 1 with an error means nothing was pushed and 1 without one means
+** a string was. Nothing else here sets a message, so the test is exact.
+**
+** The two cases are the arguments and the handover. Invalid arguments -- a
+** NULL instance, an unknown 'dtype', a 'len' that is not a whole number of
+** elements, or a NULL 'bytes' with a non-zero 'len' -- mean nothing happened
+** at all and the caller still frees 'bytes'. Good arguments and a handover
+** that could not be made -- in practice the instance had no memory left for
+** the array's header or for the string -- mean 'bytes' has been released like
+** any other accepted buffer. So the caller's rule is one sentence: if the
+** arguments were good, the buffer is gone. A host that checks its own
+** arguments only ever sees the second.
+**
+** The second case is a refusal and not a crash on purpose. Pushing a value can
+** fail, and this call is made from host code that is not running under any
+** protection of the runtime's, so the failure has to be turned into a return
+** here or it takes the process with it.
+**
+** Call this while the instance is parked -- between 'dv_run' or 'dv_resume'
+** returning and the next 'dv_resume'. That is the window a hostcall reply is
+** assembled in, and the only one in which the guest's stack is not being
+** written by the interpreter.
+**
+** The adopted bytes count against the instance's memory limit from here on,
+** the same as anything else it holds, so a host handing a large column to a
+** budgeted instance can see the cost in 'dv_memory'. They are charged when
+** ownership transfers and credited when the guest's last reference to the
+** column is collected, exactly like memory the instance allocated itself.
+**
+** A column larger than what is left of the budget is still taken -- the limit
+** is enforced on allocations, and this is not one -- and the instance is then
+** over its limit, so the next thing the program allocates fails and
+** 'dv_exceeded' says so. That is the same shape as any other way of going over
+** budget, and 'dv_memory' after the call is how a host that cares finds out
+** before its guest does.
+*/
+int dv_array_adopt (dv_instance *inst, int dtype, size_t len, void *bytes);
+
+/*
+** Per-instance numeric bounds.
+**
+** 'max_elements' caps how many elements one kernel call may process, 0 for no
+** limit. 'max_tier' is the weakest tier the instance may reach: an instance
+** set to DV_TIER_REPRODUCIBLE cannot be routed to a fast backend even where
+** one exists.
+**
+** Unlike 'dv_set_budget' these take effect whenever they are set and return
+** nothing, because a supervisor attenuating a child at spawn is the case they
+** exist for and it has nothing to do on refusal. The last value set is the one
+** the next kernel call reads.
+**
+** Nothing enforces either bound yet: no kernel exists to charge against them.
+** They store and read back correctly now so that a host can be written and
+** tested against the real surface rather than a placeholder.
+*/
+void dv_numeric_set_max_elements (dv_instance *inst, uint64_t n);
+void dv_numeric_set_max_tier (dv_instance *inst, dv_tier t);
+
+/*
+** Did anything in this instance run at DV_TIER_FAST?
+**
+** Sticky, and never cleared: it is the audit trail's answer to "is this run
+** reproducible", and a flag that could be cleared would answer it wrongly.
+** Always 0 while no fast backend exists.
+*/
+int dv_numeric_touched_fast (dv_instance *inst);
 
 
 /*

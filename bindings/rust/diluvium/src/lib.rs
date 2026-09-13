@@ -317,9 +317,8 @@ impl Config {
     /// the payload did not survive reading.
     pub fn restore(self, snapshot: &[u8], host: Option<&str>) -> Result<Instance, Error> {
         let inst = Instance::fresh(self)?;
-        let chost = host.map(|h| {
-            CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap())
-        });
+        let chost =
+            host.map(|h| CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap()));
         let st = unsafe {
             sys::dv_restore(
                 inst.raw,
@@ -653,6 +652,115 @@ impl Instance {
         unsafe { sys::dv_exceeded(self.raw) != 0 }
     }
 
+    /// Cap how many elements one numeric kernel call may process; 0 for no
+    /// limit.
+    ///
+    /// Attenuating only, by convention rather than by enforcement here: a
+    /// supervisor narrows a child at spawn and never widens it, the same rule
+    /// budgets follow. Nothing enforces the bound yet -- no kernel exists to
+    /// charge against it -- so this stores the value a host will be held to.
+    pub fn set_numeric_max_elements(&mut self, n: u64) {
+        unsafe { sys::dv_numeric_set_max_elements(self.raw, n) }
+    }
+
+    /// The weakest result tier this instance may reach.
+    ///
+    /// An instance set to [`Tier::Reproducible`] cannot be routed to a fast
+    /// backend even where one exists. The default is [`Tier::Fast`]: open, and
+    /// narrowed by whoever spawned it.
+    pub fn set_numeric_max_tier(&mut self, tier: Tier) {
+        unsafe { sys::dv_numeric_set_max_tier(self.raw, tier.into()) }
+    }
+
+    /// Did anything in this instance run at [`Tier::Fast`]?
+    ///
+    /// Sticky and never cleared: it is the audit trail's answer to "was this
+    /// run reproducible", and a flag that could be cleared would answer it
+    /// wrongly. Always false while no fast backend exists.
+    pub fn numeric_touched_fast(&self) -> bool {
+        unsafe { sys::dv_numeric_touched_fast(self.raw) != 0 }
+    }
+
+    /// Hand a column of host-owned values to the guest, without copying it
+    /// through a message.
+    ///
+    /// This is the receiving half of a hostcall reply's blob lane: a host
+    /// that has read, say, a Parquet column has the bytes already, and
+    /// encoding them as a msgpack value would copy every one of them twice
+    /// to say something the guest can be handed directly.
+    ///
+    /// Returns what the guest is about to see. [`Adopted::Array`] means it
+    /// became an `array` and the bytes were taken, not copied.
+    /// [`Adopted::StringCopy`] means this build has no `numeric` feature, so
+    /// the values arrived as a Lua string of their raw bytes -- which is the
+    /// documented behaviour rather than a failure, and is what every build
+    /// does when the feature is off. A caller written against this today
+    /// keeps working when the feature is turned on; the return value is how
+    /// it learns which shape the guest got.
+    ///
+    /// Call it while the instance is **parked** -- between a [`Step`] and the
+    /// next resume. That is the window a reply is assembled in, and the only
+    /// one in which the guest's stack is not being written by the
+    /// interpreter. Calling it elsewhere is the core's error to report, the
+    /// same as [`Instance::snapshot`].
+    ///
+    /// The values are copied once, here, into a buffer allocated the way
+    /// `dv.h` requires; the runtime then owns it. That copy is unavoidable:
+    /// a Rust `Vec` comes from Rust's allocator and the runtime frees with
+    /// `free`. What is avoided is the second and third copy an encoded
+    /// message would have cost.
+    ///
+    /// # A large column and a budgeted instance
+    ///
+    /// The bytes are the instance's from the moment it takes them, so
+    /// [`Instance::memory`] after this call includes the whole column and a
+    /// budget bounds what a host can hand over. Handing over more than the
+    /// budget has left is not refused here -- the limit is enforced on
+    /// allocations and this is not one -- so the instance is simply over its
+    /// limit afterwards and the next thing the program allocates fails. Read
+    /// `memory()` after adopting a column whose size you did not choose.
+    ///
+    /// A handover that cannot be made at all -- no room even for the array's
+    /// header, or for the string on the copy path -- is an [`Error::Program`]
+    /// carrying the core's message. The buffer is released either way.
+    pub fn adopt<T: ArrayElement>(&mut self, values: &[T]) -> Result<Adopted, Error> {
+        let len = std::mem::size_of_val(values);
+        // Empty is not an error and needs no allocation: `dv.h` refuses a
+        // null pointer only when `len` is non-zero.
+        let bytes = if len == 0 {
+            std::ptr::null_mut()
+        } else {
+            let p = unsafe { sys::malloc(len) };
+            if p.is_null() {
+                return Err(Error::OutOfMemory);
+            }
+            // `values` is a valid slice of `len` bytes and `p` is a fresh
+            // allocation of exactly that size, so the two cannot overlap.
+            unsafe {
+                std::ptr::copy_nonoverlapping(values.as_ptr() as *const u8, p as *mut u8, len)
+            };
+            p
+        };
+        // Every argument was checked on the way in -- the dtype comes from
+        // the sealed trait, `len` is a whole number of elements by
+        // construction, and `bytes` is null only when `len` is zero -- so the
+        // return that means "invalid argument, nothing pushed, you still own
+        // the buffer" is unreachable from here and `bytes` is never ours again
+        // whatever comes back. What is left is 0 adopted, 1 copied to a
+        // string, and 1 with a message, which is the handover having failed.
+        let rc = unsafe { sys::dv_array_adopt(self.raw, T::DTYPE, len, bytes) };
+        if rc == 0 {
+            return Ok(Adopted::Array);
+        }
+        // `dv.h`: after this call, a message means nothing was pushed. Asked
+        // of the raw pointer rather than of `last_error`, which substitutes a
+        // string of its own when there is none.
+        if !unsafe { sys::dv_last_error(self.raw) }.is_null() {
+            return Err(Error::Program(self.last_error()));
+        }
+        Ok(Adopted::StringCopy)
+    }
+
     /// Hibernate: write the instance's whole state -- the parked program, its
     /// call chain, its reachable values, and every queue with its contents --
     /// into bytes that [`Config::restore`] can wake.
@@ -663,9 +771,8 @@ impl Instance {
     /// snapshot with no stamp restores anywhere, a stamped one only under the
     /// same string.
     pub fn snapshot(&mut self, host: Option<&str>) -> Result<Vec<u8>, Error> {
-        let chost = host.map(|h| {
-            CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap())
-        });
+        let chost =
+            host.map(|h| CString::new(h).unwrap_or_else(|_| CString::new("(host)").unwrap()));
         let hostp = chost.as_ref().map_or(std::ptr::null(), |c| c.as_ptr());
         let mut len: usize = 0;
         let st = unsafe { sys::dv_snapshot(self.raw, hostp, std::ptr::null_mut(), 0, &mut len) };
@@ -675,7 +782,8 @@ impl Instance {
             return Err(Error::Program(self.last_error()));
         }
         let mut buf = vec![0u8; len];
-        let st = unsafe { sys::dv_snapshot(self.raw, hostp, buf.as_mut_ptr(), buf.len(), &mut len) };
+        let st =
+            unsafe { sys::dv_snapshot(self.raw, hostp, buf.as_mut_ptr(), buf.len(), &mut len) };
         if st != sys::DV_OK {
             return Err(Error::Program(self.last_error()));
         }
@@ -792,6 +900,91 @@ pub fn abi_version() -> u32 {
 /// The ABI version the linked library reports.
 pub fn library_abi_version() -> u32 {
     unsafe { sys::dv_abi_version() }
+}
+
+/// What a numeric kernel promises about its result.
+///
+/// What the guest received from [`Instance::adopt`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Adopted {
+    /// An `array`, holding the host's buffer. Nothing was copied into the
+    /// guest's heap.
+    Array,
+    /// A Lua string of the raw bytes, because this build carries no `numeric`
+    /// feature. The documented fallback, not a failure.
+    StringCopy,
+}
+
+mod sealed {
+    pub trait Sealed {}
+    impl Sealed for f64 {}
+    impl Sealed for i64 {}
+    impl Sealed for u8 {}
+}
+
+/// An element type [`Instance::adopt`] can hand over.
+///
+/// Sealed: the three dtypes are the ones `dv.h` documents for
+/// `dv_array_adopt`, and a fourth implementation here would name a dtype the
+/// core would refuse. `c128` is a guest-side dtype and is deliberately not
+/// among them -- complex data crosses as pairs of `f64`.
+pub trait ArrayElement: Copy + sealed::Sealed {
+    /// The `DV_DTYPE_*` value for this type.
+    const DTYPE: std::os::raw::c_int;
+}
+
+impl ArrayElement for f64 {
+    const DTYPE: std::os::raw::c_int = sys::DV_DTYPE_F64;
+}
+impl ArrayElement for i64 {
+    const DTYPE: std::os::raw::c_int = sys::DV_DTYPE_I64;
+}
+impl ArrayElement for u8 {
+    const DTYPE: std::os::raw::c_int = sys::DV_DTYPE_U8;
+}
+
+/// Ordered strongest to weakest, so `tier <= max_tier` is the admission test
+/// and the ordering derived here is the one the C enum has.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Tier {
+    /// Integer or fixed-point: one answer, no rounding.
+    Exact,
+    /// Floating point, bit-identical on every target this runtime builds for.
+    Reproducible,
+    /// Floating point, whatever the machine is quickest at. Reproducible
+    /// across runs on one machine, not across machines.
+    Fast,
+}
+
+impl From<Tier> for sys::dv_tier {
+    fn from(t: Tier) -> Self {
+        match t {
+            Tier::Exact => sys::dv_tier::DV_TIER_EXACT,
+            Tier::Reproducible => sys::dv_tier::DV_TIER_REPRODUCIBLE,
+            Tier::Fast => sys::dv_tier::DV_TIER_FAST,
+        }
+    }
+}
+
+/// The build number the linked library reports: the N in `5.5.1_buildN`.
+pub fn library_build() -> i32 {
+    unsafe { sys::dv_build() }
+}
+
+/// The feature names the linked library was compiled with.
+///
+/// A *build* fact, not a capability grant: a feature named here is compiled
+/// in, and whether a given instance may reach it is what [`Config`] and the
+/// capability layer decide. The order is fixed by the library, so two builds'
+/// lists compare directly.
+pub fn library_features() -> Vec<&'static str> {
+    // Safe: the library returns a non-NULL compile-time string that is stable
+    // for the life of the process, which is what makes 'static honest here.
+    let s = unsafe { std::ffi::CStr::from_ptr(sys::dv_features()) };
+    s.to_str()
+        .expect("the feature string is ASCII")
+        .split('\n')
+        .collect()
 }
 
 /// Set a callback for when the program pushes to a queue it exported, so a host
