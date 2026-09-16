@@ -56,9 +56,9 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
-  - version: "0.15.0"
-    tag: v0.15.0
-    date: 2026-09-12
+  - version: "0.15.1"
+    tag: v0.15.1
+    date: 2026-09-16
     status: released
     stable: true
     mirror: true
@@ -72,7 +72,7 @@ releases:
       say. Fourteen builds of `5.5.1` were fourteen releases with something to
       report and no free digit to report it in; `5.5.1_build12p1`, a patch on
       a build, is where that finally showed. This release takes Diluvium's own
-      number -- `0.15.0`, the fourteen builds carried forward as fourteen
+      number -- `0.15`, the fourteen builds carried forward as fourteen
       minors -- and `build14` stays the last `_build` release, unrewritten.
 
       The Lua release Diluvium embeds and the bytecode format it speaks are
@@ -92,7 +92,7 @@ releases:
         so `continue = 1` and `t.continue` keep working.
       - |
         **`_DILUVIUM`, a version global.** A table the runtime installs:
-        `version` is Diluvium's own (`0.15.0`), `lua` the Lua base it forks
+        `version` is Diluvium's own (`0.15.1`), `lua` the Lua base it forks
         (`5.5.1`), and `bytecode_format` the `LUAC_FORMAT` byte. The split
         between `version` and `lua` is the one this release draws in the
         version scheme -- what is Diluvium's, and what is recorded about Lua.
@@ -131,12 +131,16 @@ releases:
         `diluvium_browser.wasm` above replaces it.
     upgrading: |
       No format movement: `LUAC_FORMAT` stays `0x46`, `DV_ABI_VERSION` stands,
-      and a snapshot crosses build14 and 0.15.0 in both directions. What
-      changes is spelling. The release tag is `v0.15.0`, not `v5.5.1_build15`;
-      `_DILUVIUM.version` reads `0.15.0`; and the Lua base is `_DILUVIUM.lua`
+      and a snapshot crosses build14 and 0.15.1 in both directions. What
+      changes is spelling. The release tag is `v0.15.1`, not `v5.5.1_build15`;
+      `_DILUVIUM.version` reads `0.15.1`; and the Lua base is `_DILUVIUM.lua`
       rather than welded into the one version string. A consumer that parsed
       `5.5.1_buildNN` off a Diluvium tag keeps working for the releases already
-      published and needs a branch for `0.15.0`-shaped tags going forward.
+      published and needs a branch for `0.15.x`-shaped tags going forward.
+
+      (`v0.15.0` was tagged first, for the same tree; a stuck tag ref meant CI
+      could not cut a release for it, so `0.15.1` is the published cut. The
+      `v0.15.0` tag carries no release.)
   - version: "5.5.1_build14"
     tag: v5.5.1_build14
     date: 2026-09-12
