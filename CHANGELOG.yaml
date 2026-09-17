@@ -58,10 +58,11 @@ repo: Aloecraft-org/diluvium
 releases:
   - version: "0.16.0"
     tag: v0.16.0
-    date: null
-    status: unreleased
-    stable: false
-    mirror: false
+    date: 2026-09-17
+    status: released
+    stable: true
+    mirror: true
+    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
@@ -196,6 +197,14 @@ releases:
         it against. Retire it, feed it the version string, or give the
         counter a source of truth -- an open decision, recorded in
         `doc/Plan-2026-09.md`.
+      - |
+        **An adopted column never reaches the guest.** `dv_array_adopt`
+        pushes the value onto the parked thread's stack, and the next
+        `dv_resume` drops it: the call is staged for the hostcall reply lane
+        (plan 3.1), and that wiring does not exist yet. Harmless -- nothing
+        reads the slot -- but a host that adopts a buffer today has handed it
+        over to be collected, not delivered. Owner: whoever lands the reply
+        path.
     upgrading: |
       **Nothing to do for a program.** Every new form is syntax that was a
       syntax error before, no existing construct changed meaning, and the
@@ -218,7 +227,6 @@ releases:
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
