@@ -286,6 +286,7 @@ struct lua_State {
   CommonHeader;
   lu_byte allowhook;
   TStatus status;
+  unsigned int keyid;  /* identity as a table key; see ltable.c */
   StkIdRel top;  /* first free slot in the stack */
   struct global_State *l_G;
   CallInfo *ci;  /* call info for current function */
@@ -335,6 +336,7 @@ typedef struct global_State {
   TValue l_registry;
   TValue nilvalue;  /* a nil value */
   unsigned int seed;  /* randomized seed for hashes */
+  unsigned int keyidcount;  /* last table-key identity issued; see ltable.c */
   lu_byte gcparams[LUA_GCPN];
   lu_byte currentwhite;
   lu_byte gcstate;  /* state of garbage collector */

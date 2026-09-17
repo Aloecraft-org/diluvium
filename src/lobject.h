@@ -492,6 +492,7 @@ typedef union UValue {
 typedef struct Udata {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
+  unsigned int keyid;  /* identity as a table key; see ltable.c */
   size_t len;  /* number of bytes */
   struct Table *metatable;
   GCObject *gclist;
@@ -511,6 +512,7 @@ typedef struct Udata {
 typedef struct Udata0 {
   CommonHeader;
   unsigned short nuvalue;  /* number of user values */
+  unsigned int keyid;  /* identity as a table key; see ltable.c */
   size_t len;  /* number of bytes */
   struct Table *metatable;
   union {LUAI_MAXALIGN;} bindata;
@@ -696,7 +698,7 @@ typedef struct UpVal {
 
 
 #define ClosureHeader \
-	CommonHeader; lu_byte nupvalues; GCObject *gclist
+	CommonHeader; lu_byte nupvalues; unsigned int keyid; GCObject *gclist
 
 typedef struct CClosure {
   ClosureHeader;
@@ -780,6 +782,7 @@ typedef struct Table {
   lu_byte flags;  /* 1<<p means tagmethod(p) is not present */
   lu_byte lsizenode;  /* log2 of number of slots of 'node' array */
   unsigned int asize;  /* number of slots in 'array' array */
+  unsigned int keyid;  /* identity as a table key; see ltable.c */
   Value *array;  /* array part */
   Node *node;
   struct Table *metatable;

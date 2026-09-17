@@ -65,8 +65,9 @@ are small:
 
 Two things this runtime already has make it cheaper here than elsewhere. Coroutines are
 built in, so yield/resume exists and the scheduler is the only new machinery. And the
-string hash seed is fixed, so even `pairs()` order is deterministic — the scheduler does
-not rely on that, but it means actor code that iterates a table is not a replay hazard.
+string hash seed is fixed and object keys hash by a creation counter rather than by
+address, so even `pairs()` order is deterministic — the scheduler does not rely on
+that, but it means actor code that iterates a table is not a replay hazard.
 
 **The payoff that makes it worth the effort:** the analyzer's determinism verdict treats
 a host call as a source of nondeterminism, so anything that calls out is `indeterminate`.
