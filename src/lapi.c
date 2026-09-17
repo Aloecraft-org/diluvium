@@ -505,6 +505,28 @@ LUA_API const void *lua_topointer (lua_State *L, int idx) {
 }
 
 
+/*
+** Diluvium: the identity an object took when it was created -- what
+** ltable.c hashes it by and luaL_tolstring prints -- or 0 for a value
+** that has none: light userdata and light C functions, which carry no
+** header, and the non-collectable types. Unlike an address it is the
+** same on every run and every platform, and it is never reissued, so two
+** objects alive at different times cannot share one. See the note above
+** 'hashid' in ltable.c.
+*/
+LUA_API unsigned int lua_objectid (lua_State *L, int idx) {
+  const TValue *o = index2value(L, idx);
+  switch (ttypetag(o)) {
+    case LUA_VTABLE: return hvalue(o)->keyid;
+    case LUA_VLCL: return clLvalue(o)->keyid;
+    case LUA_VCCL: return clCvalue(o)->keyid;
+    case LUA_VUSERDATA: return uvalue(o)->keyid;
+    case LUA_VTHREAD: return thvalue(o)->keyid;
+    default: return 0;
+  }
+}
+
+
 
 /*
 ** push functions (C -> stack)

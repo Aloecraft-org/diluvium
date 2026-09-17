@@ -161,6 +161,16 @@ releases:
         does not know what it is holding and is refused rather than allowed to
         misread it.
       - |
+        **`tostring` prints an identity, not an address.** `table: #42`,
+        `function: #17`, `thread: #3` -- the same per-state creation counter
+        `pairs` hashes by -- rather than `table: 0x55e6db854690`, which was
+        a different string on every run and, on Windows, a different shape
+        (`%p` there prints no `0x`). A value with no identity to print keeps
+        its pointer: light userdata and light C functions, so `tostring(print)`
+        is as it was. A `__tostring` metamethod is untouched, and so is
+        `string.format("%p")`, which is the way to ask for the address on
+        purpose. Hosts read the same number through `lua_objectid`.
+      - |
         **A table is eight bytes larger on 64-bit targets** (`sizeof(Table)`
         56, from 48). The key identity is a four-byte field, and `Table` was
         the one type with no padding to put it in; closures, userdata and
@@ -183,7 +193,10 @@ releases:
       `0.15.1` on the same machine: a `^` between non-trivial floats can move
       by one ulp (it used to move by one ulp between machines instead), and a
       loop over a table keyed by objects now sees creation order -- a program
-      that depended on the old order was depending on the allocator.
+      that depended on the old order was depending on the allocator. And
+      `tostring` of a table, function or coroutine reads `table: #N` rather
+      than `table: 0x...`; a program that scraped the hex out of it was
+      scraping an address, and `string.format("%p")` still hands one over.
 
       **A host built against dv ABI 1 is refused by `dv_new`, and a snapshot
       taken by one will not restore here.** That is the ABI bump doing its

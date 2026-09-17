@@ -815,8 +815,13 @@ still ambient at run time, after the numeric round:
   computes one and then prints it or reads its bits sees its libm's choice.
   Where an answer must be the same everywhere -- ordering, grouping -- the
   NaN is canonicalised instead of carried.
-- **Addresses.** `tostring` of a table or function prints a pointer, so it
-  differs between runs as much as between platforms.
+- **Addresses of light userdata and C functions.** `tostring` of a table,
+  function, userdata or coroutine prints its creation identity (`table:
+  #42`, the same counter `pairs` hashes by), so it is one string on every
+  run; a light userdata or a light C function has no identity to print and
+  shows its pointer, which differs between runs as much as between
+  platforms. `string.format("%p")` asks for the address on purpose and
+  gets one.
 - **Light userdata and C functions as table keys.** They have no header to
   carry an identity, so `ltable.c` still hashes them by address and `pairs`
   order over them follows the allocator. A light userdata is a host pointer
@@ -835,8 +840,9 @@ still ambient at run time, after the numeric round:
 Settled, and worth not re-litigating: `pairs` order over string keys, which
 `luai_makeseed` fixed by pinning the hash seed to `"DILU"`; `pairs` order
 over table, closure, userdata and thread keys, which hash by a per-state
-creation counter (`keyid`, `ltable.c`) rather than by address; and
-`math.random`'s default seed, which the same `"DILU"` constant reaches
+creation counter (`keyid`, `ltable.c`) rather than by address; `tostring`
+of those same objects, which prints that counter (`lua_objectid`) rather
+than an address; and `math.random`'s default seed, which the same `"DILU"` constant reaches
 through `luaL_makeseed`, so a fresh state's first draw is the same number
 everywhere and `math.randomseed()` with no arguments does not consult the
 clock. `test/test_determinism.lua` holds all three across processes.

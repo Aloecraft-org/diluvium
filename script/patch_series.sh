@@ -52,10 +52,12 @@ ltable.c    table, closure, userdata and thread keys hash by keyid, a per-state 
 lstate.h    the keyid counter in global_State, and the keyid a thread carries
 lstate.c    the counter starts at zero; a thread takes its keyid in preinit_thread
 lstring.c   a new userdata takes its keyid
+lapi.c      lua_objectid: the creation identity of a table, closure, userdata or thread, 0 otherwise
+lauxlib.c   luaL_tolstring prints an object identity (#N) rather than an address where one exists
 lvm.c       type-test R[A] in OP_SETLIST before reading it as a table (corrupt-bytecode guard the load-time verifier cannot make; other opcodes already test via luaV_fastget)
 ltm.c       same table type-test for the vararg-table path in luaT_getvarargs
 luaconf.h   fixed string hash seed (deterministic pairs order); the ^ operator routed through the vendored pow under DV_NUMERIC
-lua.h       Diluvium version/branding strings
+lua.h       Diluvium version/branding strings; lua_objectid
 lua.c       Diluvium branding; REPL input handling moved to drepl.c; --task delegates to dtask.c
 onelua.c    include analyze.c and the d*.c runtime files; rename ltests.c resetCI (amalgamation clash)
 '

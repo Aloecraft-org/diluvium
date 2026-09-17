@@ -78,6 +78,39 @@ if interp and io.popen then
                  .. a .. "\n  " .. tostring(b))
 end
 
+-- tostring prints an object's identity, not its address. The same
+-- per-state counter pairs hashes by is what luaL_tolstring prints for a
+-- table, closure, coroutine or full userdata -- `table: #42` -- so the
+-- string is the same in every process. A light C function has no
+-- identity to print and keeps its pointer, which is the one address left
+-- in tostring; string.format("%p") is the address on purpose and stays.
+do
+  local t = {}
+  assert(tostring(t):match("^table: #%d+$"), "tostring of a table: " .. tostring(t))
+  assert(tostring(t) == tostring(t), "an object prints one string")
+  assert(tostring({}) ~= tostring({}), "two objects print two strings")
+  assert(tostring(function() end):match("^function: #%d+$"), "a closure")
+  assert(tostring(coroutine.create(print)):match("^thread: #%d+$"), "a coroutine")
+  assert(tostring(print):match("^function: ") and not tostring(print):find("#", 1, true),
+         "a light C function keeps its pointer: " .. tostring(print))
+  if interp and io.popen then
+    local snippet =
+      'local ks = {{}, function() end, coroutine.create(print)} ' ..
+      'local o = {} for i, k in ipairs(ks) do o[i] = tostring(k) end ' ..
+      'io.write(table.concat(o, " "), "\\n")'
+    local function run()
+      local p = assert(io.popen(string.format("%q -e %q", interp, snippet)))
+      local out = p:read("l")
+      p:close()
+      return out
+    end
+    local a, b = run(), run()
+    assert(a ~= nil and a:match("^table: #%d+ function: #%d+ thread: #%d+$"),
+           "child printed identities: " .. tostring(a))
+    assert(a == b, "tostring differs between processes:\n  " .. a .. "\n  " .. tostring(b))
+  end
+end
+
 -- math.random is seeded from the same constant. lmathlib.c seeds its
 -- generator at open time with luaL_makeseed, and lauxlib.c's luaL_makeseed
 -- returns luai_makeseed() -- which luaconf.h pins to "DILU" for the string

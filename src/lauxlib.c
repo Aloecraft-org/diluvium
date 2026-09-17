@@ -959,7 +959,15 @@ LUALIB_API const char *luaL_tolstring (lua_State *L, int idx, size_t *len) {
         int tt = luaL_getmetafield(L, idx, "__name");  /* try name */
         const char *kind = (tt == LUA_TSTRING) ? lua_tostring(L, -1) :
                                                  luaL_typename(L, idx);
-        lua_pushfstring(L, "%s: %p", kind, lua_topointer(L, idx));
+        unsigned int id = lua_objectid(L, idx);
+        /* Diluvium: an object with an identity prints it, not its address,
+           so the string is the same on every run and every platform; a
+           light userdata or light C function has none and keeps the
+           pointer. string.format("%p") is still the address, on purpose. */
+        if (id != 0)
+          lua_pushfstring(L, "%s: #%I", kind, (lua_Integer)id);
+        else
+          lua_pushfstring(L, "%s: %p", kind, lua_topointer(L, idx));
         if (tt != LUA_TNIL)
           lua_remove(L, -2);  /* remove '__name' */
         break;
