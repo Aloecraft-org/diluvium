@@ -12,7 +12,7 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
-## [0.16.0] - unreleased (prerelease)
+## [0.16.0] - 2026-09-17
 
 `v0.16.0` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
@@ -140,6 +140,13 @@ coroutine keys in, and the result of `^`.
   it against. Retire it, feed it the version string, or give the
   counter a source of truth -- an open decision, recorded in
   `doc/Plan-2026-09.md`.
+- **An adopted column never reaches the guest.** `dv_array_adopt`
+  pushes the value onto the parked thread's stack, and the next
+  `dv_resume` drops it: the call is staged for the hostcall reply lane
+  (plan 3.1), and that wiring does not exist yet. Harmless -- nothing
+  reads the slot -- but a host that adopts a buffer today has handed it
+  over to be collected, not delivered. Owner: whoever lands the reply
+  path.
 
 ### Upgrading
 
