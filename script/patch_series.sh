@@ -52,6 +52,7 @@ ltable.c    table, closure, userdata and thread keys hash by keyid, a per-state 
 lstate.h    the keyid counter in global_State, and the keyid a thread carries
 lstate.c    the counter starts at zero; a thread takes its keyid in preinit_thread
 lstring.c   a new userdata takes its keyid
+lobject.c   float-to-string prints . whatever LC_NUMERIC says
 lapi.c      lua_objectid: the creation identity of a table, closure, userdata or thread, 0 otherwise
 lauxlib.c   luaL_tolstring prints an object identity (#N) rather than an address where one exists
 lvm.c       type-test R[A] in OP_SETLIST before reading it as a table (corrupt-bytecode guard the load-time verifier cannot make; other opcodes already test via luaV_fastget)

@@ -111,6 +111,42 @@ do
   end
 end
 
+-- What a float prints as does not depend on the host's locale. libc's
+-- %.15g writes the locale's radix mark, so a host that called
+-- setlocale(LC_NUMERIC, "de_DE") made every guest print 1,5 -- and, in
+-- the JSON encoder, emit 1,5 where only 1.5 is JSON. lobject.c and
+-- djson.c now normalise to '.'; parsing accepted '.' under any locale
+-- already. Runs only where a comma-decimal locale is installed (macOS
+-- ships one; the Linux CI job generates one) and restores the C locale
+-- after, since setlocale is process-wide.
+do
+  local had = os.setlocale(nil, "numeric")
+  local comma = os.setlocale("de_DE.UTF-8", "numeric") or os.setlocale("de_DE.utf8", "numeric")
+  if comma then
+    local function check(got, want, what)
+      assert(got == want, string.format("%s under %s: got %q, want %q", what, comma, got, want))
+    end
+    check(tostring(1.5), "1.5", "tostring of a float")
+    check(tostring(0.1 + 0.2), "0.30000000000000004", "a 17-digit float")
+    check(tostring(2^0.5), "1.4142135623730951", "an operator result")
+    check(1.5 .. "", "1.5", "concatenation")
+    check(tostring(3.0), "3.0", "an integral float keeps its .0")
+    check(tostring(-2.5e-7), "-2.5e-07", "an exponent form")
+    check(string.format("%s", 1.5), "1.5", "%s formatting")
+    assert(tonumber("1.5") == 1.5 and tonumber("1,5") == 1.5,
+           "reading back accepts '.' and the locale's mark alike")
+    if json then
+      check(json.encode({x = 1.5}), '{"x":1.5}', "json.encode")
+      assert(json.decode('{"x":1.5}').x == 1.5, "json.decode reads 1.5 as 1.5, not 1")
+      assert(json.decode('[2.5e-3]')[1] == 0.0025, "and an exponent form")
+    end
+    os.setlocale(had, "numeric")
+    assert(os.setlocale(nil, "numeric") == had, "the locale is restored")
+  else
+    print("  (no comma-decimal locale installed; locale check skipped)")
+  end
+end
+
 -- math.random is seeded from the same constant. lmathlib.c seeds its
 -- generator at open time with luaL_makeseed, and lauxlib.c's luaL_makeseed
 -- returns luai_makeseed() -- which luaconf.h pins to "DILU" for the string

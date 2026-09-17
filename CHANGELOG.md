@@ -121,6 +121,17 @@ coroutine keys in, and the result of `^`.
 - **The homepage and `doc/Guide.md` describe this language**, rather
   than one seven forms smaller with no numeric tier.
 
+### Fixed
+
+- **A float prints as `1.5` whatever the host's locale.** `tostring`,
+  concatenation, `%s` and `json.encode` went through libc's `%g`,
+  which writes the locale's radix mark, so a host that had called
+  `setlocale(LC_NUMERIC, "de_DE")` made every guest print `1,5` and
+  emit `{"x":1,5}` as JSON -- and `json.decode` read `1.5` back as
+  `1`, since `strtod` stops at a `.` there. All four now spell and
+  read `.` regardless. `string.format("%f")` is libc's by name and
+  keeps the locale's mark.
+
 ### Known issues
 
 - **`dv_build()` outlived the counter it reports.** It was added to the

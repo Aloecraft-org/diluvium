@@ -826,12 +826,12 @@ still ambient at run time, after the numeric round:
   carry an identity, so `ltable.c` still hashes them by address and `pairs`
   order over them follows the allocator. A light userdata is a host pointer
   by definition; a C function's address is the host's too.
-- **Float formatting.** `tostring(1.5)` is libc's `snprintf("%.15g")`, a
-  `strtod` round-trip, and `localeconv()`'s decimal point: a host that has
-  called `setlocale(LC_NUMERIC, ...)` changes what every guest prints, and
-  the guest, with `os` removed, cannot even look. `string.format` with
-  `%g`/`%f`/`%a` is the same libc. Every CI target runs in the C locale, so
-  this has never been *observed* to differ -- which is not the same thing.
+- **`string.format` with `%g`/`%f`/`%a`.** That is libc's formatting by
+  name, and it writes the locale's radix mark: `("%.2f"):format(1.5)` is
+  `1,50` under `de_DE`. `tostring`, concatenation, `%s` and the JSON
+  encoder normalise to `.` whatever `LC_NUMERIC` says, and parsing accepts
+  `.` under any locale, so a program that never spells a `%f` never sees
+  the locale; one that does has asked for it.
 - **The collector.** `collectgarbage("count")` is stable from run to run on
   one build -- the same program allocates the same bytes -- but differs
   between builds (object sizes, the feature set), so anything measured

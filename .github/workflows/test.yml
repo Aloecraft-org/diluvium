@@ -119,6 +119,15 @@ jobs:
       - name: Build debug binary (with ltests.h assertions)
         run: make test_build
 
+      # test_determinism.lua checks that tostring and json print '.' under
+      # a comma-decimal locale, and skips itself where no such locale is
+      # installed. macOS ships de_DE.UTF-8; the Linux runner has only C
+      # and C.UTF-8, so give it one -- otherwise the check runs on one
+      # target of two and a regression on glibc goes unseen.
+      - name: A comma-decimal locale, so the locale checks run here too
+        if: runner.os == 'Linux'
+        run: sudo locale-gen de_DE.UTF-8
+
       - name: Run suite
         run: |
           ./test/run_tests.sh \
