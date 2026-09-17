@@ -56,6 +56,162 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "0.16.0"
+    tag: v0.16.0
+    date: null
+    status: unreleased
+    stable: false
+    mirror: false
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **The numeric round: a typed array tier whose float results are the
+      same bits on every target, fourteen new syntax forms, and the last of
+      the ambient nondeterminism a pure program could observe.**
+
+      The language gains default parameters, numeral separators and `0b`
+      literals, `const`, spread, expression-bodied functions, lambdas,
+      destructuring, `if` and `switch` as expressions, slicing, `export` and
+      classes -- fourteen forms across three tiers, every one a parse error
+      in stock Lua 5.5, none of them a reserved word, none of them an opcode.
+      (`continue` landed in `0.15.1` and is unchanged.)
+
+      Alongside it, an `array` type behind the `numeric` build feature, with
+      kernels whose answers are bit-identical across x86-64, aarch64, wasm
+      and Windows, and the libm that makes that true of `math` as well. And
+      two things a program could watch vary from one run to the next that it
+      no longer can: the order `pairs` visits table, function, userdata and
+      coroutine keys in, and the result of `^`.
+    added:
+      - |
+        **A numeric tier: the `array` type and the kernels over it.** Typed,
+        1D and 2D, strided views, `f64`/`i64`/`u8`/`c128`, with elementwise
+        and reduction kernels, sorting, grouping, linear algebra, and the
+        transforms -- `fft`/`ifft`, `rfft`/`irfft`, `ntt`/`intt`, and
+        `convolve`/`correlate`, which goes through the NTT and stays exact
+        when both operands hold integers. A slice of an array is a view.
+
+        Behind the `numeric` build feature: off in a default build, on in the
+        release builds. `dv_features()` is what a host should ask.
+      - |
+        **Float results that are bit-identical on every target.** The
+        reproducible tier is not a promise about a platform, it is a property
+        the build enforces: a canonical eight-accumulator reduction order, a
+        total order with NaN last, first-appearance group ids, a fixed
+        SplitMix64 mix, and openlibm's stage-1 subset vendored under `dv_`
+        prefixes so a transcendental does not depend on which libm the
+        platform ships -- `math.exp` and its neighbours, and every kernel.
+        `test/numeric/corpus.lua` prints 103 lines of IEEE bit patterns and
+        CI diffs them across x86-64 and aarch64.
+
+        One limit, stated where the kernels are: IEEE 754 does not interpret
+        the sign of a NaN, so a program that computes one and then reads its
+        bit pattern reads its libm's choice. Where an answer has to be the
+        same everywhere the NaN is canonicalised rather than carried.
+      - |
+        **The `^` operator is one of them.** The vendored libm is installed
+        over the `math` table, but `^` compiles to `OP_POW` and never looks
+        at `math`, so it reached the platform's `pow` -- which disagrees with
+        the vendored one in the last bit on 2,837 of 30,000 sampled pairs.
+        Scalar `^`, the array kernel's `^`, and a `^` the compiler folds at
+        compile time now all go through `dv_pow`, so two spellings of one
+        expression give one answer on one build, and the corpus diffs a line
+        for it target against target.
+      - |
+        **`pairs` order is a property of the program, for every key a program
+        can make.** A table, closure, full userdata or coroutine used as a
+        key hashes by an identity it takes when it is created -- a per-state
+        counter -- and not by its address. Stock Lua hashes those by address,
+        so under ASLR the same program visited the same keys in a different
+        order on every run, and a different order again on every platform:
+        the hole the fixed string hash seed closed for string keys, still
+        open for every other kind, and silently so. Light userdata and C
+        functions have no header to carry an identity and stay by address; a
+        light userdata is a host pointer by definition.
+      - |
+        **Tier A syntax.** Default parameters, numeral separators and `0b`
+        literals, `const`, spread, and expression-bodied functions.
+      - |
+        **Tier B syntax.** Lambdas, destructuring, `if` and `switch` as
+        expressions, slicing, and `export`.
+      - |
+        **Classes.** `class NAME [extends exp] ... end`, with field defaults
+        evaluated per instance, `function` methods taking an implicit `self`,
+        `static` to opt out, `super(...)` and `super.m(...)`, and `@name` for
+        `self.name`. The desugar is plain metatables through `dv.class`, so a
+        class is a table and there is nothing new in the object model.
+      - |
+        **`dv_array_adopt`**, the zero-copy handover: a host buffer becomes an
+        `array`'s elements with no copy at all, or a string where the feature
+        is off. The adopted bytes count against the instance's memory limit
+        from the moment it takes them, and a handover the instance cannot
+        take is refused with `dv_last_error` set rather than aborting.
+      - |
+        **`test/test_determinism.lua` pins what was always true of
+        `math.random`.** The `"DILU"` constant that fixes the string hash
+        seed is also what `luaL_makeseed` returns, so a fresh state's first
+        draw is the same number everywhere and `math.randomseed()` with no
+        arguments does not consult the clock. Nothing in the suite held that;
+        now the seed it reports and the first two draws are compared across
+        processes and against recorded values.
+    changed:
+      - |
+        **`dv_abi` is 2.** `dv_features`, `dv_build`, `dv_array_adopt` and the
+        `dv_numeric_*` block are new surface, so a wrapper built against 1
+        does not know what it is holding and is refused rather than allowed to
+        misread it.
+      - |
+        **`tostring` prints an identity, not an address.** `table: #42`,
+        `function: #17`, `thread: #3` -- the same per-state creation counter
+        `pairs` hashes by -- rather than `table: 0x55e6db854690`, which was
+        a different string on every run and, on Windows, a different shape
+        (`%p` there prints no `0x`). A value with no identity to print keeps
+        its pointer: light userdata and light C functions, so `tostring(print)`
+        is as it was. A `__tostring` metamethod is untouched, and so is
+        `string.format("%p")`, which is the way to ask for the address on
+        purpose. Hosts read the same number through `lua_objectid`.
+      - |
+        **A table is eight bytes larger on 64-bit targets** (`sizeof(Table)`
+        56, from 48). The key identity is a four-byte field, and `Table` was
+        the one type with no padding to put it in; closures, userdata and
+        threads absorbed theirs.
+      - |
+        **The homepage and `doc/Guide.md` describe this language**, rather
+        than one seven forms smaller with no numeric tier.
+    fixed:
+      - |
+        **A float prints as `1.5` whatever the host's locale.** `tostring`,
+        concatenation, `%s` and `json.encode` went through libc's `%g`,
+        which writes the locale's radix mark, so a host that had called
+        `setlocale(LC_NUMERIC, "de_DE")` made every guest print `1,5` and
+        emit `{"x":1,5}` as JSON -- and `json.decode` read `1.5` back as
+        `1`, since `strtod` stops at a `.` there. All four now spell and
+        read `.` regardless. `string.format("%f")` is libc's by name and
+        keeps the locale's mark.
+    known_issues:
+      - |
+        **`dv_build()` outlived the counter it reports.** It was added to the
+        ABI-2 surface as the `N` in `5.5.1_buildN`; `0.15.1` retired build
+        numbers, so it returns a hardcoded value with nothing left to check
+        it against. Retire it, feed it the version string, or give the
+        counter a source of truth -- an open decision, recorded in
+        `doc/Plan-2026-09.md`.
+    upgrading: |
+      **Nothing to do for a program.** Every new form is syntax that was a
+      syntax error before, no existing construct changed meaning, and the
+      bytecode format byte does not move. Two results can differ from
+      `0.15.1` on the same machine: a `^` between non-trivial floats can move
+      by one ulp (it used to move by one ulp between machines instead), and a
+      loop over a table keyed by objects now sees creation order -- a program
+      that depended on the old order was depending on the allocator. And
+      `tostring` of a table, function or coroutine reads `table: #N` rather
+      than `table: 0x...`; a program that scraped the hex out of it was
+      scraping an address, and `string.format("%p")` still hands one over.
+
+      **A host built against dv ABI 1 is refused by `dv_new`, and a snapshot
+      taken by one will not restore here.** That is the ABI bump doing its
+      job. Rebuild the host against this `dv.h`; drain or replay snapshots
+      before upgrading a deployment that holds them.
   - version: "0.15.1"
     tag: v0.15.1
     date: 2026-09-16

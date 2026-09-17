@@ -38,22 +38,29 @@ FORK_POINT=7579fc9d7ed90240487251dfb69168f8e64e9294
 # Core files that are allowed to differ from upstream, one per line:
 #   <file>  <reason>
 CORE_PATCH_ALLOWLIST='
-llex.c      f-strings ($"..."), regex literals (`...`), ?? token, $ must introduce a string, contextual keyword names
+llex.c      f-strings ($"..."), regex literals (`...`), ?? token, $ must introduce a string, contextual keyword names, numeral separators and 0b literals
 llex.h      TK_2Q/TK_FPART/TK_REGEX tokens, fstring_del/encrypted_flag, contextual keyword names
-lparser.c   ~function forms, f-string codegen, regex literal codegen, switch, defer, with, compound assignment, ?? and ?.
+lparser.c   ~function forms, f-string codegen, regex literal codegen, switch, defer, with, compound assignment, ?? and ?., continue, const, default parameters, expression-bodied functions, spread
 lcode.c     OPR_2Q branch compile (EQK-nil + jump), luaK_skipifnil for ?.
 lcode.h     OPR_2Q enum entry, luaK_skipifnil export
-lobject.h   is_encrypted flag on Proto
-lfunc.c     is_encrypted initialization
+lobject.h   is_encrypted flag on Proto; keyid on Table, closures and userdata (deterministic pairs order over object keys)
+lfunc.c     is_encrypted initialization; a new closure takes its keyid
 ldump.c     XOR scramble of code/constant strings for secure protos; taint pass
 lundump.c   XOR unscramble per string flag; forced copy of fixed buffers
 lundump.h   LUAC_FORMAT 0x46 (Diluvium bytecode format byte)
+ltable.c    table, closure, userdata and thread keys hash by keyid, a per-state creation counter, not by address (pairs order over object keys identical on every run and platform; light userdata and C functions stay by address)
+lstate.h    the keyid counter in global_State, and the keyid a thread carries
+lstate.c    the counter starts at zero; a thread takes its keyid in preinit_thread
+lstring.c   a new userdata takes its keyid
+lobject.c   float-to-string prints . whatever LC_NUMERIC says
+lapi.c      lua_objectid: the creation identity of a table, closure, userdata or thread, 0 otherwise
+lauxlib.c   luaL_tolstring prints an object identity (#N) rather than an address where one exists
 lvm.c       type-test R[A] in OP_SETLIST before reading it as a table (corrupt-bytecode guard the load-time verifier cannot make; other opcodes already test via luaV_fastget)
 ltm.c       same table type-test for the vararg-table path in luaT_getvarargs
-luaconf.h   fixed string hash seed (deterministic pairs order)
-lua.h       Diluvium version/branding strings
+luaconf.h   fixed string hash seed (deterministic pairs order); the ^ operator routed through the vendored pow under DV_NUMERIC
+lua.h       Diluvium version/branding strings; lua_objectid
 lua.c       Diluvium branding; REPL input handling moved to drepl.c; --task delegates to dtask.c
-onelua.c    include analyze.c; rename ltests.c resetCI (amalgamation clash)
+onelua.c    include analyze.c and the d*.c runtime files; rename ltests.c resetCI (amalgamation clash)
 '
 
 usage() { sed -n '3,27p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }

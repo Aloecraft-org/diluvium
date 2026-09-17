@@ -28,6 +28,7 @@ CClosure *luaF_newCclosure (lua_State *L, int nupvals) {
   GCObject *o = luaC_newobj(L, LUA_VCCL, sizeCclosure(nupvals));
   CClosure *c = gco2ccl(o);
   c->nupvalues = cast_byte(nupvals);
+  c->keyid = ++G(L)->keyidcount;  /* see ltable.c */
   return c;
 }
 
@@ -37,6 +38,7 @@ LClosure *luaF_newLclosure (lua_State *L, int nupvals) {
   LClosure *c = gco2lcl(o);
   c->p = NULL;
   c->nupvalues = cast_byte(nupvals);
+  c->keyid = ++G(L)->keyidcount;  /* see ltable.c */
   while (nupvals--) c->upvals[nupvals] = NULL;
   return c;
 }

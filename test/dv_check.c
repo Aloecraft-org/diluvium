@@ -2554,10 +2554,369 @@ static void a_woken_instance_is_still_budgeted (void) {
 }
 
 
+/*
+** The build facts (Plan-2026-09 3.1): what a DRT reads to fill in a profile's
+** 'features:' line and the build number beside its revision.
+*/
+static void build_facts (void) {
+  const char *f = dv_features();
+  eq_i(dv_build(), DV_BUILD, "the library reports its build number");
+  ok(f != NULL && f[0] != '\0', "the feature string is neither NULL nor empty");
+  if (f == NULL) return;
+  ok(f[strlen(f) - 1] != '\n', "the feature string has no trailing newline");
+  ok(strstr(f, "regex") != NULL, "'regex' is reported");
+  ok(strstr(f, "msgpack") != NULL, "'msgpack' is reported");
+  ok(strstr(f, "snapshot") != NULL, "'snapshot' is reported");
+  /* The one fact that differs between the two configurations, and the reason
+     this check exists: it is what says the define reached this translation
+     unit rather than only the Makefile variable. */
+#if defined(DV_NUMERIC)
+  ok(strstr(f, "numeric") != NULL,
+     "'numeric' is reported in a DV_NUMERIC build");
+#else
+  ok(strstr(f, "numeric") == NULL,
+     "'numeric' is not reported without DV_NUMERIC");
+#endif
+}
+
+
+/*
+** The numeric surface as it stands before any kernel exists.
+**
+** Every assertion here is about the *shape* a host is being asked to write
+** against, which is the whole point of publishing the surface early: B can be
+** written and tested now, and nothing it wrote changes when the kernels land.
+*/
+static void numeric_surface (void) {
+  dv_instance *inst = dv_new(NULL);
+  if (inst == NULL) { ok(0, "dv_new for the numeric surface"); return; }
+
+  /* The bounds accept and report nothing back; what is checked is that they
+     are callable on every build and change no other observable. */
+  dv_numeric_set_max_elements(inst, 1024);
+  dv_numeric_set_max_tier(inst, DV_TIER_REPRODUCIBLE);
+  ok(dv_numeric_touched_fast(inst) == 0,
+     "nothing has touched a fast tier, because no backend exists");
+  ok(dv_exceeded(inst) == 0, "setting numeric bounds does not exceed a budget");
+
+  /* NULL is refused rather than dereferenced, the same rule the rest of this
+     ABI follows. */
+  dv_numeric_set_max_elements(NULL, 1);
+  dv_numeric_set_max_tier(NULL, DV_TIER_EXACT);
+  ok(dv_numeric_touched_fast(NULL) == 0, "a NULL instance has touched nothing");
+
+  {
+    /* Eight bytes of f64, handed over. With the feature built this is a
+       real adoption and the return is 0; without it the bytes reach the
+       guest as a string copy and the return is 1. Either way the buffer
+       is released by the call, so there is no free here -- running this
+       under the sanitizers is what checks that claim. */
+    double one = 1.0;
+    void *buf = malloc(sizeof(one));
+    if (buf == NULL) { ok(0, "malloc for the adopt path"); dv_free(inst); return; }
+    memcpy(buf, &one, sizeof(one));
+#if defined(DV_NUMERIC)
+    eq_i(dv_array_adopt(inst, DV_DTYPE_F64, sizeof(one), buf), 0,
+         "an f64 buffer is adopted without a copy");
+#else
+    eq_i(dv_array_adopt(inst, DV_DTYPE_F64, sizeof(one), buf), 1,
+         "an f64 buffer is copied into a string without the feature");
+#endif
+  }
+  {
+    /* Zero length is a legitimate column, not an error. */
+    void *buf = malloc(1);
+    if (buf != NULL)
+#if defined(DV_NUMERIC)
+      eq_i(dv_array_adopt(inst, DV_DTYPE_U8, 0, buf), 0,
+           "an empty buffer is accepted");
+#else
+      eq_i(dv_array_adopt(inst, DV_DTYPE_U8, 0, buf), 1,
+           "an empty buffer is accepted");
+#endif
+  }
+  {
+    /* The invalid-argument returns. Ownership does not transfer in any of
+       them, so each buffer is freed here. */
+    void *buf = malloc(8);
+    if (buf != NULL) {
+      eq_i(dv_array_adopt(inst, 99, 8, buf), 1, "an unknown dtype is refused");
+      eq_i(dv_array_adopt(inst, DV_DTYPE_I64, 3, buf), 1,
+           "a length that is not a whole number of elements is refused");
+      free(buf);
+    }
+    eq_i(dv_array_adopt(inst, DV_DTYPE_U8, 8, NULL), 1,
+         "a NULL buffer with a non-zero length is refused");
+    eq_i(dv_array_adopt(NULL, DV_DTYPE_U8, 0, NULL), 1,
+         "a NULL instance is refused");
+  }
+  {
+    /* Adopted bytes are charged to the instance. Not asserted as an exact
+       figure -- the copy the guest now holds is counted too -- but the
+       counter must not have gone *down*, which is the drift that made a
+       memory budget evadable once before (see 'dv_alloc'). */
+    uint64_t now = 0, peak = 0;
+    dv_memory(inst, &now, &peak);
+    ok(peak > 0, "the memory counter is still positive after an adopt");
+  }
+  dv_free(inst);
+}
+
+
+/*
+** An adopted column is the instance's memory while it holds it, and stops
+** being the instance's when the guest lets go (3.1).
+**
+** dv.h has always said the adopted bytes count against the memory limit; on
+** the adopt path nothing counted them, because the buffer never passes through
+** 'dv_alloc'. An 8 MB column handed to an instance budgeted at 256 KB was
+** accepted and moved the counter by about a hundred bytes, so a supervisor
+** reading 'dv_memory' to decide whether a child was near its limit was reading
+** the header and not the column.
+**
+** Both halves are checked here, and they have to be checked together: a charge
+** with no matching credit is the same counter walking upward forever, and a
+** counter that only ever rises stops meaning anything just as thoroughly as
+** one that never moves. Nothing here is build-specific -- with the feature the
+** column becomes an array and the charge is explicit, without it the column
+** becomes a string and 'dv_alloc' charges it -- so the same two figures are
+** expected either way, which is the point: what a host is told it holds does
+** not depend on how the runtime was compiled.
+**
+** The guest collects twice because a finaliser needs two cycles: the first
+** runs '__gc' (which is where the credit is), the second frees the object.
+*/
+#define ADOPT_COLUMN_BYTES  (1024u * 1024u)
+
+static void an_adopted_column_is_charged_and_credited (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "for _ = 1, 2 do "
+    "  queue.wait({inb}) "
+    "  collectgarbage() "
+    "  collectgarbage() "
+    "end "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_queue_id inbox;
+  uint64_t before = 0, held = 0, after = 0, peak = 0;
+  void *buf;
+  if (inst == NULL) { ok(0, "load for the adopt accounting"); return; }
+  inbox = dv_queue_lookup(inst, "inbox");
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks, which is the window "
+        "a column is handed over in");
+
+  buf = malloc(ADOPT_COLUMN_BYTES);
+  if (buf == NULL) { ok(0, "malloc a megabyte"); dv_free(inst); return; }
+  memset(buf, 0, ADOPT_COLUMN_BYTES);
+  dv_memory(inst, &before, &peak);
+  dv_array_adopt(inst, DV_DTYPE_F64, ADOPT_COLUMN_BYTES, buf);
+  ok(dv_last_error(inst) == NULL,
+     "a handover that worked leaves no message, which is what makes a message "
+     "mean 'nothing was pushed'");
+  dv_memory(inst, &held, &peak);
+  ok(held >= before + ADOPT_COLUMN_BYTES,
+     "a column the instance now holds is a megabyte on its own counter");
+  ok(peak >= held, "and the high-water mark saw it");
+
+  /* Let the program run on and collect. The adopted value is on the thread's
+     stack above the park's own results, and 'dv_resume' drops that many values
+     before it resumes, so by the time the guest collects nothing refers to the
+     column any more. Nothing consumes an adopted value yet -- the reply wiring
+     it is staged for does not exist -- so when that lands this is the line to
+     revisit: the guest will be holding the column and will have to drop it
+     itself for the credit to be observable here. */
+  eq_st(dv_queue_push(inst, inbox, MP_ONE, sizeof(MP_ONE)), DV_OK,
+        "the host answers the wait");
+  eq_st(dv_resume(inst, inbox), DV_IDLE, "and the program collects and parks "
+        "again");
+  dv_memory(inst, &after, &peak);
+  ok(after < before + (ADOPT_COLUMN_BYTES / 2),
+     "and once the guest has let go the megabyte is off the counter too, so "
+     "the charge and the credit net to zero");
+  dv_free(inst);
+}
+
+
+/*
+** A handover that will not fit is a refusal, not an abort (3.1).
+**
+** Everything that puts the bytes in front of the guest allocates -- the
+** array's header on the adopt path, the string on the copy path -- and
+** 'dv_array_adopt' is called from host code with no protected call anywhere
+** above it. An allocation failure there used to reach the panic function,
+** which aborts: a host that budgeted an instance at 256 KB and handed it a
+** larger column got no return value and no output, just a dead process. The
+** host is the thing that is supposed to survive its guest running out of
+** memory, so this is the one failure mode the ABI must not have.
+**
+** The check that matters is that control comes back at all. What it comes
+** back with differs by build and both are asserted: with the feature the
+** header is small enough to fit, so the column is taken and the instance is
+** simply over its limit afterwards -- which is what dv.h says happens and what
+** 'dv_memory' is for. Without it the copy is the whole column, it does not
+** fit, and the call refuses and says so.
+*/
+static void a_handover_that_does_not_fit_is_refused (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') queue.wait({inb}) return 0", 0);
+  dv_waitset ws;
+  uint64_t now = 0, peak = 0;
+  void *buf;
+  int rc;
+  if (inst == NULL) { ok(0, "load for the over-budget handover"); return; }
+  eq_st(dv_set_budget(inst, 0, 256), DV_OK, "256 KB, set before the run");
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks inside its budget");
+
+  buf = malloc(ADOPT_COLUMN_BYTES);
+  if (buf == NULL) { ok(0, "malloc a megabyte"); dv_free(inst); return; }
+  memset(buf, 0, ADOPT_COLUMN_BYTES);
+  rc = dv_array_adopt(inst, DV_DTYPE_F64, ADOPT_COLUMN_BYTES, buf);
+  ok(1, "a column four times the budget returns rather than aborting");
+#if defined(DV_NUMERIC)
+  eq_i(rc, 0, "the array's header fits, so the column is taken");
+  dv_memory(inst, &now, &peak);
+  ok(now > 256u * 1024u,
+     "and the instance is over its limit, where dv_memory can be read");
+#else
+  eq_i(rc, 1, "the copy does not fit, so the handover is refused");
+  ok(dv_last_error(inst) != NULL, "and the refusal says why");
+  dv_memory(inst, &now, &peak);
+  ok(peak <= 2u * 256u * 1024u,
+     "a refused column does not show up as a megabyte the instance once held");
+#endif
+  dv_free(inst);
+}
+
+
+#if defined(DV_NUMERIC)
+/*
+** A kernel charges the instruction budget by element count (3.4).
+**
+** The program below runs a handful of VM instructions and touches a
+** million elements, so a budget it exceeds can only have been spent by
+** the kernel: the instruction hook fires every 1000 VM instructions and
+** this program never reaches its first firing. One instruction per 64
+** elements makes the million cost about 15,600, so 4,000 is short and
+** 400,000 is ample.
+*/
+static void a_kernel_charges_the_budget_by_elements (void) {
+  static const char *src =
+    "local a = array.zeros('f64', 1000000) return array.sum(a)";
+  {
+    dv_instance *inst = dv_new(NULL);
+    dv_waitset ws;
+    uint64_t used = 0;
+    if (inst == NULL) { ok(0, "an instance"); return; }
+    dv_set_budget(inst, 4000, 0);
+    dv_load(inst, (const uint8_t *)src, strlen(src), "=kernel");
+    memset(&ws, 0, sizeof(ws));
+    ok(dv_run(inst, &ws) == DV_ERROR,
+       "a kernel too big for the budget stops with an error");
+    ok(dv_exceeded(inst), "and the instance says it was the budget");
+    dv_usage(inst, &used, NULL);
+    ok(used >= 4000, "having charged what it processed");
+    {
+      const char *msg = dv_last_error(inst);
+      ok(msg != NULL && strstr(msg, "budget") != NULL,
+         "with a message naming the budget");
+    }
+    dv_free(inst);
+  }
+  {
+    /* The control: the same program, a budget large enough, no error.
+       Without it the test above would pass just as well if the array
+       library were simply broken. */
+    dv_instance *inst = dv_new(NULL);
+    dv_waitset ws;
+    uint64_t used = 0;
+    if (inst == NULL) { ok(0, "an instance"); return; }
+    dv_set_budget(inst, 400000, 0);
+    dv_load(inst, (const uint8_t *)src, strlen(src), "=kernel");
+    memset(&ws, 0, sizeof(ws));
+    ok(dv_run(inst, &ws) == DV_DONE, "and finishes under a budget that fits");
+    ok(!dv_exceeded(inst), "without reporting one");
+    dv_usage(inst, &used, NULL);
+    ok(used >= 1000000 / 64,
+       "having still charged roughly one instruction per 64 elements");
+    dv_free(inst);
+  }
+}
+#endif
+
+
+#if defined(DV_NUMERIC)
+/*
+** The fast-tier flag, from a guest all the way to the host's question
+** (Plan-2026-09 A3).
+**
+** No fast backend exists -- every portable kernel is reproducible tier by
+** construction -- so what is checked is the *wiring*: a kernel that
+** declared itself fast would set the flag, the flag is sticky, and
+** 'dv_numeric_touched_fast' is what a host reads it through. The guest
+** calls 'array.__mark_fast', which exists only in the debug build and
+** does exactly what such a kernel would do on entry.
+**
+** Whether that hook is there is a property of the *runtime's* build, not
+** of this file's: 'make dv_check' compiles the amalgamation with
+** ltests.h and has it, and the sanitizer target compiles the same file
+** without and does not. So it is probed rather than assumed, and the
+** absence is reported as a skip -- a check that silently did nothing
+** would be worse than no check.
+*/
+static void the_fast_tier_flag_reaches_the_host (void) {
+  dv_instance *inst = dv_new(NULL);
+  dv_waitset ws;
+  static const char *src =
+    "assert(array.__mark_fast, 'no fast-tier mock in this build') "
+    "array.__mark_fast() "
+    "array.__mark_fast() "                      /* twice: it is not a toggle */
+    "return array.sum(array.ones('f64', 8))";
+  dv_status st;
+  if (inst == NULL) { ok(0, "an instance"); return; }
+  ok(dv_numeric_touched_fast(inst) == 0, "a fresh instance has touched nothing");
+  dv_load(inst, (const uint8_t *)src, strlen(src), "=fast");
+  memset(&ws, 0, sizeof(ws));
+  st = dv_run(inst, &ws);
+  if (st == DV_ERROR) {
+    const char *msg = dv_last_error(inst);
+    if (msg != NULL && strstr(msg, "no fast-tier mock") != NULL) {
+      printf("[SKIP] the fast-tier flag: this runtime build has no mock "
+             "(not an ltests.h build)\n");
+      dv_free(inst);
+      return;
+    }
+  }
+  ok(st == DV_DONE, "the program runs");
+  ok(dv_numeric_touched_fast(inst) == 1,
+     "and the host sees that something ran at the fast tier");
+  ok(dv_numeric_touched_fast(inst) == 1, "and keeps seeing it: the flag sticks");
+  dv_free(inst);
+  {
+    /* A second instance is not contaminated by the first: the flag is
+       per-instance, which is what makes it an audit trail rather than a
+       process-wide warning. */
+    dv_instance *clean = dv_new(NULL);
+    static const char *plain = "return array.sum(array.ones('f64', 8))";
+    if (clean == NULL) { ok(0, "a second instance"); return; }
+    dv_load(clean, (const uint8_t *)plain, strlen(plain), "=plain");
+    memset(&ws, 0, sizeof(ws));
+    dv_run(clean, &ws);
+    ok(dv_numeric_touched_fast(clean) == 0,
+       "and a second instance that ran only portable kernels has not");
+    dv_free(clean);
+  }
+}
+#endif
+
+
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
   version();
+  build_facts();
   run_to_completion();
   errors();
   queues();
@@ -2605,6 +2964,17 @@ int main (void) {
   an_instance_is_sealed_by_default();
   a_sealed_instance_reaches_nothing_outside_itself();
   a_snapshot_does_not_cross_the_seal();
+
+  printf("\n=== the numeric surface (Plan-2026-09 3.1) ===\n");
+  numeric_surface();
+  an_adopted_column_is_charged_and_credited();
+  a_handover_that_does_not_fit_is_refused();
+#if defined(DV_NUMERIC)
+  a_kernel_charges_the_budget_by_elements();
+#endif
+#if defined(DV_NUMERIC)
+  the_fast_tier_flag_reaches_the_host();
+#endif
 
   printf("\n=== hibernate and wake (10.1, 10.6, 10.10) ===\n");
   a_parked_instance_snapshots_and_wakes();

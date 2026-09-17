@@ -5,6 +5,22 @@ edition = "2021"
 license = "Apache-2.0"
 description = "Embed a Diluvium program: bounded message queues, cooperative parking"
 
+[features]
+default = []
+# The core's numeric build feature, passed through to `-sys`.
+#
+# Needed here and not only there because an embedder depends on *this* crate:
+# without a switch at this level, taking `diluvium` means taking
+# `diluvium-sys` with defaults, and a host that asked for arrays gets a core
+# reporting no `numeric` and having none. Reaching around to
+# `diluvium-sys = { features = ["numeric"] }` and letting cargo's unification
+# flip it would work and is worse -- it enables a switch this crate chose not
+# to expose, and the next reader has to reconstruct why.
+numeric = ["diluvium-sys/numeric"]
+# `lua` is deliberately NOT passed through. It puts a `lua_State` across the
+# boundary this crate exists to keep sealed -- bytes in, bytes out -- so a
+# front end that needs it depends on `diluvium-sys` directly and says so.
+
 [dependencies]
 diluvium-sys = { path = "../diluvium-sys", version = "0.1.0" }
 rmp-serde = "1"

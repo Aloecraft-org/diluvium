@@ -229,6 +229,7 @@ static void f_luaopen (lua_State *L, void *ud) {
 */
 static void preinit_thread (lua_State *L, global_State *g) {
   G(L) = g;
+  L->keyid = ++g->keyidcount;  /* see ltable.c */
   L->stack.p = NULL;
   L->ci = NULL;
   L->nci = 0;
@@ -348,6 +349,7 @@ LUA_API lua_State *lua_newstate (lua_Alloc f, void *ud, unsigned seed) {
   L->tt = LUA_VTHREAD;
   g->currentwhite = bitmask(WHITE0BIT);
   L->marked = luaC_white(g);
+  g->keyidcount = 0;  /* before the main thread takes the first one */
   preinit_thread(L, g);
   g->allgc = obj2gco(L);  /* by now, only object is the main thread */
   L->next = NULL;

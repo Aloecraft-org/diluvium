@@ -293,6 +293,7 @@ Udata *luaS_newudata (lua_State *L, size_t s, unsigned short nuvalue) {
   u = gco2u(o);
   u->len = s;
   u->nuvalue = nuvalue;
+  u->keyid = ++G(L)->keyidcount;  /* see ltable.c */
   u->metatable = NULL;
   for (i = 0; i < nuvalue; i++)
     setnilvalue(&u->uv[i].uv);

@@ -125,6 +125,13 @@
    dshim.c reads core internal headers, because a coroutine's call chain and
    open upvalues are not in the public API and cannot be. See dshim.h. In the
    amalgamation so the interpreter and the WASM host share it. */
+/* The vendored libm is compiled into the compiler as well: under the
+   'numeric' feature luaconf.h routes '^' through dv_pow, and lobject.c
+   folds constant '^' expressions with that same macro, so luac must
+   answer 2^0.5 with the bits the interpreter will. It depends on
+   nothing outside lua.h and lauxlib.h. */
+#include "dlibm.c"
+
 #ifndef MAKE_LUAC
 #include "drepl.c"
 #include "dline.c"
@@ -137,6 +144,8 @@
 #include "djson.c"
 #include "dregex.c"
 #include "dtime.c"
+#include "ddv.c"
+#include "dnumeric.c"
 #include "dhostlib.c"
 #include "dshim.c"
 #include "dsnap.c"

@@ -436,8 +436,19 @@ static int tostringbuffFloat (lua_Number n, char *buff) {
   }
   /* looks like an integer? */
   if (buff[strspn(buff, "-0123456789")] == '\0') {
-    buff[len++] = lua_getlocaledecpoint();
+    buff[len++] = '.';
     buff[len++] = '0';  /* adds '.0' to result */
+  }
+  else {
+    /* Diluvium: print '.' whatever the host's LC_NUMERIC says. The
+       conversion above is libc's and writes the locale's radix mark, so
+       a host that called setlocale changed what every guest printed --
+       and a guest, with 'os' removed, cannot even look. 'l_str2d' below
+       already reads '.' back under any locale through its fallback, so
+       what this prints still parses. string.format is lstrlib.c's and
+       keeps libc's spelling: that is asking for it by name. */
+    char *p = strchr(buff, lua_getlocaledecpoint());
+    if (p != NULL) *p = '.';
   }
   return len;
 }

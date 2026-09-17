@@ -34,7 +34,7 @@ out of upstream Lua's version space: upstream will never ship a
 | Compound assignment `+=` etc. | done (no `~=`; see below) |
 | Safe navigation `?.` / `?[` | done |
 | `switch` statement | done |
-| `match` (switch as an expression) | **dropped** -- see below |
+| `match` (the name) | dropped; the form shipped as a `switch` expression |
 | `defer` / `with` | done |
 | `continue` in loops | done (a contextual keyword; no bytecode change) |
 | F-string format specs `{x::%.2f}` | done |
@@ -491,8 +491,12 @@ Also unscheduled:
   the compiler hold you to it, rather than inferring from spelling. Design
   the registry around that: a suffix is a named claim about a literal's
   type and precision, decimal being the first entry, not the reason.
-- **`match`** -- switch in expression position. Dropped for now; the
-  statement form carries the README promise on its own.
+- ~~**`match`** -- switch in expression position.~~ **Landed**, as a
+  `switch` expression rather than a new word: `switch x case 1: "a" else "b"`.
+  A second keyword was not worth it once the statement form was contextual,
+  and reusing `switch` is what keeps `local match = 1` a legal program. The
+  expression form takes `:` and requires `else`, which is what distinguishes
+  it from the statement form at the parse point.
 - **Compile-time regex validation** -- a malformed pattern in a literal is
   caught where it is evaluated rather than where it is compiled. See the
   regex section below for what it would take, which is a validation entry
@@ -785,7 +789,8 @@ Three checks, each covering what the others cannot:
 
 Portable bytecode is a property of the artifact, not of the run. The same
 chunk on two machines can still produce two answers, and the analyzer's
-determinism verdict remains the thing that says whether it will:
+determinism verdict remains the thing that says whether it will. What is
+still ambient at run time, after the numeric round:
 
 - **Host calls.** Anything reaching out -- clock, filesystem, network,
   entropy -- is nondeterministic by construction, and the analyzer already
@@ -793,29 +798,54 @@ determinism verdict remains the thing that says whether it will:
   purpose. `doc/Determinism.md` is about making the *scheduler* replayable
   given a message log, which is a third guarantee again, distinct from both
   of these.
-- **libm.** IEEE-754 specifies `+ - * /` and `sqrt` to be correctly
-  rounded, which is why ordinary arithmetic is bit-identical everywhere --
-  `0.1 + 0.2` and `1e16 + 2.0` agree across platforms. It does not specify
-  the transcendentals, and implementations differ. Same pinned chunk, no
-  host call anywhere near it:
-
-  ```
-  math.sin(1e22)    glibc   -0.85220084976718879
-                    msvcrt   0.46261304076460175
-  ```
-
-  Not a last-bit difference: argument reduction for large inputs is where
-  libms diverge outright. `sin`, `cos`, `tan`, `exp`, `log` and `^` are all
-  in this class, and a decimal library would not change it -- that is a
-  question about *precision*, this is one about which implementation
-  answered.
-- **Addresses.** `tostring` of a table or function prints a pointer, so it
-  differs between runs as much as between platforms.
-- **The collector.** `collectgarbage("count")`, and anything measured
-  against GC progress.
+- **libm, in a build without the `numeric` feature.** IEEE-754 specifies
+  `+ - * /` and `sqrt` to be correctly rounded, which is why ordinary
+  arithmetic is bit-identical everywhere. It does not specify the
+  transcendentals, and implementations differ -- not in the last bit only:
+  `math.sin(1e22)` is `-0.852...` on glibc and `0.462...` on msvcrt, because
+  argument reduction for large inputs is where libms part company. With the
+  feature on, `dlibm.c` vendors openlibm's subset and `math.exp` and its
+  neighbours, the `^` operator (scalar and array, and a `^` the compiler
+  folds), and every kernel in `dnumeric.c` go through it; `test/numeric/`
+  is the corpus that diffs the bits target against target. Without the
+  feature, `math` keeps the platform's functions and this bullet stands.
+- **The sign of a NaN.** IEEE 754 does not interpret it, and libms differ:
+  `math.asin(2)` is `-nan` from the vendored libm and `nan` from glibc.
+  Every kernel moves a NaN without touching its bits, so a program that
+  computes one and then prints it or reads its bits sees its libm's choice.
+  Where an answer must be the same everywhere -- ordering, grouping -- the
+  NaN is canonicalised instead of carried.
+- **Addresses of light userdata and C functions.** `tostring` of a table,
+  function, userdata or coroutine prints its creation identity (`table:
+  #42`, the same counter `pairs` hashes by), so it is one string on every
+  run; a light userdata or a light C function has no identity to print and
+  shows its pointer, which differs between runs as much as between
+  platforms. `string.format("%p")` asks for the address on purpose and
+  gets one.
+- **Light userdata and C functions as table keys.** They have no header to
+  carry an identity, so `ltable.c` still hashes them by address and `pairs`
+  order over them follows the allocator. A light userdata is a host pointer
+  by definition; a C function's address is the host's too.
+- **`string.format` with `%g`/`%f`/`%a`.** That is libc's formatting by
+  name, and it writes the locale's radix mark: `("%.2f"):format(1.5)` is
+  `1,50` under `de_DE`. `tostring`, concatenation, `%s` and the JSON
+  encoder normalise to `.` whatever `LC_NUMERIC` says, and parsing accepts
+  `.` under any locale, so a program that never spells a `%f` never sees
+  the locale; one that does has asked for it.
+- **The collector.** `collectgarbage("count")` is stable from run to run on
+  one build -- the same program allocates the same bytes -- but differs
+  between builds (object sizes, the feature set), so anything measured
+  against GC progress is a cross-build ambient.
 
 Settled, and worth not re-litigating: `pairs` order over string keys, which
-`luai_makeseed` fixed by pinning the hash seed to `"DILU"`.
+`luai_makeseed` fixed by pinning the hash seed to `"DILU"`; `pairs` order
+over table, closure, userdata and thread keys, which hash by a per-state
+creation counter (`keyid`, `ltable.c`) rather than by address; `tostring`
+of those same objects, which prints that counter (`lua_objectid`) rather
+than an address; and `math.random`'s default seed, which the same `"DILU"` constant reaches
+through `luaL_makeseed`, so a fresh state's first draw is the same number
+everywhere and `math.randomseed()` with no arguments does not consult the
+clock. `test/test_determinism.lua` holds all three across processes.
 
 ## CLI and REPL
 

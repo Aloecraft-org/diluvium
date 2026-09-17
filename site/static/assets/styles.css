@@ -259,11 +259,18 @@ section > h2 {
 
 .grid {
   display: grid; gap: 1.1rem;
-  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  /* 'min(320px, 100%)' rather than a bare 320px: on a phone the viewport is
+     narrower than the track minimum, and a track that will not shrink below
+     it makes the whole page scroll sideways. */
+  grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr));
 }
 .feature {
   background: var(--bg-soft); border: 1px solid var(--line-soft);
   border-radius: var(--radius); padding: 1.2rem 1.3rem 1.3rem;
+  /* A grid item's default 'min-width: auto' is its content's width, so a
+     long line in the <pre> below widens the track instead of scrolling
+     inside it -- the 'overflow-x: auto' there does nothing without this. */
+  min-width: 0;
 }
 .feature h3 { font-size: 1rem; margin: 0 0 .8rem; }
 .feature p { color: var(--ink-dim); font-size: .88rem; margin: .9rem 0 0; }
@@ -283,12 +290,22 @@ section > h2 {
   padding: 1.6rem 0; border-top: 1px solid var(--line-soft);
 }
 .install-grid:first-of-type { border-top: none; padding-top: 0; }
-.install-grid.single { grid-template-columns: 1fr; }
-@media (max-width: 800px) { .install-grid { grid-template-columns: 1fr; } }
+/* 'minmax(0, 1fr)' in the collapsed cases too, for the reason the
+   two-column rule above already uses it: a bare '1fr' floors the track at
+   the item's min-content, and one unbreakable install command then makes
+   the whole page scroll sideways on a phone. */
+.install-grid.single { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 800px) {
+  .install-grid { grid-template-columns: minmax(0, 1fr); }
+}
 .install h3 { font-size: .95rem; margin: 0 0 .7rem; }
 .install h3 .what { color: var(--ink-dim); font-weight: 400; }
 .install h3 .what code { color: var(--accent); font-size: .9em; }
-.note { color: var(--ink-dim); font-size: .86rem; }
+/* A note can carry a bare URL -- release.js writes the mirror's address
+   into #release-note when it cannot reach it -- and an unbroken URL is one
+   long word. Without this it sets the page's minimum width, so the phone
+   that could not reach the mirror also scrolls sideways. */
+.note { color: var(--ink-dim); font-size: .86rem; overflow-wrap: anywhere; }
 .note code { color: var(--accent); }
 details { margin-top: 1.2rem; }
 summary {
@@ -315,7 +332,7 @@ details p { color: var(--ink-dim); font-size: .86rem; }
 
 .cards {
   display: grid; gap: 1.1rem;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr));
 }
 .card {
   display: block; background: var(--bg-soft);

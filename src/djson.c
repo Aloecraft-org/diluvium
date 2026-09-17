@@ -38,6 +38,7 @@
 #include "lprefix.h"
 
 #include <errno.h>
+#include <locale.h>
 #include <math.h>
 #include <stddef.h>
 #include <stdlib.h>
@@ -300,6 +301,14 @@ static int encode_value (lua_State *L, int idx, eb *b, int depth) {
           return -1;
         }
         n = snprintf(tmp, sizeof(tmp), "%.17g", d);
+        /* JSON's radix mark is '.'; libc's is the locale's. A host that
+           called setlocale(LC_NUMERIC, ...) would otherwise make this
+           emit 1,5 -- not JSON -- so normalise, as lobject.c does for
+           tostring. */
+        {
+          char *p = strchr(tmp, lua_getlocaledecpoint());
+          if (p != NULL) *p = '.';
+        }
       }
       return eb_add(b, tmp, (size_t)n) != 0 ? enc_oom(b) : 0;
     }
@@ -506,7 +515,12 @@ static void jd_number (jctx *j) {
     /* overflowed the integer: fall back to a float, so a huge id is inexact
        rather than an error */
   }
-  lua_pushnumber(j->L, (lua_Number)strtod(buf, NULL));
+  /* Not strtod: it reads the locale's radix mark, so under a comma locale
+     "1.5" stops at the '.' and comes back as 1. lua_stringtonumber goes
+     through lobject.c's l_str2d, which accepts '.' under any locale. The
+     grammar above already validated the text, so this cannot fail. */
+  if (lua_stringtonumber(j->L, buf) == 0)
+    jd_error(j, "a number that does not parse");
 }
 
 static void jd_value (jctx *j, int depth) {

@@ -118,6 +118,37 @@ typedef union {
 
 #define hashpointer(t,p)	hashmod(t, point2uint(p))
 
+/*
+** Diluvium: a table, closure, full userdata or thread used as a key
+** hashes by 'keyid' -- a per-state counter each of those objects takes
+** when it is created (luaH_new, luaF_new?closure, luaS_newudata,
+** preinit_thread) -- and not by its address. Stock Lua hashes them with
+** 'hashpointer', which makes 'pairs' order over such keys a function of
+** where the allocator put the objects: under ASLR the same program gives
+** a different order on every run, and a different one again on every
+** platform. That is the hole luai_makeseed closed for string keys, still
+** open for every other kind, and silently so -- unlike an address in
+** 'tostring', nothing in the output says an address was consulted. Same
+** motivation as the seed: independent nodes executing the same chunk
+** must observe the same order.
+**
+** Creation order is deterministic given the program, so the counter is;
+** it is per global_State, so one instance's ids do not depend on what
+** another allocated; and it only ever increases, so a collected object's
+** id is never reissued (wrap after 2^32 creations costs a collision,
+** never a wrong answer). Light userdata and light C functions have no
+** header to carry an id and stay by address: a light userdata is a host
+** pointer by definition, and a C function's address is the host's too.
+**
+** Dead keys are never hashed. 'insertkey' asks 'mainpositionfromnode'
+** only of a colliding node with a non-empty value, 'reinserthash' only
+** reinserts non-empty entries, and 'getgeneric' hashes the caller's own
+** key -- which, if it is in the table at all, is alive -- so the
+** LUA_TDEADKEY tag falls through to the pointer hash below without the
+** object ever being dereferenced.
+*/
+#define hashid(t,id)		hashmod(t, id)
+
 
 #define dummynode		(&dummynode_)
 
@@ -215,6 +246,16 @@ static Node *mainpositionTV (const Table *t, const TValue *key) {
       lua_CFunction f = fvalue(key);
       return hashpointer(t, f);
     }
+    case LUA_VTABLE:
+      return hashid(t, gco2t(gcvalue(key))->keyid);
+    case LUA_VLCL:
+      return hashid(t, gco2lcl(gcvalue(key))->keyid);
+    case LUA_VCCL:
+      return hashid(t, gco2ccl(gcvalue(key))->keyid);
+    case LUA_VUSERDATA:
+      return hashid(t, gco2u(gcvalue(key))->keyid);
+    case LUA_VTHREAD:
+      return hashid(t, gco2th(gcvalue(key))->keyid);
     default: {
       GCObject *o = gcvalue(key);
       return hashpointer(t, o);
@@ -800,6 +841,7 @@ Table *luaH_new (lua_State *L) {
   Table *t = gco2t(o);
   t->metatable = NULL;
   t->flags = maskflags;  /* table has no metamethod fields */
+  t->keyid = ++G(L)->keyidcount;  /* see the note above 'hashid' */
   t->array = NULL;
   t->asize = 0;
   setnodevector(L, t, 0);

@@ -1,8 +1,8 @@
 {
   "TECHNO_VERSION": {
     "major": 0,
-    "minor": 15,
-    "patch": 1,
+    "minor": 16,
+    "patch": 0,
     "pre": null
   },
   "TECHNO_INIT_DIRS": [
