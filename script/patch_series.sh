@@ -50,7 +50,7 @@ lundump.c   XOR unscramble per string flag; forced copy of fixed buffers
 lundump.h   LUAC_FORMAT 0x46 (Diluvium bytecode format byte)
 lvm.c       type-test R[A] in OP_SETLIST before reading it as a table (corrupt-bytecode guard the load-time verifier cannot make; other opcodes already test via luaV_fastget)
 ltm.c       same table type-test for the vararg-table path in luaT_getvarargs
-luaconf.h   fixed string hash seed (deterministic pairs order)
+luaconf.h   fixed string hash seed (deterministic pairs order); '^' routed through the vendored pow under DV_NUMERIC
 lua.h       Diluvium version/branding strings
 lua.c       Diluvium branding; REPL input handling moved to drepl.c; --task delegates to dtask.c
 onelua.c    include analyze.c and the d*.c runtime files; rename ltests.c resetCI (amalgamation clash)

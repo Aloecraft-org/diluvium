@@ -67,6 +67,7 @@ axis2: 4024000000000000 403a000000000000
 exp: 4005bf0a8b145769
 exp_neg: 3fd78b56362cef38
 exp_glibc_differs: 3e155df6442ca92a
+pow_op_glibc_differs: 3fbdd0b9c3f53574
 exp_large: 7fdd422d2be5dc9b
 exp_small: 0000000000000001
 log: 3fe62e42fefa39ef

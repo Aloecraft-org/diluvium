@@ -760,6 +760,27 @@
 
 
 /*
+@@ luai_numpow (Diluvium) routes the '^' operator through the vendored
+** libm when the 'numeric' feature is on. Stock Lua reaches the platform's
+** pow() here, and that was the one transcendental the feature left
+** exposed: 'dlibs.c' installs the vendored 'exp', 'sin' and the rest over
+** 'math' at open time, but '^' compiles to OP_POW and never looks at
+** 'math', so a program writing 2.5^3.7 got the platform's answer while
+** one calling math.exp(3.7) got the vendored one -- on a build whose
+** whole claim is that a float result is the same bits on every target.
+** Constant folding in lobject.c uses the same macro, so a '^' folded at
+** compile time agrees with one evaluated at run time. Declared here
+** rather than through dlibm.h because llimits.h reads this macro before
+** any Diluvium header is in scope. Double only, which the feature pins.
+*/
+#if defined(DV_NUMERIC) && LUA_FLOAT_TYPE == LUA_FLOAT_DOUBLE
+double dv_pow (double x, double y);  /* dlibm.c */
+#define luai_numpow(L,a,b)  \
+  ((void)L, ((b) == 2) ? (a)*(a) : dv_pow(a,b))
+#endif
+
+
+/*
 @@ LUA_EXTRASPACE defines the size of a raw memory area associated with
 ** a Lua state with very fast access.
 ** CHANGE it if you need a different size.

@@ -115,4 +115,28 @@ assert_eq(math.exp(-math.huge), 0.0, "and of negative infinity")
 assert_eq(math.log(0.0), -math.huge, "log of zero")
 assert_eq(math.log(-1.0) ~= math.log(-1.0), true, "log of a negative is NaN")
 
+print("-- 7. The '^' operator goes through the vendored pow too")
+-- 'math.exp' and its neighbours are installed over the 'math' table, but
+-- '^' compiles to OP_POW and never looks at 'math', so until luaconf.h
+-- routed luai_numpow it reached the platform's pow -- and the platform's
+-- disagrees with the vendored one in the last bit on 2,837 of 30,000
+-- sampled (x, y) pairs. This is one of them; on glibc the platform says
+-- ...575. A build where the routing is lost is the build this line fails
+-- on.
+assert_eq(bits(1.3436666353689972 ^ -7.278736595197527), "3fbdd0b9c3f53574",
+          "x ^ y answers the vendored value, not the platform's")
+-- The operator, the array kernel and a constant folded by the compiler
+-- must all be the same pow, or two spellings of one expression would give
+-- two answers on one build.
+local x, y = 1.3436666353689972, -7.278736595197527
+local folded = 1.3436666353689972 ^ -7.278736595197527
+assert_eq(bits(folded), bits(x ^ y), "a folded constant agrees with the runtime")
+if array ~= nil then
+    assert_eq(bits(array.get(array.from{x} ^ y, 1)), bits(x ^ y),
+              "and the array kernel agrees with both")
+end
+assert_eq(2.0 ^ 2, 4.0, "the b == 2 shortcut is still a multiplication")
+assert_eq(2.0 ^ 10, 1024.0, "and an exact power is still exact")
+assert_eq(bits(2.0 ^ 0.5), bits(math.sqrt(2.0)), "2^0.5 is sqrt(2) to the bit")
+
 print("\n=== All Embedded libm Tests Passed ===")

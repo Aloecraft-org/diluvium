@@ -56,7 +56,8 @@ LUA_API void diluvium_libm_install (lua_State *L, int idx);
 
 /* The vendored set. Every one of these is bit-identical on every target
    this runtime builds for; that is the whole claim, and
-   test/numeric/libm_vectors.lua is where it is checked. */
+   test/numeric/corpus.lua is where it is checked, target against
+   target. */
 double dv_exp (double x);
 double dv_log (double x);
 double dv_log2 (double x);

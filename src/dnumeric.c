@@ -572,6 +572,12 @@ static double dvn_fmod (double m, double n) {
   return r;
 }
 
+/*
+** The float operators. 'pow' is the one of these that is not a single
+** IEEE operation, and it goes to the vendored 'dv_pow' for the reason the
+** twiddles go to 'dv_cos': the platform's answers differ by target in the
+** last bit, and the corpus line for '^' is diffed across targets.
+*/
 static double dvn_applyf (lua_State *L, dvn_binop op, double x, double y) {
   (void)L;  /* the float operators raise nothing; the integer ones do */
   switch (op) {
@@ -581,7 +587,7 @@ static double dvn_applyf (lua_State *L, dvn_binop op, double x, double y) {
     case DVN_DIV:  return x / y;
     case DVN_IDIV: return floor(x / y);
     case DVN_MOD:  return dvn_fmod(x, y);
-    case DVN_POW:  return pow(x, y);
+    case DVN_POW:  return dv_pow(x, y);  /* vendored, as the twiddles are */
     case DVN_EQ:   return (x == y) ? 1.0 : 0.0;
     case DVN_NE:   return (x != y) ? 1.0 : 0.0;
     case DVN_LT:   return dvn_ltf(x, y) ? 1.0 : 0.0;

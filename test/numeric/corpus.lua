@@ -155,6 +155,13 @@ local function f1(name, fn, x) say(name, fbits(fn(x))) end
 f1("exp", math.exp, 1.0)
 f1("exp_neg", math.exp, -1.0)
 f1("exp_glibc_differs", math.exp, -20.505154639175259)
+-- The '^' operator is OP_POW, not a 'math' entry, and reaches the vendored
+-- pow through luaconf.h's luai_numpow rather than through the install over
+-- 'math'. Same idea as the line above: on glibc the platform's pow answers
+-- ...575 here, the vendored one ...574, so a build where the operator
+-- slipped back to the platform fails this line on Linux and on nothing
+-- else -- which is the cross-target diff doing its job.
+say("pow_op_glibc_differs", fbits(1.3436666353689972 ^ -7.278736595197527))
 f1("exp_large", math.exp, 709.0)
 f1("exp_small", math.exp, -745.0)
 f1("log", math.log, 2.0)
