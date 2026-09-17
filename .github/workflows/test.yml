@@ -462,8 +462,15 @@ jobs:
 
       - name: Install Firefox
         uses: browser-actions/setup-firefox@latest
+      # The action asks the GitHub API which geckodriver is latest, and an
+      # unauthenticated request from a shared runner IP hits the rate limit
+      # when several runs start together -- 0b6dfbde failed here on one of
+      # three simultaneous runs and passed on the other two. The token only
+      # raises the limit; reading public release data needs no scope.
       - name: Install geckodriver
         uses: browser-actions/setup-geckodriver@latest
+        with:
+          token: ${{ github.token }}
       - name: Select geckodriver
         run: echo "GECKODRIVER=$(command -v geckodriver)" >> "$GITHUB_ENV"
 
