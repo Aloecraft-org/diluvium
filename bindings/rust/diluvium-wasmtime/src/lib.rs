@@ -49,7 +49,7 @@ use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
 
 /// The ABI version this crate was built against.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 const DV_OK: i32 = 0;
 const DV_QUEUE_FULL: i32 = 1;

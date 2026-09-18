@@ -106,6 +106,12 @@ tracks this repository by git rather than by a published version:
 - `bindings/rust/diluvium-sys` carries `DV_ABI_VERSION: u32 = 3` now.
   DRT's build fails against it until `drt-web`'s `abiVersion()` export
   and anything asserting 2 move with it.
+- **There are four such constants in this repository, not one**, and CI
+  is what found the two that were missed: `diluvium-sys`, the Python
+  binding, `bindings/js/src/index.js` and `diluvium-wasmtime` each pin
+  the number separately and each refuses a mismatch. A binding that
+  tracks this ABI should expect to move exactly one line, and to have
+  nothing tell it so until the runtime refuses to start.
 - **This does not reach DRT until 0.17.0 ships.** The work lives on
   `release/0.17.0` and is cut as `v0.17.0-dev.<n>` tags from there;
   `main` stays on the released line, so a `cargo update` that wants a
