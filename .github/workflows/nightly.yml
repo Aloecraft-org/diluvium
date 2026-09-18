@@ -10,12 +10,22 @@
 # person running `script/dev-tag.sh`. The script is identical here; this adds
 # the two cases nobody should have to remember to run:
 #
-#   push to main       so there is always a build to point DRT at between
-#                      releases, which is what an ABI bump needs
-#   schedule           nightly, skipped when HEAD has not moved since the last
-#                      dev tag -- that is `--if-changed`, and without it
-#                      identical builds accumulate
+#   push to release/** so a pending release always has a build to point a
+#                      consumer at, which is what an ABI bump needs
+#   schedule           nightly over the newest release branch, skipped when
+#                      HEAD has not moved since the last dev tag -- that is
+#                      `--if-changed`, and without it identical builds
+#                      accumulate
 #   workflow_dispatch  any ref, for cutting a branch by hand
+#
+# NOT main. main is the released line: a consumer that tracks this repository
+# by git -- diluvium-drt depends on it with no tag, rev or branch, so it
+# follows the default branch -- has to be able to take a spot fix from main
+# without also taking whatever breaking work is in flight. A bare git
+# dependency updates all or nothing, so main carrying an unreleased ABI would
+# mean a one-line fix could only be had by porting to it. Pending releases
+# live on release/<version> and reach main when they are ready to publish, and
+# a fix that lands on main cuts a real patch release rather than a dev build.
 #
 # Configurable values:
 #   NIGHTLY_CRON is the `schedule` below; RELEASE_WORKFLOW is what it dispatches.
@@ -23,7 +33,7 @@ name: Cut a dev tag
 
 on:
   push:
-    branches: ['main']
+    branches: ['release/**']
   schedule:
     # 03:17 UTC. Not on the hour: scheduled runs compete for runners then, and
     # GitHub drops a schedule it cannot start rather than queueing it.
@@ -59,10 +69,38 @@ jobs:
         with:
           ref: ${{ inputs.ref || github.sha }}
           # Every tag: the counter is derived from them, and a shallow clone
-          # reads none and would allocate dev.1 forever.
+          # reads none and would allocate dev.1 forever. Every branch too, so
+          # the scheduled run below can find the release branch it is meant to
+          # be building.
           fetch-depth: 0
 
+      # A scheduled run is ALWAYS on the default branch -- GitHub uses main's
+      # copy of this file and sets github.ref to main -- so a nightly that is
+      # supposed to build the pending release has to go and find it. Newest by
+      # version order, not by commit date: two release branches open at once
+      # means the higher version is the one in flight.
+      #
+      # No release branch open is the normal state between releases, and it is
+      # not an error: there is nothing pending to build, so the nightly stops.
+      - name: Find the branch a nightly should build
+        if: github.event_name == 'schedule'
+        id: target
+        run: |
+          set -eu
+          BRANCH=$(git branch -r --format='%(refname:lstrip=3)' \
+                   | grep -E '^release/' \
+                   | sort -V | tail -1 || true)
+          if [ -z "$BRANCH" ]; then
+            echo "::notice::No release/* branch is open; nothing pending to build."
+            echo "none=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "::notice::Nightly target is $BRANCH"
+          git checkout -q "origin/$BRANCH"
+          echo "none=false" >> "$GITHUB_OUTPUT"
+
       - id: pick
+        if: steps.target.outputs.none != 'true'
         env:
           EVENT: ${{ github.event_name }}
         run: |
@@ -96,13 +134,17 @@ jobs:
           echo "::notice::Cutting $TAG at $(git rev-parse --short HEAD)"
 
       - name: Dispatch the release workflow
-        if: steps.pick.outputs.skip != 'true'
+        if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          # --ref selects which copy of release.yml runs, and that must be
+          # the default branch: a workflow_dispatch on a ref only works where
+          # the workflow file exists there. The commit being built travels as
+          # the 'ref' input instead, which is what preflight checks out.
           gh workflow run release.yml \
-            --ref "${{ github.ref_name }}" \
+            --ref "${{ github.event.repository.default_branch }}" \
             -f ref="${{ steps.pick.outputs.sha }}" \
             -f tag="${{ steps.pick.outputs.tag }}" \
             -f publish=true

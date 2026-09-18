@@ -525,6 +525,49 @@ PyPI, which is why the exclusion is not optional.
   mirror entry with its own retention, configured on the lk2 side — nothing
   in a project repo changes for it beyond publishing the tag.
 
+### Where a dev build is cut from, and why not `main`
+
+**A repository other projects track by git keeps `main` releasable.** That is
+the rule; the dev-build trigger follows from it rather than the other way
+round.
+
+diluvium is the worked example, and the coupling is real rather than
+hypothetical. `diluvium-drt` depends on it as
+`diluvium = { git = "https://github.com/Aloecraft-org/diluvium" }` — no `tag`,
+no `rev`, no `branch` — so Cargo follows diluvium's **default branch** and
+`Cargo.lock` is the only thing holding a particular commit.
+
+That lockfile is not protection, and mistaking it for protection is the error
+this section exists to prevent. A git dependency updates **all or nothing**:
+there is no way to take one commit from a branch and leave the rest. So if
+`main` carries an unreleased ABI break, a consumer that wants a one-line spot
+fix can only have it by porting to the break in the same `cargo update`. The
+lock does not keep the consumer safe; it keeps the consumer *frozen*, and the
+two look identical right up until someone needs a fix.
+
+So:
+
+| where | what lives there |
+|---|---|
+| `main` | the released line. A fix that lands here cuts a real patch release. |
+| `release/<version>` | the pending release, however breaking. Dev builds are cut from here. |
+| a tag `v<version>` | published from `main` when the release is ready |
+
+A consumer tracking `main` therefore always gets something releasable, and
+opts into the pending work deliberately — by pointing at the release branch or
+at one of its `-dev.` tags — rather than by being handed it.
+
+**One mechanical consequence, easy to get wrong.** A `schedule:` trigger always
+runs on the default branch: GitHub uses `main`'s copy of the workflow file and
+sets `github.ref` to `main`. So a nightly meant to build the pending release
+cannot simply build "here" — it has to resolve the newest `release/*` branch
+and check it out. A `push:` trigger has no such problem, because a push uses
+the workflow file from the ref that was pushed.
+
+And the workflow file itself must therefore exist on `main` for the nightly to
+fire at all, even though what it builds lives elsewhere. CI wiring is not a
+breaking change and belongs on `main` ahead of the release branch that uses it.
+
 ---
 
 ## 8. Python projects

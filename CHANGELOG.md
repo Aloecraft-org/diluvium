@@ -81,10 +81,37 @@ suffix and it gains a date.
 
 ### Known issues
 
-- **`diluvium-drt` does not build against this until it is bumped.**
-  It pins `DV_ABI_VERSION` through `diluvium-sys` and exports
-  `abiVersion()` from `drt-web`, so the ABI 3 change above is a
-  breaking one for it. That is what a `-dev.` tag is for.
+- **`diluvium-drt` does not build against this until its pin moves.**
+  See `upgrading` below for what that costs and why it is not urgent.
+
+### Upgrading
+
+**Nothing to do for a program.** No syntax changed, no existing
+construct changed meaning, and the bytecode format byte does not move.
+
+**A host built against dv ABI 2 is refused by `dv_new`.** That is the
+bump doing its job: a wrapper that can call every function correctly
+and still misread a struct is worse off than one that refused to start.
+Rebuild the host against this `dv.h`. Snapshots are unaffected -- the
+header carries the snapshot format and the runtime fingerprint, not the
+ABI number, and the ext registry did not move either, so bytes a
+version-2 runtime encoded still decode here.
+
+**For `diluvium-drt` specifically**, and stated in detail because DRT
+tracks this repository by git rather than by a published version:
+
+- `crates/drt-swarm` depends on `diluvium = { git = ... }` with no
+  `tag`, `rev` or `branch`, so it follows this repository's **default
+  branch**. `Cargo.lock` currently holds it at `7f952d86`.
+- `bindings/rust/diluvium-sys` carries `DV_ABI_VERSION: u32 = 3` now.
+  DRT's build fails against it until `drt-web`'s `abiVersion()` export
+  and anything asserting 2 move with it.
+- **This does not reach DRT until 0.17.0 ships.** The work lives on
+  `release/0.17.0` and is cut as `v0.17.0-dev.<n>` tags from there;
+  `main` stays on the released line, so a `cargo update` that wants a
+  spot fix from `main` gets one without taking the ABI break. To test
+  against the new surface early, point the dependency at the release
+  branch or at a dev tag on purpose.
 
 
 ## [0.16.0] - 2026-09-17
