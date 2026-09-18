@@ -1,0 +1,5 @@
+# The Docusaurus build and its caches. build/ is what
+# deploy/cloud1/docs/deploy.sh ships; none of it is committed.
+/build/
+/node_modules/
+/.docusaurus/

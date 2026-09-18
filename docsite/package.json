@@ -1,0 +1,26 @@
+{
+  "name": "diluvium-docsite",
+  "private": true,
+  "description": "diluvium.aloecraft.org/docs -- the Diluvium documentation site. Built by deploy/cloud1/docs/deploy.sh, NOT by site/build.sh: the site contract forbids npm.",
+  "license": "Apache-2.0",
+  "scripts": {
+    "build": "docusaurus build",
+    "start": "docusaurus start",
+    "serve": "docusaurus serve",
+    "clear": "docusaurus clear"
+  },
+  "dependencies": {
+    "@docusaurus/core": "3.10.2",
+    "@docusaurus/preset-classic": "3.10.2",
+    "prism-react-renderer": "^2.4.1",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "engines": {
+    "node": ">=20.0"
+  },
+  "browserslist": {
+    "production": [">0.5%", "not dead", "not op_mini all"],
+    "development": ["last 3 chrome version", "last 3 firefox version", "last 5 safari version"]
+  }
+}

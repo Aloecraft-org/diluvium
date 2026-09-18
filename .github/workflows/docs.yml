@@ -1,0 +1,106 @@
+name: Docs site
+
+# Builds diluvium.aloecraft.org/docs/ -- docsite/, Docusaurus, from the
+# markdown in doc/.
+#
+# Separate from test.yml's `site` job on purpose, and for the opposite
+# reason site-smoke.yml is. That job is hermetic and installs nothing,
+# which is what proves site/build.sh never grew a network fetch; this one
+# is an `npm ci` and could not run there without destroying the thing that
+# job checks. A red run here is about the documentation, never about the
+# runtime or the landing page.
+#
+# It runs on any change to the published markdown, because the allowlist
+# in docusaurus.config.js means a doc/ edit can break this build -- a
+# heading that becomes an unresolvable link, or a file renamed out from
+# under sidebars.js -- and the first place that should show is here rather
+# than on the laptop of whoever next runs `deploy.sh build`.
+
+on:
+  push:
+    paths:
+      - 'docsite/**'
+      - 'doc/**'
+      - 'deploy/cloud1/docs/**'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    paths:
+      - 'docsite/**'
+      - 'doc/**'
+      - 'deploy/cloud1/docs/**'
+      - '.github/workflows/docs.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build the docs site
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docsite/package-lock.json
+
+      # POSIX sh and the guards, before anything slow. The kit is the
+      # documented way to build this, so a syntax error in it is a broken
+      # deploy path even when the site itself is fine.
+      - name: The deploy kit parses, and answers --help
+        run: |
+          sh -n deploy/cloud1/docs/deploy.sh
+          ./deploy/cloud1/docs/deploy.sh --help
+
+      # Through the kit rather than `npm run build` directly: that is the
+      # command a human runs, so it is the one that has to work.
+      - name: Build
+        run: ./deploy/cloud1/docs/deploy.sh build
+
+      - name: The build produced the pages, at the right base URL
+        run: |
+          set -eu
+          test -s docsite/build/index.html
+          test -s docsite/build/Guide/index.html
+          test -s docsite/build/404.html
+          # baseUrl is /docs/ and the deploy lands under it. A build that
+          # forgot would render fine here and 404 every asset on cloud1.
+          grep -q 'href="/docs/' docsite/build/index.html
+          # The allowlist holds: no internal working document is published.
+          for internal in ROADMAP Plan-2026-09 ALIGNMENT BUILD7 BUILD8 BUILD10 \
+                          AnalysisReport audit; do
+              if [ -e "docsite/build/$internal" ]; then
+                  echo "docsite: $internal is published; it is not in PUBLISHED" >&2
+                  exit 1
+              fi
+          done
+
+      # site/ must stay hermetic. Adding a docs build to this repo is
+      # exactly the change that tempts someone to put npm in build.sh.
+      - name: The site contract is untouched
+        run: |
+          set -eu
+          python3 site/check.py
+          # Comments stripped first. Both files DISCUSS npm at length --
+          # explaining why the webpack build went away is most of their
+          # header -- so matching raw lines fails on the documentation
+          # that exists to prevent the thing being checked for.
+          for f in site/build.sh site/render.py; do
+              if sed 's/#.*//' "$f" | grep -nE '\b(npm|npx|yarn|pnpm)\b'; then
+                  echo "site/: $f grew a node dependency; the contract is offline" >&2
+                  exit 1
+              fi
+          done
+
+      - name: Keep the build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: docsite
+          path: docsite/build/
+          if-no-files-found: ignore
+          retention-days: 7

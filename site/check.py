@@ -73,6 +73,12 @@ TEMPLATE_MUST_HAVE = [
      "the page's own code, a module so it can import the REPL pieces "
      "without a bundler"),
     ('href="/lab/"', "the way in to the Lab"),
+    ('href="/docs/"',
+     "the way in to the docs site. /docs/ was a 404 for months and check.py "
+     "used to REFUSE this link for that reason; it is served now, built by "
+     "docsite/ and shipped by deploy/cloud1/docs/deploy.sh. It stays a "
+     "sibling path and not a GitHub link: doc/Guide.md on github.com is the "
+     "same text without the navigation, the search or the highlighting"),
     ('href="https://software.aloecraft.org/releases/diluvium/"',
      "the way in to the Diluvium release mirror, which lives on "
      "software.aloecraft.org with every other mirror"),
@@ -82,9 +88,6 @@ TEMPLATE_MUST_HAVE = [
 
 # (regex, why it must stay out)
 TEMPLATE_MUST_NOT_HAVE = [
-    (r'href="/docs/"',
-     "there is no /docs/ on this vhost; the link shipped as a 404 for months. "
-     "Link the Guide on GitHub instead"),
     (r'(src|href)="[^"]*\?v=',
      "a pre-stamped URL; render.py stamps at build time and would stamp it twice"),
     (r'diluvium\.aloecraft\.org/(release|drt)\b|href="/(release|drt)/"',

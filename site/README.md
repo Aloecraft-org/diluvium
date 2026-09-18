@@ -37,6 +37,7 @@ static/
   assets/vendor/      xterm.js 5.5.0, addon-fit 0.10.0, Prism 1.30.0 (MIT)
   favicon.ico, robots.txt
 nginx/diluvium.conf   how the page wants to be served: /start's type, the cache policy
+nginx/docs.conf       /docs/'s policy; the site it belongs to is docsite/, not this one
 test/smoke.mjs        drives the real page in a real browser
 test/stage-mirror.mjs copies enough of the deployed mirrors into _out/ for it
 ```
@@ -92,6 +93,26 @@ The installer at `/start` downloads from the same mirror.
 `diluvium.aloecraft.org/release/` and `/drt/` were the mirrors' first
 addresses. `/release/` is retiring behind the Lab and `/drt/` is gone;
 `check.py` refuses either in the template.
+
+## `/docs/` is a different build
+
+The documentation at `diluvium.aloecraft.org/docs/` is Docusaurus, built
+from `doc/` by `docsite/` and shipped by
+`deploy/cloud1/docs/deploy.sh` — not by this build, and not by `lk_web`.
+It cannot be: Docusaurus is an `npm ci`, and the contract above forbids a
+network fetch. So one vhost carries two builds, this one keeps the
+contract, and neither calls the other.
+
+`check.py` used to **refuse** `href="/docs/"` in the template, because the
+path was a 404 for months. It now **requires** it, which is the same
+check pointing the other way. `nginx/docs.conf` is that subtree's cache
+policy and `try_files`, a drop-in beside `diluvium.conf`.
+
+One thing about it is not in this repo at all: `lk_web/deploy.py` rsyncs
+this site with `--delete` over `/var/www/html/diluvium/`, and spares a
+subtree only when another row in lk2's `manifest/sites.json` owns it.
+Until a `diluvium-docs` row at `/docs/` exists there, deploying this page
+deletes the documentation. `deploy/README.md` carries the row.
 
 ## No bundler, and what replaced it
 

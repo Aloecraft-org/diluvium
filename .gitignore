@@ -45,3 +45,10 @@ site/test/.out/
 # Built browser wasm (produced by `make build_browser`)
 web/diluvium_browser.wasm
 web/*.wasm
+
+# The docs site (docsite/): node_modules, the Docusaurus build output and
+# its cache. build/ is what deploy/cloud1/docs/deploy.sh ships; none of it
+# is committed. See docsite/README.md.
+docsite/node_modules/
+docsite/build/
+docsite/.docusaurus/

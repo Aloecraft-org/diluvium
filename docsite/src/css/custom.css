@@ -1,0 +1,92 @@
+/* custom.css -- the landing page's palette, applied to Infima.
+ *
+ * ── entry points ──────────────────────────────────────────────────────
+ *   docusaurus.config.js names this file as the classic preset's
+ *   customCss. Nothing else loads it.
+ *
+ * ── configurable values ───────────────────────────────────────────────
+ *   The two :root blocks below. They are the SAME hex values as
+ *   site/static/assets/styles.css, so /docs/ and / are one site rather
+ *   than two that happen to share a domain. When that file's palette
+ *   changes, this one changes with it -- there is no import that could
+ *   keep them in step, because that file is served as a static asset
+ *   from a different build.
+ *
+ * Infima (Docusaurus's CSS framework) is driven entirely by the --ifm-*
+ * tokens, so this file sets tokens and writes almost no rules.
+ */
+
+/* depth: the landing page's dark palette, verbatim */
+:root {
+  --dv-bg:         #0d0f14;
+  --dv-bg-soft:    #12141a;
+  --dv-bg-panel:   #171a21;
+  --dv-bg-code:    #0b0d11;
+  --dv-line:       #262b35;
+  --dv-ink:        #d7dae0;
+  --dv-ink-dim:    #8a919e;
+  --dv-ink-bright: #f2f4f8;
+  --dv-accent:     #7fd1b9;
+  --dv-accent-dim: #4f9d88;
+  --dv-warn:       #e0a458;
+
+  --ifm-font-family-base: system-ui, -apple-system, "Segoe UI", Roboto,
+                          "Helvetica Neue", Arial, sans-serif;
+  --ifm-font-family-monospace: ui-monospace, SFMono-Regular, "SF Mono", Menlo,
+                               Consolas, "Liberation Mono", monospace;
+  --ifm-code-font-size: 92%;
+  --ifm-global-radius: 10px;
+
+  --ifm-color-primary:        #4f9d88;
+  --ifm-color-primary-dark:   #478d7a;
+  --ifm-color-primary-darker: #438573;
+  --ifm-color-primary-darkest: #376e5f;
+  --ifm-color-primary-light:  #58ad96;
+  --ifm-color-primary-lighter: #5cb59d;
+  --ifm-color-primary-lightest: #71c0ab;
+}
+
+/* The light theme, from styles.css's [data-theme="light"] block. Docusaurus
+ * puts the same attribute on <html> that the landing page does, so the two
+ * pages agree about what "light" means without either knowing about the
+ * other. */
+[data-theme='light'] {
+  --ifm-background-color: #f7f8f6;
+  --ifm-background-surface-color: #ffffff;
+}
+
+[data-theme='dark'] {
+  --ifm-color-primary:        #7fd1b9;
+  --ifm-color-primary-dark:   #6bc9ad;
+  --ifm-color-primary-darker: #61c5a7;
+  --ifm-color-primary-darkest: #43b590;
+  --ifm-color-primary-light:  #93d9c5;
+  --ifm-color-primary-lighter: #9dddcb;
+  --ifm-color-primary-lightest: #bbe8db;
+
+  --ifm-background-color:         var(--dv-bg);
+  --ifm-background-surface-color: var(--dv-bg-soft);
+  --ifm-navbar-background-color:  var(--dv-bg-soft);
+  --ifm-footer-background-color:  var(--dv-bg-soft);
+  --ifm-font-color-base:          var(--dv-ink);
+  --ifm-heading-color:            var(--dv-ink-bright);
+  --ifm-toc-border-color:         var(--dv-line);
+  --ifm-hr-border-color:          var(--dv-line);
+  --ifm-code-background:          var(--dv-bg-code);
+  --ifm-pre-background:           var(--dv-bg-code);
+  --docusaurus-highlighted-code-line-bg: #1d222a;
+}
+
+/* Infima's default table and blockquote borders vanish against this
+ * background; doc/ leans on both heavily (every BUILD note and the Guide's
+ * operator tables), so they get the panel line colour rather than the
+ * near-black default. */
+[data-theme='dark'] table,
+[data-theme='dark'] table th,
+[data-theme='dark'] table td {
+  border-color: var(--dv-line);
+}
+[data-theme='dark'] blockquote {
+  border-left-color: var(--dv-accent-dim);
+  background: var(--dv-bg-soft);
+}

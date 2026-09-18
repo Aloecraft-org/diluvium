@@ -11,7 +11,7 @@
 [![Lua Version](https://img.shields.io/badge/lua-5.5.1-purple.svg)](https://www.lua.org/)
 [![WebAssembly](https://img.shields.io/badge/WebAssembly-Ready-orange.svg)](https://webassembly.org/)
 
-[Try it Online](https://diluvium.aloecraft.org) | [Programmer's Guide](doc/Guide.md) | [Lua 5.5 manual](https://www.lua.org/manual/5.5/)
+[Try it Online](https://diluvium.aloecraft.org) | [Documentation](https://diluvium.aloecraft.org/docs/) | [Programmer's Guide](doc/Guide.md) | [Lua 5.5 manual](https://www.lua.org/manual/5.5/)
 
 </div>
 
