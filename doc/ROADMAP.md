@@ -1084,6 +1084,29 @@ images are not, so an unexplained jump is usually one of those moving.
 - Contract calling convention, kernel framing, libm embedding — carried
   from the handoff, all still open.
 - Float reduction order, needed before any vector work.
+- **A cross-target harness for `dv_layout`, which is the one blind spot the
+  native tests cannot cover.** `test/dv_check.c` now recomputes every
+  `DV_LAYOUT_*` answer with `offsetof` and asserts that each index is checked by
+  name, so the table falling out of step with `dv.h` is caught — an index added
+  to the block without a row beside it is zero-filled by C rather than rejected
+  by it, and 0 is a legal offset. What it cannot catch, and says so, is a
+  wasm32-versus-LP64 divergence: nothing running on the build machine can, which
+  is the whole reason a binding asks the runtime instead of hardcoding numbers a
+  developer measured locally. The check that would is a harness driving a wasm
+  artifact under wasmtime — read `dv_layout`'s answers out of the module and
+  compare them against offsets probed in linear memory. Python is the obvious
+  host for it (`bindings/python` is CFFI in API mode and native-only, so this
+  would be a separate test rather than an extension of it), and the WASI
+  artifacts already export everything needed, being linked `--export-all`.
+
+  Worth stating what this is *not* for, because the idea arrived aimed
+  elsewhere: it does not test the instruction-budget charge. That charge only
+  goes wrong once something re-arms the hook at a granularity `dv.h` cannot
+  express, so no host-side harness in any language can reach it — a plugin is on
+  the far side of a subprocess protocol by design, the Python binding's `cdef` is
+  a strict subset of `dv.h`, and DRT sits on `dv.h` too. The test that pins the
+  charge is `doc/Lab.md` §4 item 4's, and it needs the hook multiplexer to exist
+  first.
 - A dataflow pass over the code (control-flow graph plus a known-table
   lattice), which would let the verifier prove the `OP_SETLIST` invariant
   statically instead of the VM enforcing it at run time, and which the

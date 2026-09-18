@@ -579,7 +579,7 @@ the first draft's "a `DV_BREAK` and a `dv_continue`":
 | `dv_break_at(inst, source, line)` / `dv_break_clear` | The host cannot reach `lua_sethook`, so arming is an ABI call. Keep the breakpoint set inside; `src/dhash.c` is already in the tree and self-contained. |
 | `DV_BREAK` as a `dv_run`/`dv_resume` status | `dv_run` inspects what the program yielded and expects a wait-set; a hook yield produces nothing, so today `src/dv.c:548` reports "the program yielded something that is not a wait-set". |
 | `dv_continue(inst)` | `dv_resume` is specified around answering a queue wait and refuses an instance that is not parked (`src/dv.c:636`). |
-| `dv_frame_count` / `dv_frame_info` / `dv_local` | `dshim` already flattens frames, but locals need `lua_getlocal` against the coroutine, which no exported call reaches. Filter `(`-prefixed names here rather than in every front end. |
+| ~~`dv_frame_count` / `dv_frame_info` / `dv_local`~~ **Built**, ABI 3 — see §3.5. | `dshim` already flattens frames, but locals need `lua_getlocal` against the coroutine, which no exported call reaches. Filter `(`-prefixed names here rather than in every front end. |
 | Where the break happened | The yield carries nothing — `nresults == 0` and `k == NULL` are hard `api_check`s — so the hook must write the line into instance state before yielding, the way `dv_insn_hook` reaches the instance through the registry (`src/dv.c:205`). |
 
 Two further consequences, both **read rather than run**, and flagged as such:
@@ -591,6 +591,86 @@ Two further consequences, both **read rather than run**, and flagged as such:
   a snapshot attempted at a breakpoint, which needs the ABI above.)
 - **One hook slot, still.** §3.3's problem does not go away: whatever arms the line
   hook must keep the budget's count hook firing, or budgets silently stop working.
+
+### 3.5 The reading half, built — and the four things that decided its shape
+
+`dv_frame_count`, `dv_frame_info` and `dv_local` landed in ABI 3. §3.2's reading
+was right: the mechanism is public API against a suspended thread and needed no
+new machinery. What needed deciding was everything around it, and four answers
+are worth keeping because each one closed off a shape that looked reasonable.
+
+**Breakpoints are addressed by prototype hash and pc, not by source and line.**
+Not a preference. A snapshot carries the *stripped* dump — 10.5 keeps line
+numbers and source names out of the hash domain so a comment reflow does not
+invalidate every cached agent — and `lua_dump` with strip drops `locvars`,
+`upvalues`, `lineinfo` and `source` together. So a restored instance has its
+values, none of its names, a chunk called `=snapshot` and no line information at
+all. `dv_break_at(inst, source, line)`, which §3.4's table proposed, **could
+never match a woken instance**. The hash and the pc both survive: 10.5 makes the
+hash the name of the code, and `diluvium_shim_frame` already reports `pc` as a
+code offset. A front end maps hash+pc back to source:line through a static
+analysis of the source it started from. `dv_frame_info` reports `has_source` so a
+panel knows which case it is in, and there is a test that a woken instance says
+so.
+
+**Inspection is host-side only, for now.** A host read grants nothing new:
+`dv_snapshot` already writes the parked program, its call chain and its reachable
+values into a host buffer on any parked instance with no flag set, so an exported
+read is a projection of an existing capability at a usable granularity rather
+than a new hole. A *guest-reachable* read is a different decision and was
+deliberately not taken: a supervisor reading a descendant is a new authority —
+killing a child leaks nothing, reading it leaks everything — and it has a
+specific hazard. An endpoint reference is bytes a guest can only receive, never
+construct (7.3). A read that handed a parent the msgpack of a child's local would
+hand it those bytes, and `endpoint.bind` turns them into a live handle to a peer
+it was never given: audit finding 6 through a different door. If that read is
+ever wanted it needs ext 0x02 redacted and a capability name of its own, distinct
+from `lifecycle`.
+
+**A debugger's own evaluation gets its own counter.** The instruction budget
+charges VM instructions and not wall time, so pausing at a breakpoint is free by
+construction — a stepper that stops for an hour spends nothing. The question that
+is *not* free is §3.1 option 3's: evaluating a watch expression means compiling a
+chunk and running it on the same thread, which the budget would charge to the
+program. A host stepping through would spend its guest's budget on its own
+questions. Separate counter, decided before the stepper exists so it is not
+discovered afterwards.
+
+**A value that cannot be described is a tagged placeholder, and not an ext
+object.** The plan was ext 0x09, from 5.5's unassigned core range. It cannot be:
+`dmsgpack.c` refuses any wrapper whose code is outside the application range
+0x10–0x7F **at write time**, because the wrapper is an ordinary mutable table and
+a guest that could name a reserved code could forge an ext 0x02 — the same
+finding-6 shape again, and that check is its mitigation. So `dv_local` describes
+values instead of encoding them: every value is an array led by a `DV_VAL_*` tag,
+and the reply is `["name", <value>]`. No registry code is spent and the codec is
+untouched, which also kept the ABI bump about `dv.h` alone.
+
+The description is **non-recursive**, and that is the load-bearing property
+rather than a simplification. A table is expanded one level and any table inside
+it is a placeholder, so a cyclic table cannot be followed — there is no traversal
+to loop, and therefore no depth to cap and no cycle to detect. The plain codec
+guards cycles with a nesting cap and *raises* when it trips, which is right for a
+message a program chose to send and useless for inspecting a program that chose
+nothing; `t.self = t` is ordinary. A panel descends by passing a path — an array
+of the key descriptions it was already given — and each step is one raw index, so
+`t.self.self.self.n` terminates because the path is finite and not because
+anything detected the cycle.
+
+Two smaller things, recorded because they cost a wrong first draft each:
+
+- **Level 0 of a parked instance is never the program.** It parked *inside*
+  `queue.wait`, so the innermost frame is that C function and the driver's own C
+  frame is at the bottom. The first version of the tests asserted otherwise and
+  failed on five checks. A front end wants the innermost frame with `is_c` clear.
+- **The read happens on the instance's main state, not on the parked thread.**
+  The value is moved across with `lua_xmove`, the pattern
+  `diluvium_shim_pushslot` already uses. Building on the coroutine would push a
+  `CallInfo` onto the chain `dv_resume` and `dv_snapshot` are both about to read,
+  and an error inside it would unwind a suspension that has to survive the call
+  untouched.
+
+---
 
 ## 4. What to settle first
 
@@ -612,13 +692,28 @@ In this order, because each answer constrains the next:
    twenty lines of Lua and worth having on its own.
 
 3. **The breakpoint ABI**, as tabulated in §3.4: arming, a `DV_BREAK` status,
-   `dv_continue`, and frame/local readers. Smaller than it looks, because the reading
-   half is public Lua API against a suspended thread and already works.
+   `dv_continue`, and frame/local readers. ~~Smaller than it looks, because the
+   reading half is public Lua API against a suspended thread and already works.~~
+   **The reading half is built** (§3.5, ABI 3); what remains is arming, the
+   status and `dv_continue` — plus a `dv_frame_code_id` over an exported
+   prototype hash, since §3.5 settles addressing as hash+pc and `ds_dumpclosure`
+   is static. The hash is deliberately *not* in `dv_frame`: hashing means dumping
+   a prototype, so carrying it there would charge a panel for it on every
+   refresh.
 
 4. **One hook slot, two users** (§3.3). The budget's count hook must still fire once a
    line hook is armed. Write the test that budgets an instance, attaches a debugger,
    and asserts the budget still fires — this is the same shape as the audit's finding
    that a budget could be stored, reported by an accessor, and enforced by nothing.
+
+   One trap under it is already removed: `dv_insn_hook` charged
+   `insn_used += DV_HOOK_STEP`, the *constant*, so a hook re-armed at a finer
+   granularity — a stepper wants 1 — would have been charged 1000 per fire and
+   exhausted a budget a thousand times early while `dv_usage` reported it
+   wrongly. It now reads `lua_gethookcount` and returns early unless
+   `ar->event` is `LUA_HOOKCOUNT`, so a line event is not charged as
+   instructions. That change is untestable through `dv.h` — nothing there can
+   re-arm the hook — and the test named above is the one that will pin it.
 
 5. **Whether the REPL is the breakpoint's front end** (§2b option 3). Prototype the
    re-entry trick first; it is the only unproven step, and if it does not work the REPL
