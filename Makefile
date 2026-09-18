@@ -463,22 +463,12 @@ interrupt_check: test_build
 
 # doc/ALIGNMENT.md 7. Print the next free dev tag; cut nothing.
 #
-# The counter is allocated from the tags that exist, never stored in the tree:
-# a counter in a file means a commit on every nightly, and two branches cutting
-# at once would collide on it. It is global and monotonic per repository and
-# never reused, so 'dev.105' names exactly one build forever. Ordering still
-# holds across versions because the release segment dominates --
-# 0.16.0.dev104 < 0.17.0.dev105 -- which is why the number does not restart
-# when the base version moves.
-#
-# The base comes from VERSION with any prerelease suffix cut off, so this keeps
-# working whether VERSION reads '0.17.0' or '0.17.0-dev.1'.
+# The allocation lives in script/dev-tag.sh, which is the same script
+# diluvium-drt carries: §7 is one scheme across the repositories, and a
+# Makefile reimplementation of it here would be a second spelling to keep in
+# step. This target exists because diluvium is driven through make.
 dev-tag:
-	@base=$$(tr -d '[:space:]' < $(CURDIR)/VERSION | sed 's/-.*//'); \
-	n=$$(git -C $(CURDIR) tag --list 'v*-dev.*' \
-	      | sed -n 's/.*-dev\.\([0-9][0-9]*\)$$/\1/p' \
-	      | sort -n | tail -1); \
-	echo "v$$base-dev.$$(( $${n:-0} + 1 ))"
+	@$(CURDIR)/script/dev-tag.sh
 
 .PHONY: dev-tag
 

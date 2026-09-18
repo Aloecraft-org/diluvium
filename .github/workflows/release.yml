@@ -19,12 +19,6 @@ on:
   push:
     tags:
       - 'v*'
-      # doc/ALIGNMENT.md 7 wants dev tags excluded from the release path.
-      # Its snippet spells that as a 'tags-ignore:' beside 'tags:', which
-      # GitHub rejects -- the two filters cannot both appear for one event --
-      # so the exclusion is a negative pattern inside 'tags:' instead. Order
-      # matters: the '!' has to come after the pattern it narrows.
-      - '!v*-dev.*'
 
   workflow_dispatch:
     inputs:
@@ -66,6 +60,11 @@ jobs:
       publish: ${{ steps.check.outputs.publish }}
       draft: ${{ steps.check.outputs.draft }}
       prerelease: ${{ steps.check.outputs.prerelease }}
+      # The suffix decides the rigor (doc/ALIGNMENT.md 7): a 'v*-dev.*' tag
+      # builds one platform, needs no changelog entry, and is always a
+      # prerelease. Same shape as diluvium-drt's preflight, deliberately --
+      # one scheme across the repositories means one thing to reason about.
+      dev: ${{ steps.check.outputs.dev }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -75,6 +74,11 @@ jobs:
       - name: Changelog tooling
         run: pip install --quiet pyyaml
 
+      # Sound whatever is being cut. 'consistency' is the one that catches a
+      # VERSION, .technoproj and CHANGELOG.yaml that disagree, which is what a
+      # dev build's own version string is derived from -- so it runs for a dev
+      # tag too. What a dev tag skips is 'release-check', below: it has no
+      # entry to check, by design.
       - name: The changelog is the source of truth for release notes
         run: |
           set -eu
@@ -91,6 +95,14 @@ jobs:
           set -eu
           VERSION=$(tr -d '[:space:]' < VERSION)
 
+          # Decided by the tag alone, so a dev build cannot be turned into a
+          # release by a dispatch input, and a release cannot accidentally take
+          # the fast path.
+          case "${GITHUB_REF#refs/tags/}${IN_TAG}" in
+            *-dev.*) DEV=true ;;
+            *)       DEV=false ;;
+          esac
+
           if [ "$EVENT" = push ]; then
             # The tag already exists -- that is what triggered this run.
             TAG="${GITHUB_REF#refs/tags/}"
@@ -103,8 +115,17 @@ jobs:
             # Assign from the command, not from a pipeline: a pipeline's
             # status is the last stage's, so piping into sed would swallow
             # the failure this gate exists to raise.
-            CL=$(script/changelog.py release-check --tag "$TAG" --publish)
-            PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
+            if [ "$DEV" = true ]; then
+              # A dev build has no entry, by design (doc/ALIGNMENT.md 7): it is
+              # one commit in someone's hands, not a release the changelog
+              # describes. Always a prerelease, whatever any entry's 'stable'
+              # says -- that field describes the version being developed and
+              # not this cut of it.
+              PRERELEASE=true
+            else
+              CL=$(script/changelog.py release-check --tag "$TAG" --publish)
+              PRERELEASE=$(printf '%s\n' "$CL" | sed -n 's/^prerelease=//p')
+            fi
           else
             TAG="$IN_TAG"
             PUBLISH="${IN_PUBLISH:-false}"
@@ -127,7 +148,9 @@ jobs:
               exit 1
             fi
 
-            if [ "$PUBLISH" = true ]; then
+            if [ "$DEV" = true ]; then
+              PRERELEASE=true
+            elif [ "$PUBLISH" = true ]; then
               # Fatal if the changelog does not describe this tag as
               # released -- otherwise the release page could say
               # "unreleased". The changelog decides prerelease, via 'stable'.
@@ -146,7 +169,7 @@ jobs:
 
           # Advisory only: the tag and the VERSION file drifting apart is
           # usually a mistake, but not always (hotfix tags, re-cuts).
-          if [ -n "$TAG" ] && [ "$TAG" != "v$VERSION" ]; then
+          if [ "$DEV" != true ] && [ -n "$TAG" ] && [ "$TAG" != "v$VERSION" ]; then
             echo "::warning::tag '$TAG' does not match the VERSION file ('v$VERSION')."
           fi
 
@@ -155,6 +178,7 @@ jobs:
             echo "publish=$PUBLISH"
             echo "draft=$DRAFT"
             echo "prerelease=$PRERELEASE"
+            echo "dev=$DEV"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -187,6 +211,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
+      dev: ${{ needs.preflight.outputs.dev == 'true' }}
 
   publish:
     name: Publish release
@@ -214,6 +239,7 @@ jobs:
           TAG: ${{ needs.preflight.outputs.tag }}
           VERSION: ${{ needs.build.outputs.version }}
           SHA: ${{ needs.build.outputs.sha }}
+          DEV: ${{ needs.preflight.outputs.dev }}
         run: |
           set -eu
           have() { [ -f "release_dist/$1" ]; }
@@ -223,7 +249,30 @@ jobs:
           # truth. Everything below is provenance and download guidance,
           # which is derived from what this build actually produced and so
           # does not belong in the changelog.
-          script/changelog.py render md --tag "$TAG" > release_notes.md
+          if [ "$DEV" = true ]; then
+            # A dev tag has no entry of its own, so the notes come from the
+            # newest one -- changelog.json's 'notes_md', which is the rendered
+            # Markdown travelling with each entry so a consumer needs no
+            # renderer. Read by index and not looked up by tag: the entry names
+            # the version being developed while the tag carries the global
+            # counter, so the two stop matching after the first dev build.
+            # That divergence is intended; ALIGNMENT 7 keeps the counter out of
+            # the tree precisely so cutting one commits nothing.
+            jq -r '.releases[0].notes_md' changelog.json > release_notes.md
+            {
+              echo ""
+              echo "---"
+              echo ""
+              echo "**This is a development build, not a release.** The entry"
+              echo "above describes the version being developed, not this cut"
+              echo "of it. See \`BUILDINFO.txt\` for the exact commit."
+              echo ""
+              echo "Not in the release mirror and not a candidate:"
+              echo "see \`doc/ALIGNMENT.md\` §7."
+            } >> release_notes.md
+          else
+            script/changelog.py render md --tag "$TAG" > release_notes.md
+          fi
 
           {
             echo ""
@@ -271,7 +320,10 @@ jobs:
         with:
           tag_name: ${{ needs.preflight.outputs.tag }}
           target_commitish: ${{ needs.build.outputs.sha }}
-          name: Diluvium ${{ needs.build.outputs.version }}
+          # For a dev build the VERSION file names the series being developed
+          # ('0.17.0-dev.1') while the tag carries the counter, so the tag is
+          # the honest title; anything else would label dev.3 as dev.1.
+          name: ${{ needs.preflight.outputs.dev == 'true' && needs.preflight.outputs.tag || format('Diluvium {0}', needs.build.outputs.version) }}
           files: release_dist/*
           body_path: release_notes.md
           draft: ${{ needs.preflight.outputs.draft == 'true' }}
