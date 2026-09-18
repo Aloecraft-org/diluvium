@@ -261,13 +261,44 @@ static void *dv_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
 */
 static void dv_insn_hook (lua_State *L, lua_Debug *ar) {
   dv_instance *inst;
-  (void)ar;
+  int step;
+  /*
+  ** Only a count event is instructions. The mask this file arms is
+  ** LUA_MASKCOUNT alone, so today this branch is taken every time; it is
+  ** here because a 'lua_State' has one hook slot and one hook function, and
+  ** anything that adds LUA_MASKLINE to share it -- a debugger -- arrives at
+  ** this same function with 'ar->event' as LUA_HOOKLINE. Charging a line
+  ** event as instructions would invent them.
+  */
+  if (ar->event != LUA_HOOKCOUNT)
+    return;
   lua_getfield(L, LUA_REGISTRYINDEX, "diluvium.instance");
   inst = (dv_instance *)lua_touserdata(L, -1);
   lua_pop(L, 1);
   if (inst == NULL)
     return;
-  inst->insn_used += DV_HOOK_STEP;
+  /*
+  ** The count in force, not DV_HOOK_STEP.
+  **
+  ** They are the same number while the two 'lua_sethook' calls in this file
+  ** are the only things that arm the hook, which is why the constant was the
+  ** accounting and why this changes nothing today. It is the trap underneath
+  ** that change: a hook re-armed at a finer granularity -- a stepper wants 1
+  ** -- would still be charged 1000 per fire, so an instance stepped through
+  ** would exhaust a budget a thousand times too early and 'dv_usage' would be
+  ** wrong by that factor rather than by the rounding its comment promises. A
+  ** budget stored, reported by an accessor, and enforced wrongly is the defect
+  ** the M0-M7 audit found twice; reading the count back costs one load.
+  **
+  ** Zero cannot reach here -- 'lua_sethook' with a count of 0 leaves
+  ** 'hookcount' at 0, which the decrement in 'luaG_traceexec' never brings to
+  ** 0 -- but charging it would freeze 'insn_used' and with it the budget, so
+  ** the fallback is the old constant rather than nothing.
+  */
+  step = lua_gethookcount(L);
+  if (step <= 0)
+    step = DV_HOOK_STEP;
+  inst->insn_used += (uint64_t)step;
   if (inst->insn_limit != 0 && inst->insn_used >= inst->insn_limit) {
     inst->exceeded = 1;
     /*

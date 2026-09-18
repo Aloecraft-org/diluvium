@@ -12,6 +12,7 @@
 ** is also a check that dv.h is sufficient on its own.
 */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -561,21 +562,96 @@ static void top_level_yield (void) {
 }
 
 
+/*
+** What 'dv_layout' owes its caller, index by index.
+**
+** Recomputed here with 'offsetof' rather than written down as numbers. That
+** compares the runtime's table against the same compiler's idea of the same
+** public structs, which does not catch a wasm32-versus-LP64 difference --
+** nothing running on this machine can, and that is exactly why a binding asks
+** the runtime instead of hardcoding what a developer measured locally. What it
+** does catch is the table falling out of step with 'dv.h': 'dv_layout' fills a
+** 'static const uint32_t table[DV_LAYOUT_COUNT]', so an index added to the
+** DV_LAYOUT_* block without a row beside it is zero-filled by C rather than
+** rejected by it -- and 0 is a legal offset (DV_LAYOUT_WAITSET_N is 0), so
+** nothing downstream can tell that apart from an answer. On wasm it is a
+** binding reading a field from the front of a struct it is not at.
+*/
+static uint8_t layout_seen[DV_LAYOUT_COUNT];
+
+static void layout_is (const uint32_t *v, int idx, size_t want,
+                       const char *what) {
+  layout_seen[idx] = 1;
+  eq_i(v[idx], (long long)want, what);
+}
+
+
 static void layout (void) {
-  /* The numbers a wasm binding depends on, checked here so a native build
-     notices if a struct changes shape. It cannot catch a wasm32-versus-LP64
-     difference -- nothing running on this machine can -- which is exactly why
-     the binding asks the runtime rather than hardcoding them. */
-  uint32_t v[DV_LAYOUT_COUNT];
+  uint32_t v[DV_LAYOUT_COUNT + 1];
+  size_t i;
+  int covered = 1;
   eq_i(dv_layout(NULL, 0), DV_LAYOUT_COUNT, "dv_layout reports how many it has");
   eq_i(dv_layout(v, DV_LAYOUT_COUNT), DV_LAYOUT_COUNT, "and fills them all in");
-  eq_i(v[DV_LAYOUT_WAITSET_N], 0, "the wait-set count is first");
-  ok(v[DV_LAYOUT_WAITSET_IDS] == 4, "the handles follow it");
-  ok(v[DV_LAYOUT_WAITSET_TIMEOUT] > v[DV_LAYOUT_WAITSET_IDS],
-     "the timeout comes after the handles");
-  ok(v[DV_LAYOUT_WAITSET_SIZE] >= v[DV_LAYOUT_WAITSET_FOR_WRITE] + 1,
-     "and every field is inside the struct");
+
+  layout_is(v, DV_LAYOUT_CONFIG_SIZE, sizeof(dv_config),
+            "dv_config's size is the compiler's");
+  layout_is(v, DV_LAYOUT_CONFIG_ABI, offsetof(dv_config, abi_version),
+            "and its abi_version is where the struct puts it");
+  layout_is(v, DV_LAYOUT_CONFIG_FLAGS, offsetof(dv_config, flags),
+            "and its flags");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_SIZE, sizeof(dv_queue_info),
+            "dv_queue_info's size");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_CAPACITY, offsetof(dv_queue_info, capacity),
+            "and its capacity");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_LEN, offsetof(dv_queue_info, len),
+            "and its len");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_ENABLED, offsetof(dv_queue_info, enabled),
+            "and its enabled");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_EXPORTED, offsetof(dv_queue_info, exported),
+            "and its exported");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_DIRECTION,
+            offsetof(dv_queue_info, direction), "and its direction");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_ON_FULL, offsetof(dv_queue_info, on_full),
+            "and its on_full");
+  layout_is(v, DV_LAYOUT_WAITSET_SIZE, sizeof(dv_waitset),
+            "dv_waitset's size");
+  layout_is(v, DV_LAYOUT_WAITSET_N, offsetof(dv_waitset, n),
+            "and its count, which is first");
+  layout_is(v, DV_LAYOUT_WAITSET_IDS, offsetof(dv_waitset, ids),
+            "and its handles");
+  layout_is(v, DV_LAYOUT_WAITSET_TIMEOUT, offsetof(dv_waitset, timeout_ms),
+            "and its timeout");
+  layout_is(v, DV_LAYOUT_WAITSET_FOR_WRITE, offsetof(dv_waitset, for_write),
+            "and its for_write");
+
+  /*
+  ** The coverage assertion, which is the point of 'layout_seen'. Adding a
+  ** DV_LAYOUT_* index and bumping DV_LAYOUT_COUNT now fails here until a line
+  ** above names it -- so the zero-filled row above cannot be added silently.
+  ** A test that only checked the four wait-set entries it used to would have
+  ** passed with the new entry wrong.
+  */
+  for (i = 0; i < DV_LAYOUT_COUNT; i++) {
+    if (!layout_seen[i]) {
+      printf("      (DV_LAYOUT index %u has no check in layout())\n",
+             (unsigned)i);
+      covered = 0;
+    }
+  }
+  ok(covered, "every DV_LAYOUT_* index is checked by name");
+
+  /*
+  ** A short buffer stops where it was told to. 'n' is how many the caller has
+  ** room for and a wasm binding built against an older DV_LAYOUT_COUNT passes a
+  ** smaller one on purpose, so writing past it is the one way this function can
+  ** corrupt a caller that is using it exactly as documented.
+  */
+  for (i = 0; i <= DV_LAYOUT_COUNT; i++)
+    v[i] = 0xDEADBEEFu;
   eq_i(dv_layout(v, 2), 2, "a short buffer is filled as far as it goes");
+  ok(v[2] == 0xDEADBEEFu, "and not one entry further");
+  eq_i(dv_layout(v, DV_LAYOUT_COUNT), DV_LAYOUT_COUNT, "a full buffer is filled");
+  ok(v[DV_LAYOUT_COUNT] == 0xDEADBEEFu, "and stops at the end of the table");
 }
 
 
