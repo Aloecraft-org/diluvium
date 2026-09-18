@@ -24,6 +24,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "dlibs.h"
+#include "dmsgpack.h"
 #include "dendpoint.h"
 #include "dqueue.h"
 #include "dshim.h"
@@ -1147,6 +1148,199 @@ dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out) {
       out->pc = (int32_t)f.pc;
   }
   out->nlocals = (int32_t)walk_locals(co, &ar, 0, NULL);
+  return DV_OK;
+}
+
+
+/*
+** One value, described. 'expand' is 1 only for the local itself.
+**
+** Never recursive: 'expand' is 0 for everything reached from inside a table, so
+** a nested table is DV_VAL_OPAQUE rather than another level. That is the whole
+** cycle story -- there is no traversal to loop, so there is nothing to detect.
+*/
+static void push_value_envelope (lua_State *L, int idx, int expand);
+
+
+static void push_table_envelope (lua_State *L, int idx) {
+  int env, entries, written = 0;
+  lua_Integer count = 0;
+  luaL_checkstack(L, 8, "dv_local: describing a table");
+  lua_createtable(L, 4, 0);
+  env = lua_gettop(L);
+  lua_pushinteger(L, DV_VAL_TABLE);
+  lua_rawseti(L, env, 1);
+  lua_createtable(L, DV_LOCAL_MAX_ENTRIES, 0);
+  entries = lua_gettop(L);
+  /*
+  ** 'lua_next' is a raw traversal, which is the property that matters here: a
+  ** '__index' or '__pairs' would be guest code, and a parked instance cannot run
+  ** any -- so a cooked read would either deadlock or have to resume the program
+  ** behind its host's back. Raw is also what 'diluvium_repl_complete' chose, for
+  ** the same reason.
+  */
+  lua_pushnil(L);
+  while (lua_next(L, idx) != 0) {
+    int vidx = lua_gettop(L);
+    int kidx = vidx - 1;
+    count++;
+    if (written < DV_LOCAL_MAX_ENTRIES) {
+      lua_createtable(L, 2, 0);
+      push_value_envelope(L, kidx, 0);
+      lua_rawseti(L, -2, 1);
+      push_value_envelope(L, vidx, 0);
+      lua_rawseti(L, -2, 2);
+      written++;
+      lua_rawseti(L, entries, written);
+    }
+    lua_pop(L, 1);            /* the value; the key stays for 'lua_next' */
+  }
+  lua_pushinteger(L, count);
+  lua_rawseti(L, env, 2);
+  lua_pushboolean(L, count > (lua_Integer)written);
+  lua_rawseti(L, env, 3);
+  lua_pushvalue(L, entries);
+  lua_rawseti(L, env, 4);
+  lua_settop(L, env);         /* the envelope alone */
+}
+
+
+static void push_value_envelope (lua_State *L, int idx, int expand) {
+  int t = lua_type(L, idx);
+  luaL_checkstack(L, 4, "dv_local: describing a value");
+  switch (t) {
+    case LUA_TNIL: case LUA_TNONE:
+      lua_createtable(L, 1, 0);
+      lua_pushinteger(L, DV_VAL_NIL);
+      lua_rawseti(L, -2, 1);
+      return;
+    case LUA_TBOOLEAN:
+      lua_createtable(L, 2, 0);
+      lua_pushinteger(L, DV_VAL_BOOL);
+      lua_rawseti(L, -2, 1);
+      lua_pushboolean(L, lua_toboolean(L, idx));
+      lua_rawseti(L, -2, 2);
+      return;
+    case LUA_TNUMBER:
+      lua_createtable(L, 2, 0);
+      /* Integer and float are separate tags because they are separate types in
+         this VM: 5.2's rule is that round-tripping an integer yields an integer,
+         and a panel showing 1.0 where the program holds 1 is the same lie. */
+      lua_pushinteger(L, lua_isinteger(L, idx) ? DV_VAL_INT : DV_VAL_FLOAT);
+      lua_rawseti(L, -2, 1);
+      lua_pushvalue(L, idx);
+      lua_rawseti(L, -2, 2);
+      return;
+    case LUA_TSTRING:
+      lua_createtable(L, 2, 0);
+      lua_pushinteger(L, DV_VAL_STR);
+      lua_rawseti(L, -2, 1);
+      lua_pushvalue(L, idx);
+      lua_rawseti(L, -2, 2);
+      return;
+    case LUA_TTABLE:
+      if (expand) {
+        push_table_envelope(L, lua_absindex(L, idx));
+        return;
+      }
+      break;                  /* opaque, named "table" */
+    default:
+      break;
+  }
+  lua_createtable(L, 2, 0);
+  lua_pushinteger(L, DV_VAL_OPAQUE);
+  lua_rawseti(L, -2, 1);
+  lua_pushstring(L, lua_typename(L, t));
+  lua_rawseti(L, -2, 2);
+}
+
+
+/*
+** The protected half: build the reply and encode it.
+**
+** Protected because every step of it can raise -- 'lua_createtable' against a
+** memory budget, and the codec on anything it will not write -- and 'dv_local'
+** is called from host code running under no protection of the runtime's. The
+** same reasoning 'dv_array_adopt' states: the failure has to become a return
+** here or it takes the process with it.
+**
+** Called with the name at 1 and the value at 2; leaves the encoded string.
+*/
+static int local_build (lua_State *L) {
+  lua_createtable(L, 2, 0);
+  lua_pushvalue(L, 1);
+  lua_rawseti(L, -2, 1);
+  push_value_envelope(L, 2, 1);
+  lua_rawseti(L, -2, 2);
+  diluvium_msgpack_encode(L, -1);
+  return 1;
+}
+
+
+dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
+                    uint8_t *buf, size_t cap, size_t *len) {
+  lua_State *co, *L;
+  lua_Debug ar;
+  const char *name = NULL;
+  const char *bytes;
+  size_t n = 0;
+  int slot, base;
+  if (inst == NULL || len == NULL)
+    return DV_ERROR;
+  *len = 0;
+  if ((co = inspectable(inst)) == NULL)
+    return DV_BUSY;
+  if (level > (uint32_t)INT_MAX || !lua_getstack(co, (int)level, &ar)) {
+    set_error(inst, "dv_local: no such frame");
+    return DV_ERROR;
+  }
+  if (index == 0 || index > (uint32_t)INT_MAX ||
+      (slot = walk_locals(co, &ar, (int)index, &name)) == 0) {
+    set_error(inst, "dv_local: no such local at that index");
+    return DV_ERROR;
+  }
+  /*
+  ** Built on the instance's main state, not on the parked thread.
+  **
+  ** The value is read off 'co' and moved across with 'lua_xmove' -- the same
+  ** pattern 'diluvium_shim_pushslot' uses, and legal because both belong to one
+  ** Lua state. Doing the work on 'co' instead would push a CallInfo onto the
+  ** chain that 'dv_resume' and 'dv_snapshot' are both about to read, and an
+  ** error inside it would unwind a suspension that has to survive this call
+  ** untouched. Inspecting a parked program must not disturb the park.
+  */
+  L = inst->L;
+  base = lua_gettop(L);
+  if (!lua_checkstack(L, 6)) {
+    set_error(inst, "dv_local: cannot grow the instance's stack");
+    return DV_ERROR;
+  }
+  lua_pushcfunction(L, local_build);
+  lua_pushstring(L, name);
+  if (lua_getlocal(co, &ar, slot) == NULL) {
+    set_error(inst, "dv_local: the local went away between counting and reading");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  lua_xmove(co, L, 1);
+  if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+    set_error_from(inst, L);
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  bytes = lua_tolstring(L, -1, &n);
+  if (bytes == NULL) {
+    set_error(inst, "dv_local: the description did not encode");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  *len = n;
+  if (buf == NULL || cap < n) {
+    lua_settop(L, base);
+    return DV_BUFFER_TOO_SMALL;
+  }
+  memcpy(buf, bytes, n);
+  lua_settop(L, base);
   return DV_OK;
 }
 

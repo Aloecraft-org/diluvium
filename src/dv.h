@@ -610,6 +610,65 @@ dv_status dv_frame_count (dv_instance *inst, uint32_t *out);
 */
 dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out);
 
+/*
+** Read one named local, as msgpack.
+**
+** 'index' is 1-based over the *named* locals of that frame -- the ones
+** 'dv_frame_info' counted. The VM's own slots ('(for state)', '(temporary)')
+** are not in the numbering, so index 2 is the program's second local and not
+** whatever the VM parked beside it. Filtered here rather than in each front end.
+**
+** The bytes are a value *description*, not the value. A queue message is the
+** value and has to decode back into one; this is read by something drawing a
+** panel, which needs to know that a field is a table of twelve entries before it
+** can decide whether to ask for them. So every value is written as an array
+** whose first element is one of the DV_VAL_* tags below:
+**
+**   [DV_VAL_NIL]                     nil
+**   [DV_VAL_BOOL,   true|false]
+**   [DV_VAL_INT,    n]
+**   [DV_VAL_FLOAT,  x]
+**   [DV_VAL_STR,    s]
+**   [DV_VAL_TABLE,  count, truncated, [[key, value], ...]]
+**   [DV_VAL_OPAQUE, "function"|"thread"|"userdata"|"table"]
+**
+** and the whole reply is ["name", <value>].
+**
+** **Nothing here recurses.** A table is expanded one level, and any table inside
+** it is DV_VAL_OPAQUE "table" rather than another expansion. That is what makes
+** this safe on arbitrary program state rather than merely usually safe: a cyclic
+** table cannot be followed, because nothing follows anything. The plain codec
+** guards cycles with a nesting cap and *raises* when it trips -- fine for a
+** message a program chose to send, useless for inspecting a program that did not
+** choose anything. A panel descends by asking again, which is also the only way
+** it can render lazily.
+**
+** Keys are described exactly as values are, so a table keyed by anything other
+** than a string still reads. Traversal is raw: no '__index', no '__pairs', and
+** so no guest code runs to answer a host's question -- which it could not do
+** anyway, since the instance is parked.
+**
+** At most DV_LOCAL_MAX_ENTRIES pairs are written and 'truncated' says whether
+** more were there. 'count' is the real number either way.
+**
+** DV_BUFFER_TOO_SMALL sets '*len' to what is needed and writes nothing, the same
+** contract 'dv_queue_pop' has. DV_BUSY when the instance is not parked, DV_ERROR
+** for a level or index that does not exist.
+*/
+#define DV_VAL_NIL	0
+#define DV_VAL_BOOL	1
+#define DV_VAL_INT	2
+#define DV_VAL_FLOAT	3
+#define DV_VAL_STR	4
+#define DV_VAL_TABLE	5
+#define DV_VAL_OPAQUE	6
+
+/* Pairs written for one expanded table before 'truncated' is set. */
+#define DV_LOCAL_MAX_ENTRIES	64
+
+dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
+                    uint8_t *buf, size_t cap, size_t *len);
+
 
 /* ---------------------------------------------------------------- numeric -- */
 

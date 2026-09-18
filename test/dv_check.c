@@ -843,6 +843,290 @@ static void a_woken_instance_reports_that_its_names_are_gone (void) {
 }
 
 
+/*
+** A cursor over the little of msgpack these checks read.
+**
+** Hand-rolled rather than including 'dmsgpack.h', to keep this file's claim
+** true: it is written against dv.h alone, which is also the check that a host
+** needs nothing else. Every host already has a msgpack decoder, because queues
+** hand back msgpack too; this is the smallest stand-in for one.
+*/
+typedef struct { const uint8_t *p; size_t n, i; int bad; } mpc;
+
+static void mpc_open (mpc *c, const uint8_t *b, size_t n) {
+  c->p = b; c->n = n; c->i = 0; c->bad = 0;
+}
+
+static int mpc_byte (mpc *c) {
+  if (c->i >= c->n) { c->bad = 1; return -1; }
+  return c->p[c->i++];
+}
+
+static unsigned long long mpc_be (mpc *c, int width) {
+  unsigned long long v = 0;
+  int k;
+  for (k = 0; k < width; k++) {
+    int b = mpc_byte(c);
+    if (b < 0) return 0;
+    v = (v << 8) | (unsigned long long)b;
+  }
+  return v;
+}
+
+/* Element count of an array, or -1. */
+static int mpc_array (mpc *c) {
+  int b = mpc_byte(c);
+  if (b >= 0x90 && b <= 0x9f) return b - 0x90;
+  if (b == 0xdc) return (int)mpc_be(c, 2);
+  c->bad = 1;
+  return -1;
+}
+
+static long long mpc_int (mpc *c) {
+  int b = mpc_byte(c);
+  if (b >= 0x00 && b <= 0x7f) return b;
+  if (b >= 0xe0) return (long long)(signed char)(unsigned char)b;
+  switch (b) {
+    case 0xcc: return (long long)mpc_be(c, 1);
+    case 0xcd: return (long long)mpc_be(c, 2);
+    case 0xce: return (long long)mpc_be(c, 4);
+    case 0xcf: return (long long)mpc_be(c, 8);
+    case 0xd0: return (long long)(signed char)(unsigned char)mpc_be(c, 1);
+    case 0xd1: return (long long)(short)(unsigned short)mpc_be(c, 2);
+    case 0xd2: return (long long)(int)(unsigned int)mpc_be(c, 4);
+    case 0xd3: return (long long)mpc_be(c, 8);
+    default: c->bad = 1; return 0;
+  }
+}
+
+static int mpc_bool (mpc *c) {
+  int b = mpc_byte(c);
+  if (b == 0xc2) return 0;
+  if (b == 0xc3) return 1;
+  c->bad = 1;
+  return 0;
+}
+
+static void mpc_text (mpc *c, char *out, size_t cap) {
+  int b = mpc_byte(c);
+  size_t len, k;
+  out[0] = '\0';
+  if (b >= 0xa0 && b <= 0xbf) len = (size_t)(b - 0xa0);
+  else if (b == 0xd9) len = (size_t)mpc_be(c, 1);
+  else if (b == 0xda) len = (size_t)mpc_be(c, 2);
+  else { c->bad = 1; return; }
+  if (c->i + len > c->n || len >= cap) { c->bad = 1; return; }
+  for (k = 0; k < len; k++) out[k] = (char)c->p[c->i + k];
+  out[len] = '\0';
+  c->i += len;
+}
+
+/* Skip one whole value, whatever it is. Enough for these envelopes. */
+static void mpc_skip (mpc *c) {
+  int b;
+  if (c->i >= c->n) { c->bad = 1; return; }
+  b = c->p[c->i];
+  if ((b >= 0x90 && b <= 0x9f) || b == 0xdc) {
+    int k, n = mpc_array(c);
+    for (k = 0; k < n; k++) mpc_skip(c);
+  }
+  else if (b >= 0xa0 && b <= 0xbf) { char t[256]; mpc_text(c, t, sizeof(t)); }
+  else if (b == 0xd9 || b == 0xda) { char t[256]; mpc_text(c, t, sizeof(t)); }
+  else if (b == 0xc2 || b == 0xc3) mpc_bool(c);
+  else if (b == 0xc0) c->i++;
+  else if (b == 0xcb) { c->i++; mpc_be(c, 8); }
+  else mpc_int(c);
+}
+
+
+/*
+** Open a dv_local reply: ["name", [tag, ...]]. Leaves the cursor just past the
+** tag and reports it, with the name copied out.
+*/
+static int open_local (mpc *c, const uint8_t *b, size_t n,
+                       char *name, size_t namecap) {
+  mpc_open(c, b, n);
+  if (mpc_array(c) != 2) { c->bad = 1; return -1; }
+  mpc_text(c, name, namecap);
+  if (mpc_array(c) < 1) { c->bad = 1; return -1; }
+  return (int)mpc_int(c);
+}
+
+
+static void a_local_reads_back_with_its_name_and_value (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local marker = 42 "
+    "local label = 'hello' "
+    "local flag = true "
+    "local fn = function () return 1 end "
+    "local id, msg = queue.wait({inb}) "
+    "return marker", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096];
+  size_t len = 0;
+  char name[64], text[64];
+  mpc c;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks with five locals in scope");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  eq_i(f.nlocals, 5, "all five are counted, and none of the VM's own");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, sizeof(buf), &len), DV_OK,
+        "the second named local reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT,
+       "an integer is tagged as one, not as a float");
+  ok(strcmp(name, "marker") == 0, "and carries the name the program gave it");
+  eq_i(mpc_int(&c), 42, "and its value");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 3, buf, sizeof(buf), &len), DV_OK,
+        "the third reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_STR, "a string");
+  ok(strcmp(name, "label") == 0, "named 'label'");
+  mpc_text(&c, text, sizeof(text));
+  ok(strcmp(text, "hello") == 0, "holding what the program put in it");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 4, buf, sizeof(buf), &len), DV_OK,
+        "the fourth reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_BOOL, "a boolean");
+  eq_i(mpc_bool(&c), 1, "which is true");
+
+  /* The placeholder: a function cannot be described as a value, and refusing
+     the whole read because a frame holds a callback would make this useless on
+     most real frames. */
+  eq_st(dv_local(inst, (uint32_t)lvl, 5, buf, sizeof(buf), &len), DV_OK,
+        "a local holding a function still reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_OPAQUE,
+       "and is described as opaque rather than refused");
+  mpc_text(&c, text, sizeof(text));
+  ok(strcmp(text, "function") == 0, "saying what it is, so a panel can render it");
+  ok(!c.bad, "and the whole reply decoded cleanly");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 0, buf, sizeof(buf), &len), DV_ERROR,
+        "index 0 is not a local: the numbering is 1-based");
+  eq_st(dv_local(inst, (uint32_t)lvl, 99, buf, sizeof(buf), &len), DV_ERROR,
+        "and neither is one past the end");
+
+  len = 0;
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, 1, &len), DV_BUFFER_TOO_SMALL,
+        "a short buffer is refused");
+  ok(len > 1, "with the size it needed reported, as dv_queue_pop does");
+  dv_free(inst);
+}
+
+
+static void a_table_local_expands_one_level_only (void) {
+  /*
+  ** The property that makes this safe on arbitrary state: a table is expanded
+  ** once and everything inside it is a placeholder. Nothing recurses, so there
+  ** is no depth to cap and no cycle to detect -- see the next test.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local cfg = { retries = 3, nested = { deep = 1 } } "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl, i, pairs, saw_retries = 0, saw_nested = 0;
+  uint8_t buf[4096];
+  size_t len = 0;
+  char name[64], key[64], text[64];
+  mpc c;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a table");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, sizeof(buf), &len), DV_OK,
+        "the table reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE,
+       "and is tagged as a table");
+  ok(strcmp(name, "cfg") == 0, "under its own name");
+  eq_i(mpc_int(&c), 2, "reporting how many entries it really has");
+  eq_i(mpc_bool(&c), 0, "and that none were dropped");
+  pairs = mpc_array(&c);
+  eq_i(pairs, 2, "with both pairs written");
+  for (i = 0; i < pairs && !c.bad; i++) {
+    int ktag, vtag;
+    if (mpc_array(&c) != 2) { c.bad = 1; break; }
+    ktag = (mpc_array(&c) >= 1) ? (int)mpc_int(&c) : -1;
+    if (ktag != DV_VAL_STR) { mpc_skip(&c); mpc_skip(&c); continue; }
+    mpc_text(&c, key, sizeof(key));
+    vtag = (mpc_array(&c) >= 1) ? (int)mpc_int(&c) : -1;
+    if (strcmp(key, "retries") == 0) {
+      saw_retries = (vtag == DV_VAL_INT && mpc_int(&c) == 3);
+    }
+    else if (strcmp(key, "nested") == 0) {
+      mpc_text(&c, text, sizeof(text));
+      saw_nested = (vtag == DV_VAL_OPAQUE && strcmp(text, "table") == 0);
+    }
+    else mpc_skip(&c);
+  }
+  ok(saw_retries, "a scalar inside the table is described in place");
+  ok(saw_nested,
+     "and a table inside it is a placeholder, so nothing recursed");
+  ok(!c.bad, "the whole description decoded cleanly");
+  dv_free(inst);
+}
+
+
+static void a_cyclic_table_is_described_rather_than_refused (void) {
+  /*
+  ** The case the plain codec cannot take: 'msgpack.encode' guards cycles with a
+  ** nesting cap and raises when it trips, which is the right answer for a
+  ** message a program chose to send and the wrong one for a host asking what a
+  ** program is holding. A program did not choose its own state, and 't.self = t'
+  ** is ordinary.
+  **
+  ** This does not need a cycle check to pass. It passes because nothing follows
+  ** a reference: 'self' is a table inside a table, so it is a placeholder like
+  ** any other, and there is no traversal to loop.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local t = { n = 1 } "
+    "t.self = t "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096];
+  size_t len = 0;
+  char name[64];
+  mpc c;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a cycle");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, sizeof(buf), &len), DV_OK,
+        "a table that contains itself is described, not refused");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE,
+       "as an ordinary table");
+  eq_i(mpc_int(&c), 2, "with both of its entries counted");
+  ok(!c.bad, "and the reply is well-formed");
+
+  /* And the instance is still usable afterwards: inspecting a parked program
+     must not disturb the park, which is why the work happens on the main state
+     and not on the parked thread. */
+  eq_st(dv_waitset_get(inst, &ws), DV_OK, "the instance is still parked after");
+  eq_i(ws.n, 1, "waiting on what it was waiting on before");
+  dv_free(inst);
+}
+
+
 /* ----------------------------------------------------------- endpoints -- */
 
 /* The host's idea of what a reference means. Deliberately trivial: the runtime
@@ -3182,6 +3466,9 @@ int main (void) {
   frames_are_readable_while_parked();
   internal_locals_are_filtered_out();
   a_woken_instance_reports_that_its_names_are_gone();
+  a_local_reads_back_with_its_name_and_value();
+  a_table_local_expands_one_level_only();
+  a_cyclic_table_is_described_rather_than_refused();
   version();
   build_facts();
   run_to_completion();
