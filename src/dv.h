@@ -476,7 +476,18 @@ dv_status dv_endpoint_close (dv_instance *inst, dv_queue_id id);
 #define DV_LAYOUT_WAITSET_IDS		12
 #define DV_LAYOUT_WAITSET_TIMEOUT	13
 #define DV_LAYOUT_WAITSET_FOR_WRITE	14
-#define DV_LAYOUT_COUNT			15
+#define DV_LAYOUT_FRAME_SIZE		15
+#define DV_LAYOUT_FRAME_PC		16
+#define DV_LAYOUT_FRAME_CURRENTLINE	17
+#define DV_LAYOUT_FRAME_IS_C		18
+#define DV_LAYOUT_FRAME_IS_TAIL		19
+#define DV_LAYOUT_FRAME_IS_VARARG	20
+#define DV_LAYOUT_FRAME_HAS_SOURCE	21
+#define DV_LAYOUT_FRAME_NLOCALS		22
+#define DV_LAYOUT_FRAME_SOURCE		23
+#define DV_LAYOUT_FRAME_NAME		24
+#define DV_LAYOUT_FRAME_WHAT		25
+#define DV_LAYOUT_COUNT			26
 
 /*
 ** Per-instance limits (9.4).
@@ -528,6 +539,76 @@ dv_status dv_memory (dv_instance *inst, uint64_t *bytes_now,
 
 /* Did this instance stop because it ran out of budget? */
 int dv_exceeded (dv_instance *inst);
+
+
+/* ------------------------------------------------------------- inspection -- */
+
+/*
+** Reading a parked instance's frames (doc/Lab.md 3.1-3.2).
+**
+** The instance must be *parked*, which is the same condition 'dv_snapshot'
+** requires and for the same reason: a suspended coroutine's call chain is
+** written down, and a running one's is on the machine's C stack. DV_BUSY says
+** it is not, exactly as 'dv_waitset_get' does.
+**
+** This grants a host nothing it did not already have. 'dv_snapshot' already
+** writes the parked program, its call chain and its reachable values into a
+** host buffer on any parked instance with no flag set; what was missing was a
+** way to read one value without decoding a snapshot to get it. So there is no
+** flag here, and DV_FLAG_UNSAFE_DEBUG is not consulted: that flag governs what
+** the *guest* may reach, and this is the host reading its own instance.
+**
+** Nothing here hands back a 'lua_State'. That is deliberate and it is the
+** header's central claim -- dv.h contains no Lua type and no Lua header -- so
+** the frame walk happens inside the runtime and a host sees plain data. A host
+** that wants to reach 'inst->co' itself is on the wrong side of the layer
+** boundary 'dvs.h' names, and this exists so it does not have to.
+*/
+
+/* Longest 'source' or 'name' reported. LUA_IDSIZE is 60; the extra rounds it. */
+#define DV_FRAME_STRMAX	64
+
+typedef struct dv_frame {
+  int32_t pc;             /* code offset into the prototype, -1 for a C frame */
+  int32_t currentline;    /* -1 when the prototype carries no line info */
+  int32_t nlocals;        /* named locals readable here; see 'dv_local' */
+  uint8_t is_c;
+  uint8_t is_tail;        /* reached by a tail call: its caller is not above it */
+  uint8_t is_vararg;
+  /*
+  ** Whether 'source', 'name' and 'currentline' mean anything.
+  **
+  ** Zero on a restored instance, and that is not a defect to fix here. A
+  ** snapshot carries *stripped* dumps (10.5 wants line numbers and source names
+  ** out of the hash domain, so a comment reflow does not invalidate every cached
+  ** agent), and 'lua_dump' with strip drops 'locvars', 'upvalues', 'lineinfo'
+  ** and 'source' together. A woken instance therefore has values and no names,
+  ** its chunk is called "=snapshot", and a front end that wants names for one
+  ** must map them from a static analysis of the source it started from.
+  **
+  ** Reported rather than papered over: a panel showing 'local 3' honestly is
+  ** better than one showing a name it guessed.
+  */
+  uint8_t has_source;
+  char source[DV_FRAME_STRMAX];   /* short_src, or "" */
+  char name[DV_FRAME_STRMAX];     /* what the function is called, or "" */
+  char what[16];                  /* "Lua", "C", "main", or "" */
+} dv_frame;
+
+/*
+** How many frames the parked program has, innermost first.
+**
+** Returns 0 and reports DV_BUSY when the instance is not parked. Level 0 is the
+** *innermost* frame, which is 'lua_getstack''s direction and the opposite of
+** 'diluvium_shim_frame''s -- the conversion is done here, once, because getting
+** it wrong produces a plausible stack in the wrong order.
+*/
+dv_status dv_frame_count (dv_instance *inst, uint32_t *out);
+
+/*
+** Describe one frame. DV_ERROR for a level that does not exist.
+*/
+dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out);
 
 
 /* ---------------------------------------------------------------- numeric -- */

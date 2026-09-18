@@ -15,6 +15,7 @@
 
 #include "lprefix.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -974,7 +975,18 @@ uint32_t dv_layout (uint32_t *out, size_t n) {
     (uint32_t)offsetof(dv_waitset, n),
     (uint32_t)offsetof(dv_waitset, ids),
     (uint32_t)offsetof(dv_waitset, timeout_ms),
-    (uint32_t)offsetof(dv_waitset, for_write)
+    (uint32_t)offsetof(dv_waitset, for_write),
+    (uint32_t)sizeof(dv_frame),
+    (uint32_t)offsetof(dv_frame, pc),
+    (uint32_t)offsetof(dv_frame, currentline),
+    (uint32_t)offsetof(dv_frame, is_c),
+    (uint32_t)offsetof(dv_frame, is_tail),
+    (uint32_t)offsetof(dv_frame, is_vararg),
+    (uint32_t)offsetof(dv_frame, has_source),
+    (uint32_t)offsetof(dv_frame, nlocals),
+    (uint32_t)offsetof(dv_frame, source),
+    (uint32_t)offsetof(dv_frame, name),
+    (uint32_t)offsetof(dv_frame, what)
   };
   size_t i;
   size_t want = (n < DV_LAYOUT_COUNT) ? n : DV_LAYOUT_COUNT;
@@ -983,6 +995,159 @@ uint32_t dv_layout (uint32_t *out, size_t n) {
   for (i = 0; i < want; i++)
     out[i] = table[i];
   return (uint32_t)want;
+}
+
+
+/* ------------------------------------------------------------- inspection -- */
+
+/*
+** Copy a string into one of 'dv_frame''s fixed fields, always NUL-terminated.
+**
+** Fixed arrays rather than pointers so the struct is self-contained: a host
+** reading it through 'dv_layout' on wasm has no lifetime to reason about, and
+** there is nothing for a later call to invalidate.
+*/
+static void frame_str (char *dst, size_t cap, const char *src) {
+  size_t n;
+  if (src == NULL) { dst[0] = '\0'; return; }
+  n = strlen(src);
+  if (n >= cap) n = cap - 1;
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+
+/*
+** Is this the VM's own bookkeeping rather than the program's?
+**
+** 'lua_getlocal' reports '(for state)', '(temporary)' and friends alongside a
+** program's own locals -- doc/Lab.md 3.4's transcript shows three of them around
+** one loop variable. The filter is here, in the ABI, and not in each front end,
+** because otherwise every panel reimplements it and one of them forgets.
+*/
+static int internal_local (const char *name) {
+  return name == NULL || name[0] == '(';
+}
+
+
+/*
+** The parked thread, or NULL with the reason set.
+**
+** Parked is the same precondition 'dv_snapshot' has, for the same reason: a
+** suspended coroutine's call chain is written down and a running one's is on
+** the C stack.
+*/
+static lua_State *inspectable (dv_instance *inst) {
+  if (inst->co == NULL || !inst->parked) {
+    set_error(inst, "the instance is not parked; its frames are only readable "
+                    "between a park and the next resume");
+    return NULL;
+  }
+  return inst->co;
+}
+
+
+/*
+** Named locals at 'level', and the 'n' of the 'i'th of them.
+**
+** One walk serves both the count in 'dv_frame' and the lookup 'dv_local' will
+** do, so the two cannot disagree about which slot index means what. 'want' is
+** 1-based over the *named* locals; pass 0 to count them. Returns the count when
+** counting, or the underlying 'lua_getlocal' index when looking one up, or 0
+** when there is no such named local. Every value pushed is popped again.
+*/
+static int walk_locals (lua_State *co, lua_Debug *ar, int want,
+                        const char **out_name) {
+  int slot, found = 0;
+  const char *name;
+  for (slot = 1; (name = lua_getlocal(co, ar, slot)) != NULL; slot++) {
+    lua_pop(co, 1);                     /* the value 'lua_getlocal' pushed */
+    if (internal_local(name))
+      continue;
+    found++;
+    if (want != 0 && found == want) {
+      if (out_name != NULL) *out_name = name;
+      return slot;
+    }
+  }
+  return (want == 0) ? found : 0;
+}
+
+
+dv_status dv_frame_count (dv_instance *inst, uint32_t *out) {
+  lua_State *co;
+  lua_Debug ar;
+  int n = 0;
+  if (inst == NULL || out == NULL)
+    return DV_ERROR;
+  *out = 0;
+  if ((co = inspectable(inst)) == NULL)
+    return DV_BUSY;
+  while (lua_getstack(co, n, &ar))
+    n++;
+  *out = (uint32_t)n;
+  return DV_OK;
+}
+
+
+dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out) {
+  lua_State *co;
+  lua_Debug ar;
+  if (inst == NULL || out == NULL)
+    return DV_ERROR;
+  memset(out, 0, sizeof(*out));
+  out->pc = -1;
+  out->currentline = -1;
+  if ((co = inspectable(inst)) == NULL)
+    return DV_BUSY;
+  if (level > (uint32_t)INT_MAX || !lua_getstack(co, (int)level, &ar)) {
+    set_error(inst, "dv_frame_info: no such frame");
+    return DV_ERROR;
+  }
+  /*
+  ** 'S' and 'l' for the source and line, 'n' for the name, 't' for the tail
+  ** call, 'u' for the vararg flag. Asking for them together is one call into
+  ** the debug machinery rather than five.
+  */
+  if (!lua_getinfo(co, "Slntu", &ar)) {
+    set_error(inst, "dv_frame_info: the frame would not describe itself");
+    return DV_ERROR;
+  }
+  out->currentline = (int32_t)ar.currentline;
+  out->is_c = (uint8_t)(ar.what != NULL && strcmp(ar.what, "C") == 0);
+  out->is_tail = (uint8_t)(ar.istailcall != 0);
+  out->is_vararg = (uint8_t)(ar.isvararg != 0);
+  frame_str(out->source, sizeof(out->source), ar.short_src);
+  frame_str(out->name, sizeof(out->name), ar.name);
+  frame_str(out->what, sizeof(out->what), ar.what);
+  /*
+  ** A stripped prototype -- which is every prototype in a restored instance,
+  ** since 10.5 hashes and stores the stripped dump -- carries no 'lineinfo', so
+  ** it reports no current line. That is the whole test. A restored chunk is also
+  ** named "=snapshot" and comparing against it was tempting, but the name is a
+  ** host's to choose: a host that called 'dv_load' with "=snapshot" would have
+  ** had its own unstripped frames reported as nameless. The line is the fact.
+  **
+  ** 'is_c' is separate because a C frame has no line either and is not what this
+  ** flag is about -- it has no names to lose.
+  */
+  out->has_source = (uint8_t)(!out->is_c && ar.currentline > 0);
+  /*
+  ** 'pc' is not in 'lua_Debug': the offset a breakpoint would name comes from
+  ** the shim, which counts frames from the outermost while 'lua_getstack'
+  ** counts from the innermost. The conversion is the one thing doc/Lab.md 3.1
+  ** warns produces a plausible stack in the wrong order, so it is written once,
+  ** here.
+  */
+  if (!out->is_c) {
+    int total = diluvium_shim_framecount(co);
+    diluvium_frame f;
+    if (total > 0 && (uint32_t)total > level &&
+        diluvium_shim_frame(co, total - 1 - (int)level, &f))
+      out->pc = (int32_t)f.pc;
+  }
+  out->nlocals = (int32_t)walk_locals(co, &ar, 0, NULL);
+  return DV_OK;
 }
 
 

@@ -623,6 +623,23 @@ static void layout (void) {
             "and its timeout");
   layout_is(v, DV_LAYOUT_WAITSET_FOR_WRITE, offsetof(dv_waitset, for_write),
             "and its for_write");
+  layout_is(v, DV_LAYOUT_FRAME_SIZE, sizeof(dv_frame), "dv_frame's size");
+  layout_is(v, DV_LAYOUT_FRAME_PC, offsetof(dv_frame, pc), "and its pc");
+  layout_is(v, DV_LAYOUT_FRAME_CURRENTLINE, offsetof(dv_frame, currentline),
+            "and its currentline");
+  layout_is(v, DV_LAYOUT_FRAME_IS_C, offsetof(dv_frame, is_c), "and its is_c");
+  layout_is(v, DV_LAYOUT_FRAME_IS_TAIL, offsetof(dv_frame, is_tail),
+            "and its is_tail");
+  layout_is(v, DV_LAYOUT_FRAME_IS_VARARG, offsetof(dv_frame, is_vararg),
+            "and its is_vararg");
+  layout_is(v, DV_LAYOUT_FRAME_HAS_SOURCE, offsetof(dv_frame, has_source),
+            "and its has_source");
+  layout_is(v, DV_LAYOUT_FRAME_NLOCALS, offsetof(dv_frame, nlocals),
+            "and its nlocals");
+  layout_is(v, DV_LAYOUT_FRAME_SOURCE, offsetof(dv_frame, source),
+            "and its source");
+  layout_is(v, DV_LAYOUT_FRAME_NAME, offsetof(dv_frame, name), "and its name");
+  layout_is(v, DV_LAYOUT_FRAME_WHAT, offsetof(dv_frame, what), "and its what");
 
   /*
   ** The coverage assertion, which is the point of 'layout_seen'. Adding a
@@ -652,6 +669,177 @@ static void layout (void) {
   ok(v[2] == 0xDEADBEEFu, "and not one entry further");
   eq_i(dv_layout(v, DV_LAYOUT_COUNT), DV_LAYOUT_COUNT, "a full buffer is filled");
   ok(v[DV_LAYOUT_COUNT] == 0xDEADBEEFu, "and stops at the end of the table");
+}
+
+
+/* ---------------------------------------------------------- inspection -- */
+
+/*
+** Reading a parked instance's frames.
+**
+** doc/Lab.md 3.4 demonstrated this against a raw coroutine and concluded the
+** call stack and variables "need no new machinery at all; they are public API
+** against a suspended thread". These check the ABI that exposes it, and the
+** hazards 3.2 and 3.4 name with it: internal locals, and a restored instance
+** whose prototypes were stripped on the way into the snapshot.
+*/
+
+/*
+** The innermost frame that is the program's own.
+**
+** Level 0 of a parked instance is never it: the program parked *inside*
+** 'queue.wait', so the innermost frame is that C function, and the driver's own
+** C frame is at the bottom. A panel wants the Lua frame between them, and every
+** test here starts by finding it rather than assuming a depth -- which is also
+** the assertion that 'is_c' is worth reporting.
+*/
+static int innermost_lua_frame (dv_instance *inst, uint32_t n, dv_frame *out) {
+  uint32_t i;
+  for (i = 0; i < n; i++) {
+    if (dv_frame_info(inst, i, out) == DV_OK && !out->is_c)
+      return (int)i;
+  }
+  return -1;
+}
+
+
+static void frames_are_readable_while_parked (void) {
+  /* Deliberately not 'return inner(21)': a tail call replaces the frame it
+     returns from, so the chain a test wants to walk would collapse to one. */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local function inner (depth) "
+    "  local marker = depth * 2 "
+    "  local id, msg = queue.wait({inb}) "
+    "  return marker + msg "
+    "end "
+    "local function outer () local r = inner(21) return r end "
+    "local answer = outer() "
+    "return answer", 0);
+  dv_waitset ws;
+  uint32_t n = 0;
+  dv_frame f;
+  int lua_level;
+  if (inst == NULL) { ok(0, "load"); return; }
+
+  eq_st(dv_frame_count(inst, &n), DV_BUSY,
+        "an instance that has not started has no frames to read");
+
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks inside two calls");
+  eq_st(dv_frame_count(inst, &n), DV_OK, "and its frames are readable");
+  ok(n >= 4, "with the chain the program actually built");
+  if (n < 4) { dv_free(inst); return; }
+
+  eq_st(dv_frame_info(inst, 0, &f), DV_OK, "the innermost frame describes itself");
+  ok(f.is_c, "and it is the C function the program parked in, not the program");
+  ok(f.pc < 0, "which has no code offset of its own");
+
+  lua_level = innermost_lua_frame(inst, n, &f);
+  ok(lua_level > 0, "the program's own innermost frame is above it");
+  if (lua_level < 0) { dv_free(inst); return; }
+  eq_i(f.nlocals, 2,
+       "which reports the two locals in scope there: 'depth' and 'marker'");
+  ok(f.has_source, "a freshly loaded program has its names and lines");
+  ok(f.currentline > 0, "so the frame knows which line it parked on");
+  ok(f.pc >= 0, "and a Lua frame reports a code offset for a breakpoint to name");
+
+  /* Level counts from the innermost, so 'outer' is further out than 'inner'.
+     The opposite convention is doc/Lab.md 3.1's "plausible stack in the wrong
+     order", which is why the direction is asserted and not assumed. */
+  {
+    dv_frame outerf;
+    int seen_outer = 0;
+    uint32_t i;
+    for (i = (uint32_t)lua_level + 1; i < n; i++) {
+      if (dv_frame_info(inst, i, &outerf) == DV_OK && !outerf.is_c)
+        { seen_outer = 1; break; }
+    }
+    ok(seen_outer, "and the caller is at a higher level, not a lower one");
+  }
+
+  eq_st(dv_frame_info(inst, n, &f), DV_ERROR,
+        "a level past the end is an error, not a zeroed frame");
+
+  dv_free(inst);
+}
+
+
+static void internal_locals_are_filtered_out (void) {
+  /*
+  ** doc/Lab.md 3.4: "Internal locals appear alongside real ones as
+  ** '(for state)', '(temporary)' and so on. A debugger must filter names
+  ** beginning with '(' or it will show the user the VM's bookkeeping." 3.2 says
+  ** where: "Filter names beginning with '(' in the ABI, not in each front end."
+  **
+  ** A numeric 'for' is the case that proves it: the VM puts three internal
+  ** slots around one loop variable, so an unfiltered count here would be five
+  ** rather than the two the program wrote.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "for i = 1, 3 do "
+    "  queue.wait({inb}) "
+    "end "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "a program parks inside a numeric for");
+  eq_st(dv_frame_count(inst, &n), DV_OK, "its frames are readable");
+  ok(innermost_lua_frame(inst, n, &f) >= 0, "and the program's frame is among them");
+  eq_i(f.nlocals, 2,
+       "only the locals the program named are counted, not the for's three");
+  dv_free(inst);
+}
+
+
+static void a_woken_instance_reports_that_its_names_are_gone (void) {
+  /*
+  ** The consequence of 10.5 that a front end has to be told about. A snapshot
+  ** carries the *stripped* dump -- 'lua_dump' with strip drops locvars,
+  ** upvalues, lineinfo and source together -- so a restored instance has its
+  ** values and none of its names, and its chunk is called "=snapshot".
+  **
+  ** Asserted here so the ABI keeps saying so. A panel that trusted 'source' on
+  ** a woken instance would render "snapshot:-1" as though it were a location,
+  ** and a breakpoint addressed by (source, line) could never match one at all --
+  ** which is why a code identity that survives a snapshot has to be a prototype
+  ** hash and a pc rather than a file and a line.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local keeper = 7 "
+    "local id, msg = queue.wait({inb}) "
+    "return keeper + msg", 0);
+  dv_instance *woken;
+  dv_waitset ws;
+  dv_frame f;
+  uint8_t snap[65536];
+  size_t len = 0;
+  uint32_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks");
+  ok(innermost_lua_frame(inst, 8, &f) >= 0, "its own frame is readable");
+  ok(f.has_source, "with a source, because nothing has stripped it yet");
+  eq_st(dv_snapshot(inst, NULL, snap, sizeof(snap), &len), DV_OK,
+        "it hibernates");
+  dv_free(inst);
+
+  woken = dv_new(NULL);
+  if (woken == NULL) { ok(0, "a fresh instance"); return; }
+  eq_st(dv_restore(woken, NULL, snap, len), DV_OK, "and wakes somewhere else");
+  eq_st(dv_frame_count(woken, &n), DV_OK, "the woken instance has frames");
+  ok(n >= 1, "the chain came back");
+  ok(innermost_lua_frame(woken, n, &f) >= 0, "and its own frame is among them");
+  ok(!f.has_source,
+     "but it says its names and lines did not survive the snapshot");
+  eq_i(f.nlocals, 0,
+       "and a stripped prototype names no locals, so none are reported");
+  dv_free(woken);
 }
 
 
@@ -2991,6 +3179,9 @@ static void the_fast_tier_flag_reaches_the_host (void) {
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
+  frames_are_readable_while_parked();
+  internal_locals_are_filtered_out();
+  a_woken_instance_reports_that_its_names_are_gone();
   version();
   build_facts();
   run_to_completion();
