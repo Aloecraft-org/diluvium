@@ -18,6 +18,15 @@ on:
   push:
     tags:
       - 'v*'
+      # Dev tags do reach release.yml -- the suffix selects its fast path
+      # there -- but not this. An image per nightly is noise nobody asked for,
+      # and doc/ALIGNMENT.md 7's retention argument applies to a registry the
+      # same way it applies to the mirror.
+      #
+      # Spelled as a negative pattern inside 'tags:' and not as the
+      # 'tags-ignore:' §7 shows beside it: GitHub rejects both filters on one
+      # event. Order matters; the '!' narrows what precedes it.
+      - '!v*-dev.*'
   workflow_dispatch:
     inputs:
       version:

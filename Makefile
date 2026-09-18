@@ -461,6 +461,17 @@ failing_test_cases:
 interrupt_check: test_build
 	@$(CURDIR)/test/interrupt_check.sh --bin $(TEST_BIN)
 
+# doc/ALIGNMENT.md 7. Print the next free dev tag; cut nothing.
+#
+# The allocation lives in script/dev-tag.sh, which is the same script
+# diluvium-drt carries: §7 is one scheme across the repositories, and a
+# Makefile reimplementation of it here would be a second spelling to keep in
+# step. This target exists because diluvium is driven through make.
+dev-tag:
+	@$(CURDIR)/script/dev-tag.sh
+
+.PHONY: dev-tag
+
 # Contract tests for the instance ABI, written against dv.h alone -- which is
 # also a check that the header is sufficient on its own for a host.
 dv_check: _build_step0
