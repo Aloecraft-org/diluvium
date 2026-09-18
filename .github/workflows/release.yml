@@ -19,6 +19,12 @@ on:
   push:
     tags:
       - 'v*'
+      # doc/ALIGNMENT.md 7 wants dev tags excluded from the release path.
+      # Its snippet spells that as a 'tags-ignore:' beside 'tags:', which
+      # GitHub rejects -- the two filters cannot both appear for one event --
+      # so the exclusion is a negative pattern inside 'tags:' instead. Order
+      # matters: the '!' has to come after the pattern it narrows.
+      - '!v*-dev.*'
 
   workflow_dispatch:
     inputs:

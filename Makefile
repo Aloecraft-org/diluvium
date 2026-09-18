@@ -461,6 +461,27 @@ failing_test_cases:
 interrupt_check: test_build
 	@$(CURDIR)/test/interrupt_check.sh --bin $(TEST_BIN)
 
+# doc/ALIGNMENT.md 7. Print the next free dev tag; cut nothing.
+#
+# The counter is allocated from the tags that exist, never stored in the tree:
+# a counter in a file means a commit on every nightly, and two branches cutting
+# at once would collide on it. It is global and monotonic per repository and
+# never reused, so 'dev.105' names exactly one build forever. Ordering still
+# holds across versions because the release segment dominates --
+# 0.16.0.dev104 < 0.17.0.dev105 -- which is why the number does not restart
+# when the base version moves.
+#
+# The base comes from VERSION with any prerelease suffix cut off, so this keeps
+# working whether VERSION reads '0.17.0' or '0.17.0-dev.1'.
+dev-tag:
+	@base=$$(tr -d '[:space:]' < $(CURDIR)/VERSION | sed 's/-.*//'); \
+	n=$$(git -C $(CURDIR) tag --list 'v*-dev.*' \
+	      | sed -n 's/.*-dev\.\([0-9][0-9]*\)$$/\1/p' \
+	      | sort -n | tail -1); \
+	echo "v$$base-dev.$$(( $${n:-0} + 1 ))"
+
+.PHONY: dev-tag
+
 # Contract tests for the instance ABI, written against dv.h alone -- which is
 # also a check that the header is sufficient on its own for a host.
 dv_check: _build_step0
