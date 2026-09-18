@@ -1256,6 +1256,47 @@ static void push_value_envelope (lua_State *L, int idx, int expand) {
 
 
 /*
+** Follow the path, replacing the value at 'validx' with what it names.
+**
+** Raises on a step that cannot be taken, which is why this only ever runs inside
+** 'local_build''s protected call: the message it raises becomes the instance's
+** last error and the host gets a status.
+*/
+static void follow_path (lua_State *L, int validx, int pathidx) {
+  lua_Integer i, steps = (lua_Integer)lua_rawlen(L, pathidx);
+  lua_pushvalue(L, validx);             /* the value we are walking */
+  for (i = 1; i <= steps; i++) {
+    lua_Integer tag;
+    if (!lua_istable(L, -1))
+      luaL_error(L, "dv_local: step %I of the path indexes a %s, which holds "
+                    "nothing to name", i, luaL_typename(L, -1));
+    if (lua_rawgeti(L, pathidx, i) != LUA_TTABLE)
+      luaL_error(L, "dv_local: step %I of the path is not a key description", i);
+    lua_rawgeti(L, -1, 1);
+    tag = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (tag == DV_VAL_OPAQUE || tag == DV_VAL_NIL)
+      luaL_error(L, "dv_local: step %I names a key that is not a scalar; a table "
+                    "or a function key is identity, and a description carries "
+                    "none", i);
+    if (tag == DV_VAL_TABLE)
+      luaL_error(L, "dv_local: step %I is a table description, not a key", i);
+    lua_rawgeti(L, -1, 2);              /* the key itself */
+    lua_remove(L, -2);                  /* the step */
+    /*
+    ** Raw, like the listing: a '__index' would be guest code, and a parked
+    ** instance cannot run any. Absent is an answer -- a missing key leaves nil
+    ** here and is described as DV_VAL_NIL -- because a panel asking about a
+    ** field a program has not set yet has asked a fair question.
+    */
+    lua_rawget(L, -2);
+    lua_remove(L, -2);                  /* the container */
+  }
+  lua_replace(L, validx);
+}
+
+
+/*
 ** The protected half: build the reply and encode it.
 **
 ** Protected because every step of it can raise -- 'lua_createtable' against a
@@ -1264,9 +1305,12 @@ static void push_value_envelope (lua_State *L, int idx, int expand) {
 ** same reasoning 'dv_array_adopt' states: the failure has to become a return
 ** here or it takes the process with it.
 **
-** Called with the name at 1 and the value at 2; leaves the encoded string.
+** Called with the name at 1, the value at 2 and the decoded path at 3 (or nil);
+** leaves the encoded string.
 */
 static int local_build (lua_State *L) {
+  if (lua_istable(L, 3))
+    follow_path(L, 2, 3);
   lua_createtable(L, 2, 0);
   lua_pushvalue(L, 1);
   lua_rawseti(L, -2, 1);
@@ -1277,7 +1321,24 @@ static int local_build (lua_State *L) {
 }
 
 
+/* Decode the caller's path bytes into a table, or push nil. Protected. */
+static int path_decode (lua_State *L) {
+  const uint8_t *bytes = (const uint8_t *)lua_touserdata(L, 1);
+  size_t n = (size_t)lua_tointeger(L, 2);
+  if (bytes == NULL || n == 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  diluvium_msgpack_decode(L, (const char *)bytes, n);
+  if (!lua_istable(L, -1))
+    return luaL_error(L, "dv_local: the path is not an array of key "
+                         "descriptions");
+  return 1;
+}
+
+
 dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
+                    const uint8_t *path, size_t path_len,
                     uint8_t *buf, size_t cap, size_t *len) {
   lua_State *co, *L;
   lua_Debug ar;
@@ -1315,6 +1376,16 @@ dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
     set_error(inst, "dv_local: cannot grow the instance's stack");
     return DV_ERROR;
   }
+  /* The path is decoded first and under its own protection: it is caller bytes,
+     so a malformed one must be a status and not a raise through host code. */
+  lua_pushcfunction(L, path_decode);
+  lua_pushlightuserdata(L, (void *)(uintptr_t)path);  /* read-only; path_decode never writes through it */
+  lua_pushinteger(L, (lua_Integer)path_len);
+  if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+    set_error_from(inst, L);
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
   lua_pushcfunction(L, local_build);
   lua_pushstring(L, name);
   if (lua_getlocal(co, &ar, slot) == NULL) {
@@ -1323,7 +1394,8 @@ dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
     return DV_ERROR;
   }
   lua_xmove(co, L, 1);
-  if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+  lua_pushvalue(L, base + 1);           /* the decoded path */
+  if (lua_pcall(L, 3, 1, 0) != LUA_OK) {
     set_error_from(inst, L);
     lua_settop(L, base);
     return DV_ERROR;

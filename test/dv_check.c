@@ -978,21 +978,21 @@ static void a_local_reads_back_with_its_name_and_value (void) {
   if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
   eq_i(f.nlocals, 5, "all five are counted, and none of the VM's own");
 
-  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, sizeof(buf), &len), DV_OK,
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, sizeof(buf), &len), DV_OK,
         "the second named local reads");
   eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT,
        "an integer is tagged as one, not as a float");
   ok(strcmp(name, "marker") == 0, "and carries the name the program gave it");
   eq_i(mpc_int(&c), 42, "and its value");
 
-  eq_st(dv_local(inst, (uint32_t)lvl, 3, buf, sizeof(buf), &len), DV_OK,
+  eq_st(dv_local(inst, (uint32_t)lvl, 3, NULL, 0, buf, sizeof(buf), &len), DV_OK,
         "the third reads");
   eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_STR, "a string");
   ok(strcmp(name, "label") == 0, "named 'label'");
   mpc_text(&c, text, sizeof(text));
   ok(strcmp(text, "hello") == 0, "holding what the program put in it");
 
-  eq_st(dv_local(inst, (uint32_t)lvl, 4, buf, sizeof(buf), &len), DV_OK,
+  eq_st(dv_local(inst, (uint32_t)lvl, 4, NULL, 0, buf, sizeof(buf), &len), DV_OK,
         "the fourth reads");
   eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_BOOL, "a boolean");
   eq_i(mpc_bool(&c), 1, "which is true");
@@ -1000,7 +1000,7 @@ static void a_local_reads_back_with_its_name_and_value (void) {
   /* The placeholder: a function cannot be described as a value, and refusing
      the whole read because a frame holds a callback would make this useless on
      most real frames. */
-  eq_st(dv_local(inst, (uint32_t)lvl, 5, buf, sizeof(buf), &len), DV_OK,
+  eq_st(dv_local(inst, (uint32_t)lvl, 5, NULL, 0, buf, sizeof(buf), &len), DV_OK,
         "a local holding a function still reads");
   eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_OPAQUE,
        "and is described as opaque rather than refused");
@@ -1008,13 +1008,13 @@ static void a_local_reads_back_with_its_name_and_value (void) {
   ok(strcmp(text, "function") == 0, "saying what it is, so a panel can render it");
   ok(!c.bad, "and the whole reply decoded cleanly");
 
-  eq_st(dv_local(inst, (uint32_t)lvl, 0, buf, sizeof(buf), &len), DV_ERROR,
+  eq_st(dv_local(inst, (uint32_t)lvl, 0, NULL, 0, buf, sizeof(buf), &len), DV_ERROR,
         "index 0 is not a local: the numbering is 1-based");
-  eq_st(dv_local(inst, (uint32_t)lvl, 99, buf, sizeof(buf), &len), DV_ERROR,
+  eq_st(dv_local(inst, (uint32_t)lvl, 99, NULL, 0, buf, sizeof(buf), &len), DV_ERROR,
         "and neither is one past the end");
 
   len = 0;
-  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, 1, &len), DV_BUFFER_TOO_SMALL,
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, 1, &len), DV_BUFFER_TOO_SMALL,
         "a short buffer is refused");
   ok(len > 1, "with the size it needed reported, as dv_queue_pop does");
   dv_free(inst);
@@ -1046,7 +1046,7 @@ static void a_table_local_expands_one_level_only (void) {
   dv_frame_count(inst, &n);
   lvl = innermost_lua_frame(inst, n, &f);
   if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
-  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, sizeof(buf), &len), DV_OK,
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, sizeof(buf), &len), DV_OK,
         "the table reads");
   eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE,
        "and is tagged as a table");
@@ -1111,7 +1111,7 @@ static void a_cyclic_table_is_described_rather_than_refused (void) {
   dv_frame_count(inst, &n);
   lvl = innermost_lua_frame(inst, n, &f);
   if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
-  eq_st(dv_local(inst, (uint32_t)lvl, 2, buf, sizeof(buf), &len), DV_OK,
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, sizeof(buf), &len), DV_OK,
         "a table that contains itself is described, not refused");
   eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE,
        "as an ordinary table");
@@ -1123,6 +1123,158 @@ static void a_cyclic_table_is_described_rather_than_refused (void) {
      and not on the parked thread. */
   eq_st(dv_waitset_get(inst, &ws), DV_OK, "the instance is still parked after");
   eq_i(ws.n, 1, "waiting on what it was waiting on before");
+  dv_free(inst);
+}
+
+
+/*
+** Build a path: an array of [tag, key] steps, which is exactly the shape a
+** front end would copy back out of a listing. Short keys and few steps, which is
+** all these checks need.
+*/
+static size_t mkpath (uint8_t *p, const char *const *keys, int n) {
+  size_t i = 0;
+  int k;
+  p[i++] = (uint8_t)(0x90 | n);
+  for (k = 0; k < n; k++) {
+    size_t klen = strlen(keys[k]);
+    p[i++] = 0x92;
+    p[i++] = (uint8_t)DV_VAL_STR;
+    p[i++] = (uint8_t)(0xa0 | klen);
+    memcpy(p + i, keys[k], klen);
+    i += klen;
+  }
+  return i;
+}
+
+/* The same, for one integer key: an array index. */
+static size_t mkpath_int (uint8_t *p, int key) {
+  p[0] = 0x91; p[1] = 0x92; p[2] = (uint8_t)DV_VAL_INT; p[3] = (uint8_t)key;
+  return 4;
+}
+
+
+static void a_path_descends_past_the_first_level (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local cfg = { retries = 3, nested = { deep = 1 }, list = { 10, 20, 30 } } "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096], path[64];
+  size_t len = 0, plen;
+  char name[64];
+  mpc c;
+  static const char *const one[] = { "retries" };
+  static const char *const two[] = { "nested", "deep" };
+  static const char *const gone[] = { "missing" };
+  static const char *const wrong[] = { "retries", "x" };
+  static const char *const list[] = { "list" };
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a nested table");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+
+  plen = mkpath(path, one, 1);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "one step opens a field the listing only counted");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT, "reaching the scalar");
+  eq_i(mpc_int(&c), 3, "with its value");
+  ok(strcmp(name, "cfg") == 0, "and the local's own name, not the key's");
+
+  plen = mkpath(path, two, 2);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "two steps reach through the table the first level made opaque");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT, "to a scalar");
+  eq_i(mpc_int(&c), 1, "which is the one the program put there");
+
+  plen = mkpath(path, list, 1);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "a step onto a table expands that table in turn");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE, "as a table");
+  eq_i(mpc_int(&c), 3, "with its three entries");
+
+  {
+    uint8_t p2[8];
+    size_t p2len = mkpath_int(p2, 2);
+    /* An integer key needs no separate spelling: it is a key description like
+       any other, which is the argument for descriptions over a dotted string. */
+    uint8_t deep[16];
+    size_t dlen = mkpath(deep, list, 1);
+    memcpy(deep + dlen, p2 + 1, p2len - 1);   /* append the int step */
+    deep[0] = 0x92;                            /* two steps now */
+    dlen += p2len - 1;
+    eq_st(dv_local(inst, (uint32_t)lvl, 2, deep, dlen, buf, sizeof(buf), &len),
+          DV_OK, "and an integer key indexes an array");
+    eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT, "to a number");
+    eq_i(mpc_int(&c), 20, "the second element");
+  }
+
+  plen = mkpath(path, gone, 1);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "a key that is not there is answered, not refused");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_NIL,
+       "as nil, because absent is a fair answer to a fair question");
+
+  plen = mkpath(path, wrong, 2);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_ERROR, "but a step into a number is an error: it can hold nothing");
+  ok(dv_last_error(inst) != NULL &&
+     strstr(dv_last_error(inst), "step 2") != NULL,
+     "and the message says which step");
+
+  {
+    /* Caller bytes, so a malformed path is a status rather than a raise through
+       host code that is running under no protection of the runtime's. */
+    static const uint8_t junk[] = { 0xc1, 0xff, 0xff };
+    eq_st(dv_local(inst, (uint32_t)lvl, 2, junk, sizeof(junk),
+                   buf, sizeof(buf), &len),
+          DV_ERROR, "a malformed path is refused with a status");
+  }
+  dv_free(inst);
+}
+
+
+static void a_path_walks_a_cycle_without_looping (void) {
+  /*
+  ** 't.self.self.self.n'. The graph is infinite and the walk is not, because the
+  ** path bounds it: each step is one raw index, and there are four of them. This
+  ** is the same property that lets the first-level description ignore cycles --
+  ** nothing here follows a reference on its own initiative.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local t = { n = 1 } "
+    "t.self = t "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096], path[64];
+  size_t len = 0, plen;
+  char name[64];
+  mpc c;
+  static const char *const deep[] = { "self", "self", "self", "n" };
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a cycle");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  plen = mkpath(path, deep, 4);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "a path through a cycle terminates, because the path is finite");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT,
+       "and arrives at the scalar on the far side of three self-references");
+  eq_i(mpc_int(&c), 1, "with its value");
+  eq_st(dv_waitset_get(inst, &ws), DV_OK, "and the instance is still parked");
   dv_free(inst);
 }
 
@@ -3469,6 +3621,8 @@ int main (void) {
   a_local_reads_back_with_its_name_and_value();
   a_table_local_expands_one_level_only();
   a_cyclic_table_is_described_rather_than_refused();
+  a_path_descends_past_the_first_level();
+  a_path_walks_a_cycle_without_looping();
   version();
   build_facts();
   run_to_completion();

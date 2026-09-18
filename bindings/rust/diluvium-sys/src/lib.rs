@@ -27,7 +27,7 @@ pub mod lua;
 
 use std::os::raw::{c_char, c_int, c_void};
 
-pub const DV_ABI_VERSION: u32 = 2;
+pub const DV_ABI_VERSION: u32 = 3;
 pub const DV_WAIT_MAX: usize = 32;
 
 /// The build number, the N in 5.5.1_buildN. Transcribed from `DV_BUILD` in

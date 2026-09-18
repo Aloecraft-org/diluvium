@@ -59,14 +59,25 @@ extern "C" {
 ** every function correctly and still misdecode a message is worse off than one
 ** that refused to start.
 **
-** 2 is the numeric round: 'dv_features', 'dv_build', 'dv_array_adopt' and the
-** 'dv_numeric_*' block below are new, so a wrapper built against 1 does not
-** know the surface it is holding. A build13 snapshot does not restore into a
-** version-2 runtime and a version-1 host is refused by 'dv_new'; both are the
-** intended consequence rather than collateral, which is what this number is
-** for.
+** 3 is the inspection round: 'dv_frame_count', 'dv_frame_info' and 'dv_local'
+** are new, with the 'dv_frame' struct, its DV_LAYOUT_* entries and the DV_VAL_*
+** tags the descriptions carry. A wrapper built against 2 does not know the
+** surface it is holding.
+**
+** One bump for the three of them on purpose. 'dv_new' refuses a config whose
+** 'abi_version' is not exactly this number, so every bump breaks every binding
+** pinned to the old one at the same moment; landing the frame read in one
+** release and the local read in the next would have cost two of those for
+** nothing. The ext registry did not move -- the value descriptions are tagged
+** arrays and not ext objects, for the reason 'dv_local' gives -- so a message
+** encoded by a version-2 runtime still decodes here.
+**
+** 2 was the numeric round: 'dv_features', 'dv_build', 'dv_array_adopt' and the
+** 'dv_numeric_*' block. A build13 snapshot does not restore into a version-2
+** runtime and a version-1 host is refused by 'dv_new'; both are the intended
+** consequence rather than collateral, which is what this number is for.
 */
-#define DV_ABI_VERSION	2u
+#define DV_ABI_VERSION	3u
 
 uint32_t dv_abi_version (void);
 
@@ -654,6 +665,31 @@ dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out);
 ** DV_BUFFER_TOO_SMALL sets '*len' to what is needed and writes nothing, the same
 ** contract 'dv_queue_pop' has. DV_BUSY when the instance is not parked, DV_ERROR
 ** for a level or index that does not exist.
+**
+** ---------------------------------------------------------------- the path
+**
+** 'path' descends into what the local holds, and is how a panel sees past the
+** one level the description expands. It is msgpack: an array of the *key
+** descriptions* a previous call handed back, in order. To open 'cfg.retries' a
+** caller sends [[DV_VAL_STR, "retries"]] -- which is byte for byte the key it
+** was already given, so a front end copies rather than constructs, and a key
+** that is a number or a boolean needs no separate spelling. NULL, or a zero
+** 'path_len', reads the local itself.
+**
+** Each step is a raw index of the value the last step produced, so descending is
+** as free of guest code as the first level. A step naming a key that is not
+** there yields [DV_VAL_NIL] -- absent is an answer, not a failure -- while a step
+** into something that is not a table is DV_ERROR, because the caller asked for
+** something that cannot exist.
+**
+** A key that is itself a table or a function cannot be named: identity does not
+** survive a description, and DV_VAL_OPAQUE carries none. Such an entry is
+** therefore visible in a listing and not descendable, which is stated here
+** because it is a real edge and not an oversight.
+**
+** The name in the reply stays the *local's* name however deep the path goes.
+** The caller knows the path it sent; inventing a name for a position would only
+** be another thing to disagree with.
 */
 #define DV_VAL_NIL	0
 #define DV_VAL_BOOL	1
@@ -667,6 +703,7 @@ dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out);
 #define DV_LOCAL_MAX_ENTRIES	64
 
 dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
+                    const uint8_t *path, size_t path_len,
                     uint8_t *buf, size_t cap, size_t *len);
 
 
