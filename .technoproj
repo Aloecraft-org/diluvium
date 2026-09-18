@@ -1,9 +1,12 @@
 {
   "TECHNO_VERSION": {
     "major": 0,
-    "minor": 16,
+    "minor": 17,
     "patch": 0,
-    "pre": null
+    "pre": {
+      "kind": "dev",
+      "n": 1
+    }
   },
   "TECHNO_INIT_DIRS": [
     ".nogit",

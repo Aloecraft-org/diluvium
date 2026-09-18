@@ -12,6 +12,114 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
+## [0.17.0-dev.1] - unreleased (prerelease)
+
+`v0.17.0-dev.1` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**The development series after 0.16.0. A host can read a parked
+instance's call stack and its locals, which nothing in the ABI could
+do before -- and the ABI version moves to 3, so every binding pinned
+to 2 is refused until it is rebuilt.**
+
+`dv_snapshot` has always written a parked program's whole state into a
+host buffer, so the values were reachable; what was missing was a way
+to read one without decoding a snapshot to get it. Three calls close
+that, and they grant a host nothing it did not already have.
+
+This entry is the one a `-dev.` build renders. It stays `unreleased`
+until 0.17.0 ships, at which point its `version` and `tag` lose the
+suffix and it gains a date.
+
+### Added
+
+- **Reading a parked instance's frames: `dv_frame_count`,
+  `dv_frame_info` and `dv_local`.** The call stack with source, line
+  and a code offset per frame; named locals by index, described as
+  msgpack. `doc/Lab.md` §3.5 records the four decisions that shaped
+  them.
+
+  The VM's own slots -- `(for state)`, `(temporary)` -- are filtered
+  out in the ABI rather than in each front end, so a numeric `for`
+  reports the locals the program wrote and not the three the VM parked
+  beside them.
+- **Values are described, not encoded.** A queue message is a value
+  and must decode back into one; this is read by something drawing a
+  panel, which needs to know a field is a table of twelve entries
+  before it can ask for them. Every value is an array led by a
+  `DV_VAL_*` tag, and a function, thread or nested table is a typed
+  placeholder.
+
+  Nothing recurses: a table is expanded one level and a table inside
+  it is a placeholder, so a cyclic table cannot be followed -- there
+  is no traversal to loop, and so no depth to cap and no cycle to
+  detect. A front end descends by passing a path, an array of the key
+  descriptions it was already given, and each step is one raw index.
+  `t.self.self.self.n` terminates because the path is finite.
+- **`dv_frame_info` reports `has_source`, which is 0 on a woken
+  instance.** A snapshot carries the stripped dump -- 10.5 keeps line
+  numbers and source names out of the hash domain -- and strip drops
+  `locvars`, `upvalues`, `lineinfo` and `source` together. So a
+  restored instance has its values and none of its names, and says so
+  rather than reporting a location it cannot stand behind.
+
+### Changed
+
+- **`DV_ABI_VERSION` is 3.** `dv_new` refuses a config whose
+  `abi_version` is not exactly this, so a binding built against 2 is
+  refused at creation rather than left to misread something later.
+  `diluvium-sys` and the Python binding are bumped in step.
+
+  The msgpack ext registry did not move: the value descriptions are
+  tagged arrays rather than ext objects, so a message a version-2
+  runtime encoded still decodes here.
+- **The instruction budget charges the hook count in force rather than
+  `DV_HOOK_STEP`.** The two are the same number today, so nothing
+  changes; it is the trap under the hook multiplexer the debugger
+  needs, where a hook re-armed at a finer granularity would have been
+  charged 1000 per fire and exhausted a budget a thousand times early
+  while `dv_usage` reported it wrongly.
+
+### Known issues
+
+- **`diluvium-drt` does not build against this until its pin moves.**
+  See `upgrading` below for what that costs and why it is not urgent.
+
+### Upgrading
+
+**Nothing to do for a program.** No syntax changed, no existing
+construct changed meaning, and the bytecode format byte does not move.
+
+**A host built against dv ABI 2 is refused by `dv_new`.** That is the
+bump doing its job: a wrapper that can call every function correctly
+and still misread a struct is worse off than one that refused to start.
+Rebuild the host against this `dv.h`. Snapshots are unaffected -- the
+header carries the snapshot format and the runtime fingerprint, not the
+ABI number, and the ext registry did not move either, so bytes a
+version-2 runtime encoded still decode here.
+
+**For `diluvium-drt` specifically**, and stated in detail because DRT
+tracks this repository by git rather than by a published version:
+
+- `crates/drt-swarm` depends on `diluvium = { git = ... }` with no
+  `tag`, `rev` or `branch`, so it follows this repository's **default
+  branch**. `Cargo.lock` currently holds it at `7f952d86`.
+- `bindings/rust/diluvium-sys` carries `DV_ABI_VERSION: u32 = 3` now.
+  DRT's build fails against it until `drt-web`'s `abiVersion()` export
+  and anything asserting 2 move with it.
+- **There are four such constants in this repository, not one**, and CI
+  is what found the two that were missed: `diluvium-sys`, the Python
+  binding, `bindings/js/src/index.js` and `diluvium-wasmtime` each pin
+  the number separately and each refuses a mismatch. A binding that
+  tracks this ABI should expect to move exactly one line, and to have
+  nothing tell it so until the runtime refuses to start.
+- **This does not reach DRT until 0.17.0 ships.** The work lives on
+  `release/0.17.0` and is cut as `v0.17.0-dev.<n>` tags from there;
+  `main` stays on the released line, so a `cargo update` that wants a
+  spot fix from `main` gets one without taking the ABI break. To test
+  against the new surface early, point the dependency at the release
+  branch or at a dev tag on purpose.
+
+
 ## [0.16.0] - 2026-09-17
 
 `v0.16.0` &middot; Lua 5.5.1 &middot; bytecode format `0x46`

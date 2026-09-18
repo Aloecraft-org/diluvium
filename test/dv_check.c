@@ -12,6 +12,7 @@
 ** is also a check that dv.h is sufficient on its own.
 */
 
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -561,21 +562,720 @@ static void top_level_yield (void) {
 }
 
 
+/*
+** What 'dv_layout' owes its caller, index by index.
+**
+** Recomputed here with 'offsetof' rather than written down as numbers. That
+** compares the runtime's table against the same compiler's idea of the same
+** public structs, which does not catch a wasm32-versus-LP64 difference --
+** nothing running on this machine can, and that is exactly why a binding asks
+** the runtime instead of hardcoding what a developer measured locally. What it
+** does catch is the table falling out of step with 'dv.h': 'dv_layout' fills a
+** 'static const uint32_t table[DV_LAYOUT_COUNT]', so an index added to the
+** DV_LAYOUT_* block without a row beside it is zero-filled by C rather than
+** rejected by it -- and 0 is a legal offset (DV_LAYOUT_WAITSET_N is 0), so
+** nothing downstream can tell that apart from an answer. On wasm it is a
+** binding reading a field from the front of a struct it is not at.
+*/
+static uint8_t layout_seen[DV_LAYOUT_COUNT];
+
+static void layout_is (const uint32_t *v, int idx, size_t want,
+                       const char *what) {
+  layout_seen[idx] = 1;
+  eq_i(v[idx], (long long)want, what);
+}
+
+
 static void layout (void) {
-  /* The numbers a wasm binding depends on, checked here so a native build
-     notices if a struct changes shape. It cannot catch a wasm32-versus-LP64
-     difference -- nothing running on this machine can -- which is exactly why
-     the binding asks the runtime rather than hardcoding them. */
-  uint32_t v[DV_LAYOUT_COUNT];
+  uint32_t v[DV_LAYOUT_COUNT + 1];
+  size_t i;
+  int covered = 1;
   eq_i(dv_layout(NULL, 0), DV_LAYOUT_COUNT, "dv_layout reports how many it has");
   eq_i(dv_layout(v, DV_LAYOUT_COUNT), DV_LAYOUT_COUNT, "and fills them all in");
-  eq_i(v[DV_LAYOUT_WAITSET_N], 0, "the wait-set count is first");
-  ok(v[DV_LAYOUT_WAITSET_IDS] == 4, "the handles follow it");
-  ok(v[DV_LAYOUT_WAITSET_TIMEOUT] > v[DV_LAYOUT_WAITSET_IDS],
-     "the timeout comes after the handles");
-  ok(v[DV_LAYOUT_WAITSET_SIZE] >= v[DV_LAYOUT_WAITSET_FOR_WRITE] + 1,
-     "and every field is inside the struct");
+
+  layout_is(v, DV_LAYOUT_CONFIG_SIZE, sizeof(dv_config),
+            "dv_config's size is the compiler's");
+  layout_is(v, DV_LAYOUT_CONFIG_ABI, offsetof(dv_config, abi_version),
+            "and its abi_version is where the struct puts it");
+  layout_is(v, DV_LAYOUT_CONFIG_FLAGS, offsetof(dv_config, flags),
+            "and its flags");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_SIZE, sizeof(dv_queue_info),
+            "dv_queue_info's size");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_CAPACITY, offsetof(dv_queue_info, capacity),
+            "and its capacity");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_LEN, offsetof(dv_queue_info, len),
+            "and its len");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_ENABLED, offsetof(dv_queue_info, enabled),
+            "and its enabled");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_EXPORTED, offsetof(dv_queue_info, exported),
+            "and its exported");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_DIRECTION,
+            offsetof(dv_queue_info, direction), "and its direction");
+  layout_is(v, DV_LAYOUT_QUEUE_INFO_ON_FULL, offsetof(dv_queue_info, on_full),
+            "and its on_full");
+  layout_is(v, DV_LAYOUT_WAITSET_SIZE, sizeof(dv_waitset),
+            "dv_waitset's size");
+  layout_is(v, DV_LAYOUT_WAITSET_N, offsetof(dv_waitset, n),
+            "and its count, which is first");
+  layout_is(v, DV_LAYOUT_WAITSET_IDS, offsetof(dv_waitset, ids),
+            "and its handles");
+  layout_is(v, DV_LAYOUT_WAITSET_TIMEOUT, offsetof(dv_waitset, timeout_ms),
+            "and its timeout");
+  layout_is(v, DV_LAYOUT_WAITSET_FOR_WRITE, offsetof(dv_waitset, for_write),
+            "and its for_write");
+  layout_is(v, DV_LAYOUT_FRAME_SIZE, sizeof(dv_frame), "dv_frame's size");
+  layout_is(v, DV_LAYOUT_FRAME_PC, offsetof(dv_frame, pc), "and its pc");
+  layout_is(v, DV_LAYOUT_FRAME_CURRENTLINE, offsetof(dv_frame, currentline),
+            "and its currentline");
+  layout_is(v, DV_LAYOUT_FRAME_IS_C, offsetof(dv_frame, is_c), "and its is_c");
+  layout_is(v, DV_LAYOUT_FRAME_IS_TAIL, offsetof(dv_frame, is_tail),
+            "and its is_tail");
+  layout_is(v, DV_LAYOUT_FRAME_IS_VARARG, offsetof(dv_frame, is_vararg),
+            "and its is_vararg");
+  layout_is(v, DV_LAYOUT_FRAME_HAS_SOURCE, offsetof(dv_frame, has_source),
+            "and its has_source");
+  layout_is(v, DV_LAYOUT_FRAME_NLOCALS, offsetof(dv_frame, nlocals),
+            "and its nlocals");
+  layout_is(v, DV_LAYOUT_FRAME_SOURCE, offsetof(dv_frame, source),
+            "and its source");
+  layout_is(v, DV_LAYOUT_FRAME_NAME, offsetof(dv_frame, name), "and its name");
+  layout_is(v, DV_LAYOUT_FRAME_WHAT, offsetof(dv_frame, what), "and its what");
+
+  /*
+  ** The coverage assertion, which is the point of 'layout_seen'. Adding a
+  ** DV_LAYOUT_* index and bumping DV_LAYOUT_COUNT now fails here until a line
+  ** above names it -- so the zero-filled row above cannot be added silently.
+  ** A test that only checked the four wait-set entries it used to would have
+  ** passed with the new entry wrong.
+  */
+  for (i = 0; i < DV_LAYOUT_COUNT; i++) {
+    if (!layout_seen[i]) {
+      printf("      (DV_LAYOUT index %u has no check in layout())\n",
+             (unsigned)i);
+      covered = 0;
+    }
+  }
+  ok(covered, "every DV_LAYOUT_* index is checked by name");
+
+  /*
+  ** A short buffer stops where it was told to. 'n' is how many the caller has
+  ** room for and a wasm binding built against an older DV_LAYOUT_COUNT passes a
+  ** smaller one on purpose, so writing past it is the one way this function can
+  ** corrupt a caller that is using it exactly as documented.
+  */
+  for (i = 0; i <= DV_LAYOUT_COUNT; i++)
+    v[i] = 0xDEADBEEFu;
   eq_i(dv_layout(v, 2), 2, "a short buffer is filled as far as it goes");
+  ok(v[2] == 0xDEADBEEFu, "and not one entry further");
+  eq_i(dv_layout(v, DV_LAYOUT_COUNT), DV_LAYOUT_COUNT, "a full buffer is filled");
+  ok(v[DV_LAYOUT_COUNT] == 0xDEADBEEFu, "and stops at the end of the table");
+}
+
+
+/* ---------------------------------------------------------- inspection -- */
+
+/*
+** Reading a parked instance's frames.
+**
+** doc/Lab.md 3.4 demonstrated this against a raw coroutine and concluded the
+** call stack and variables "need no new machinery at all; they are public API
+** against a suspended thread". These check the ABI that exposes it, and the
+** hazards 3.2 and 3.4 name with it: internal locals, and a restored instance
+** whose prototypes were stripped on the way into the snapshot.
+*/
+
+/*
+** The innermost frame that is the program's own.
+**
+** Level 0 of a parked instance is never it: the program parked *inside*
+** 'queue.wait', so the innermost frame is that C function, and the driver's own
+** C frame is at the bottom. A panel wants the Lua frame between them, and every
+** test here starts by finding it rather than assuming a depth -- which is also
+** the assertion that 'is_c' is worth reporting.
+*/
+static int innermost_lua_frame (dv_instance *inst, uint32_t n, dv_frame *out) {
+  uint32_t i;
+  for (i = 0; i < n; i++) {
+    if (dv_frame_info(inst, i, out) == DV_OK && !out->is_c)
+      return (int)i;
+  }
+  return -1;
+}
+
+
+static void frames_are_readable_while_parked (void) {
+  /* Deliberately not 'return inner(21)': a tail call replaces the frame it
+     returns from, so the chain a test wants to walk would collapse to one. */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local function inner (depth) "
+    "  local marker = depth * 2 "
+    "  local id, msg = queue.wait({inb}) "
+    "  return marker + msg "
+    "end "
+    "local function outer () local r = inner(21) return r end "
+    "local answer = outer() "
+    "return answer", 0);
+  dv_waitset ws;
+  uint32_t n = 0;
+  dv_frame f;
+  int lua_level;
+  if (inst == NULL) { ok(0, "load"); return; }
+
+  eq_st(dv_frame_count(inst, &n), DV_BUSY,
+        "an instance that has not started has no frames to read");
+
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks inside two calls");
+  eq_st(dv_frame_count(inst, &n), DV_OK, "and its frames are readable");
+  ok(n >= 4, "with the chain the program actually built");
+  if (n < 4) { dv_free(inst); return; }
+
+  eq_st(dv_frame_info(inst, 0, &f), DV_OK, "the innermost frame describes itself");
+  ok(f.is_c, "and it is the C function the program parked in, not the program");
+  ok(f.pc < 0, "which has no code offset of its own");
+
+  lua_level = innermost_lua_frame(inst, n, &f);
+  ok(lua_level > 0, "the program's own innermost frame is above it");
+  if (lua_level < 0) { dv_free(inst); return; }
+  eq_i(f.nlocals, 2,
+       "which reports the two locals in scope there: 'depth' and 'marker'");
+  ok(f.has_source, "a freshly loaded program has its names and lines");
+  ok(f.currentline > 0, "so the frame knows which line it parked on");
+  ok(f.pc >= 0, "and a Lua frame reports a code offset for a breakpoint to name");
+
+  /* Level counts from the innermost, so 'outer' is further out than 'inner'.
+     The opposite convention is doc/Lab.md 3.1's "plausible stack in the wrong
+     order", which is why the direction is asserted and not assumed. */
+  {
+    dv_frame outerf;
+    int seen_outer = 0;
+    uint32_t i;
+    for (i = (uint32_t)lua_level + 1; i < n; i++) {
+      if (dv_frame_info(inst, i, &outerf) == DV_OK && !outerf.is_c)
+        { seen_outer = 1; break; }
+    }
+    ok(seen_outer, "and the caller is at a higher level, not a lower one");
+  }
+
+  eq_st(dv_frame_info(inst, n, &f), DV_ERROR,
+        "a level past the end is an error, not a zeroed frame");
+
+  dv_free(inst);
+}
+
+
+static void internal_locals_are_filtered_out (void) {
+  /*
+  ** doc/Lab.md 3.4: "Internal locals appear alongside real ones as
+  ** '(for state)', '(temporary)' and so on. A debugger must filter names
+  ** beginning with '(' or it will show the user the VM's bookkeeping." 3.2 says
+  ** where: "Filter names beginning with '(' in the ABI, not in each front end."
+  **
+  ** A numeric 'for' is the case that proves it: the VM puts three internal
+  ** slots around one loop variable, so an unfiltered count here would be five
+  ** rather than the two the program wrote.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "for i = 1, 3 do "
+    "  queue.wait({inb}) "
+    "end "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "a program parks inside a numeric for");
+  eq_st(dv_frame_count(inst, &n), DV_OK, "its frames are readable");
+  ok(innermost_lua_frame(inst, n, &f) >= 0, "and the program's frame is among them");
+  eq_i(f.nlocals, 2,
+       "only the locals the program named are counted, not the for's three");
+  dv_free(inst);
+}
+
+
+static void a_woken_instance_reports_that_its_names_are_gone (void) {
+  /*
+  ** The consequence of 10.5 that a front end has to be told about. A snapshot
+  ** carries the *stripped* dump -- 'lua_dump' with strip drops locvars,
+  ** upvalues, lineinfo and source together -- so a restored instance has its
+  ** values and none of its names, and its chunk is called "=snapshot".
+  **
+  ** Asserted here so the ABI keeps saying so. A panel that trusted 'source' on
+  ** a woken instance would render "snapshot:-1" as though it were a location,
+  ** and a breakpoint addressed by (source, line) could never match one at all --
+  ** which is why a code identity that survives a snapshot has to be a prototype
+  ** hash and a pc rather than a file and a line.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local keeper = 7 "
+    "local id, msg = queue.wait({inb}) "
+    "return keeper + msg", 0);
+  dv_instance *woken;
+  dv_waitset ws;
+  dv_frame f;
+  uint8_t snap[65536];
+  size_t len = 0;
+  uint32_t n = 0;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks");
+  ok(innermost_lua_frame(inst, 8, &f) >= 0, "its own frame is readable");
+  ok(f.has_source, "with a source, because nothing has stripped it yet");
+  eq_st(dv_snapshot(inst, NULL, snap, sizeof(snap), &len), DV_OK,
+        "it hibernates");
+  dv_free(inst);
+
+  woken = dv_new(NULL);
+  if (woken == NULL) { ok(0, "a fresh instance"); return; }
+  eq_st(dv_restore(woken, NULL, snap, len), DV_OK, "and wakes somewhere else");
+  eq_st(dv_frame_count(woken, &n), DV_OK, "the woken instance has frames");
+  ok(n >= 1, "the chain came back");
+  ok(innermost_lua_frame(woken, n, &f) >= 0, "and its own frame is among them");
+  ok(!f.has_source,
+     "but it says its names and lines did not survive the snapshot");
+  eq_i(f.nlocals, 0,
+       "and a stripped prototype names no locals, so none are reported");
+  dv_free(woken);
+}
+
+
+/*
+** A cursor over the little of msgpack these checks read.
+**
+** Hand-rolled rather than including 'dmsgpack.h', to keep this file's claim
+** true: it is written against dv.h alone, which is also the check that a host
+** needs nothing else. Every host already has a msgpack decoder, because queues
+** hand back msgpack too; this is the smallest stand-in for one.
+*/
+typedef struct { const uint8_t *p; size_t n, i; int bad; } mpc;
+
+static void mpc_open (mpc *c, const uint8_t *b, size_t n) {
+  c->p = b; c->n = n; c->i = 0; c->bad = 0;
+}
+
+static int mpc_byte (mpc *c) {
+  if (c->i >= c->n) { c->bad = 1; return -1; }
+  return c->p[c->i++];
+}
+
+static unsigned long long mpc_be (mpc *c, int width) {
+  unsigned long long v = 0;
+  int k;
+  for (k = 0; k < width; k++) {
+    int b = mpc_byte(c);
+    if (b < 0) return 0;
+    v = (v << 8) | (unsigned long long)b;
+  }
+  return v;
+}
+
+/* Element count of an array, or -1. */
+static int mpc_array (mpc *c) {
+  int b = mpc_byte(c);
+  if (b >= 0x90 && b <= 0x9f) return b - 0x90;
+  if (b == 0xdc) return (int)mpc_be(c, 2);
+  c->bad = 1;
+  return -1;
+}
+
+static long long mpc_int (mpc *c) {
+  int b = mpc_byte(c);
+  if (b >= 0x00 && b <= 0x7f) return b;
+  if (b >= 0xe0) return (long long)(signed char)(unsigned char)b;
+  switch (b) {
+    case 0xcc: return (long long)mpc_be(c, 1);
+    case 0xcd: return (long long)mpc_be(c, 2);
+    case 0xce: return (long long)mpc_be(c, 4);
+    case 0xcf: return (long long)mpc_be(c, 8);
+    case 0xd0: return (long long)(signed char)(unsigned char)mpc_be(c, 1);
+    case 0xd1: return (long long)(short)(unsigned short)mpc_be(c, 2);
+    case 0xd2: return (long long)(int)(unsigned int)mpc_be(c, 4);
+    case 0xd3: return (long long)mpc_be(c, 8);
+    default: c->bad = 1; return 0;
+  }
+}
+
+static int mpc_bool (mpc *c) {
+  int b = mpc_byte(c);
+  if (b == 0xc2) return 0;
+  if (b == 0xc3) return 1;
+  c->bad = 1;
+  return 0;
+}
+
+static void mpc_text (mpc *c, char *out, size_t cap) {
+  int b = mpc_byte(c);
+  size_t len, k;
+  out[0] = '\0';
+  if (b >= 0xa0 && b <= 0xbf) len = (size_t)(b - 0xa0);
+  else if (b == 0xd9) len = (size_t)mpc_be(c, 1);
+  else if (b == 0xda) len = (size_t)mpc_be(c, 2);
+  else { c->bad = 1; return; }
+  if (c->i + len > c->n || len >= cap) { c->bad = 1; return; }
+  for (k = 0; k < len; k++) out[k] = (char)c->p[c->i + k];
+  out[len] = '\0';
+  c->i += len;
+}
+
+/* Skip one whole value, whatever it is. Enough for these envelopes. */
+static void mpc_skip (mpc *c) {
+  int b;
+  if (c->i >= c->n) { c->bad = 1; return; }
+  b = c->p[c->i];
+  if ((b >= 0x90 && b <= 0x9f) || b == 0xdc) {
+    int k, n = mpc_array(c);
+    for (k = 0; k < n; k++) mpc_skip(c);
+  }
+  else if (b >= 0xa0 && b <= 0xbf) { char t[256]; mpc_text(c, t, sizeof(t)); }
+  else if (b == 0xd9 || b == 0xda) { char t[256]; mpc_text(c, t, sizeof(t)); }
+  else if (b == 0xc2 || b == 0xc3) mpc_bool(c);
+  else if (b == 0xc0) c->i++;
+  else if (b == 0xcb) { c->i++; mpc_be(c, 8); }
+  else mpc_int(c);
+}
+
+
+/*
+** Open a dv_local reply: ["name", [tag, ...]]. Leaves the cursor just past the
+** tag and reports it, with the name copied out.
+*/
+static int open_local (mpc *c, const uint8_t *b, size_t n,
+                       char *name, size_t namecap) {
+  mpc_open(c, b, n);
+  if (mpc_array(c) != 2) { c->bad = 1; return -1; }
+  mpc_text(c, name, namecap);
+  if (mpc_array(c) < 1) { c->bad = 1; return -1; }
+  return (int)mpc_int(c);
+}
+
+
+static void a_local_reads_back_with_its_name_and_value (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local marker = 42 "
+    "local label = 'hello' "
+    "local flag = true "
+    "local fn = function () return 1 end "
+    "local id, msg = queue.wait({inb}) "
+    "return marker", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096];
+  size_t len = 0;
+  char name[64], text[64];
+  mpc c;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks with five locals in scope");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  eq_i(f.nlocals, 5, "all five are counted, and none of the VM's own");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, sizeof(buf), &len), DV_OK,
+        "the second named local reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT,
+       "an integer is tagged as one, not as a float");
+  ok(strcmp(name, "marker") == 0, "and carries the name the program gave it");
+  eq_i(mpc_int(&c), 42, "and its value");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 3, NULL, 0, buf, sizeof(buf), &len), DV_OK,
+        "the third reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_STR, "a string");
+  ok(strcmp(name, "label") == 0, "named 'label'");
+  mpc_text(&c, text, sizeof(text));
+  ok(strcmp(text, "hello") == 0, "holding what the program put in it");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 4, NULL, 0, buf, sizeof(buf), &len), DV_OK,
+        "the fourth reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_BOOL, "a boolean");
+  eq_i(mpc_bool(&c), 1, "which is true");
+
+  /* The placeholder: a function cannot be described as a value, and refusing
+     the whole read because a frame holds a callback would make this useless on
+     most real frames. */
+  eq_st(dv_local(inst, (uint32_t)lvl, 5, NULL, 0, buf, sizeof(buf), &len), DV_OK,
+        "a local holding a function still reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_OPAQUE,
+       "and is described as opaque rather than refused");
+  mpc_text(&c, text, sizeof(text));
+  ok(strcmp(text, "function") == 0, "saying what it is, so a panel can render it");
+  ok(!c.bad, "and the whole reply decoded cleanly");
+
+  eq_st(dv_local(inst, (uint32_t)lvl, 0, NULL, 0, buf, sizeof(buf), &len), DV_ERROR,
+        "index 0 is not a local: the numbering is 1-based");
+  eq_st(dv_local(inst, (uint32_t)lvl, 99, NULL, 0, buf, sizeof(buf), &len), DV_ERROR,
+        "and neither is one past the end");
+
+  len = 0;
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, 1, &len), DV_BUFFER_TOO_SMALL,
+        "a short buffer is refused");
+  ok(len > 1, "with the size it needed reported, as dv_queue_pop does");
+  dv_free(inst);
+}
+
+
+static void a_table_local_expands_one_level_only (void) {
+  /*
+  ** The property that makes this safe on arbitrary state: a table is expanded
+  ** once and everything inside it is a placeholder. Nothing recurses, so there
+  ** is no depth to cap and no cycle to detect -- see the next test.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local cfg = { retries = 3, nested = { deep = 1 } } "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl, i, pairs, saw_retries = 0, saw_nested = 0;
+  uint8_t buf[4096];
+  size_t len = 0;
+  char name[64], key[64], text[64];
+  mpc c;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a table");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, sizeof(buf), &len), DV_OK,
+        "the table reads");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE,
+       "and is tagged as a table");
+  ok(strcmp(name, "cfg") == 0, "under its own name");
+  eq_i(mpc_int(&c), 2, "reporting how many entries it really has");
+  eq_i(mpc_bool(&c), 0, "and that none were dropped");
+  pairs = mpc_array(&c);
+  eq_i(pairs, 2, "with both pairs written");
+  for (i = 0; i < pairs && !c.bad; i++) {
+    int ktag, vtag;
+    if (mpc_array(&c) != 2) { c.bad = 1; break; }
+    ktag = (mpc_array(&c) >= 1) ? (int)mpc_int(&c) : -1;
+    if (ktag != DV_VAL_STR) { mpc_skip(&c); mpc_skip(&c); continue; }
+    mpc_text(&c, key, sizeof(key));
+    vtag = (mpc_array(&c) >= 1) ? (int)mpc_int(&c) : -1;
+    if (strcmp(key, "retries") == 0) {
+      saw_retries = (vtag == DV_VAL_INT && mpc_int(&c) == 3);
+    }
+    else if (strcmp(key, "nested") == 0) {
+      mpc_text(&c, text, sizeof(text));
+      saw_nested = (vtag == DV_VAL_OPAQUE && strcmp(text, "table") == 0);
+    }
+    else mpc_skip(&c);
+  }
+  ok(saw_retries, "a scalar inside the table is described in place");
+  ok(saw_nested,
+     "and a table inside it is a placeholder, so nothing recursed");
+  ok(!c.bad, "the whole description decoded cleanly");
+  dv_free(inst);
+}
+
+
+static void a_cyclic_table_is_described_rather_than_refused (void) {
+  /*
+  ** The case the plain codec cannot take: 'msgpack.encode' guards cycles with a
+  ** nesting cap and raises when it trips, which is the right answer for a
+  ** message a program chose to send and the wrong one for a host asking what a
+  ** program is holding. A program did not choose its own state, and 't.self = t'
+  ** is ordinary.
+  **
+  ** This does not need a cycle check to pass. It passes because nothing follows
+  ** a reference: 'self' is a table inside a table, so it is a placeholder like
+  ** any other, and there is no traversal to loop.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local t = { n = 1 } "
+    "t.self = t "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096];
+  size_t len = 0;
+  char name[64];
+  mpc c;
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a cycle");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, NULL, 0, buf, sizeof(buf), &len), DV_OK,
+        "a table that contains itself is described, not refused");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE,
+       "as an ordinary table");
+  eq_i(mpc_int(&c), 2, "with both of its entries counted");
+  ok(!c.bad, "and the reply is well-formed");
+
+  /* And the instance is still usable afterwards: inspecting a parked program
+     must not disturb the park, which is why the work happens on the main state
+     and not on the parked thread. */
+  eq_st(dv_waitset_get(inst, &ws), DV_OK, "the instance is still parked after");
+  eq_i(ws.n, 1, "waiting on what it was waiting on before");
+  dv_free(inst);
+}
+
+
+/*
+** Build a path: an array of [tag, key] steps, which is exactly the shape a
+** front end would copy back out of a listing. Short keys and few steps, which is
+** all these checks need.
+*/
+static size_t mkpath (uint8_t *p, const char *const *keys, int n) {
+  size_t i = 0;
+  int k;
+  p[i++] = (uint8_t)(0x90 | n);
+  for (k = 0; k < n; k++) {
+    size_t klen = strlen(keys[k]);
+    p[i++] = 0x92;
+    p[i++] = (uint8_t)DV_VAL_STR;
+    p[i++] = (uint8_t)(0xa0 | klen);
+    memcpy(p + i, keys[k], klen);
+    i += klen;
+  }
+  return i;
+}
+
+/* The same, for one integer key: an array index. */
+static size_t mkpath_int (uint8_t *p, int key) {
+  p[0] = 0x91; p[1] = 0x92; p[2] = (uint8_t)DV_VAL_INT; p[3] = (uint8_t)key;
+  return 4;
+}
+
+
+static void a_path_descends_past_the_first_level (void) {
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local cfg = { retries = 3, nested = { deep = 1 }, list = { 10, 20, 30 } } "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096], path[64];
+  size_t len = 0, plen;
+  char name[64];
+  mpc c;
+  static const char *const one[] = { "retries" };
+  static const char *const two[] = { "nested", "deep" };
+  static const char *const gone[] = { "missing" };
+  static const char *const wrong[] = { "retries", "x" };
+  static const char *const list[] = { "list" };
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a nested table");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+
+  plen = mkpath(path, one, 1);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "one step opens a field the listing only counted");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT, "reaching the scalar");
+  eq_i(mpc_int(&c), 3, "with its value");
+  ok(strcmp(name, "cfg") == 0, "and the local's own name, not the key's");
+
+  plen = mkpath(path, two, 2);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "two steps reach through the table the first level made opaque");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT, "to a scalar");
+  eq_i(mpc_int(&c), 1, "which is the one the program put there");
+
+  plen = mkpath(path, list, 1);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "a step onto a table expands that table in turn");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_TABLE, "as a table");
+  eq_i(mpc_int(&c), 3, "with its three entries");
+
+  {
+    uint8_t p2[8];
+    size_t p2len = mkpath_int(p2, 2);
+    /* An integer key needs no separate spelling: it is a key description like
+       any other, which is the argument for descriptions over a dotted string. */
+    uint8_t deep[16];
+    size_t dlen = mkpath(deep, list, 1);
+    memcpy(deep + dlen, p2 + 1, p2len - 1);   /* append the int step */
+    deep[0] = 0x92;                            /* two steps now */
+    dlen += p2len - 1;
+    eq_st(dv_local(inst, (uint32_t)lvl, 2, deep, dlen, buf, sizeof(buf), &len),
+          DV_OK, "and an integer key indexes an array");
+    eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT, "to a number");
+    eq_i(mpc_int(&c), 20, "the second element");
+  }
+
+  plen = mkpath(path, gone, 1);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "a key that is not there is answered, not refused");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_NIL,
+       "as nil, because absent is a fair answer to a fair question");
+
+  plen = mkpath(path, wrong, 2);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_ERROR, "but a step into a number is an error: it can hold nothing");
+  ok(dv_last_error(inst) != NULL &&
+     strstr(dv_last_error(inst), "step 2") != NULL,
+     "and the message says which step");
+
+  {
+    /* Caller bytes, so a malformed path is a status rather than a raise through
+       host code that is running under no protection of the runtime's. */
+    static const uint8_t junk[] = { 0xc1, 0xff, 0xff };
+    eq_st(dv_local(inst, (uint32_t)lvl, 2, junk, sizeof(junk),
+                   buf, sizeof(buf), &len),
+          DV_ERROR, "a malformed path is refused with a status");
+  }
+  dv_free(inst);
+}
+
+
+static void a_path_walks_a_cycle_without_looping (void) {
+  /*
+  ** 't.self.self.self.n'. The graph is infinite and the walk is not, because the
+  ** path bounds it: each step is one raw index, and there are four of them. This
+  ** is the same property that lets the first-level description ignore cycles --
+  ** nothing here follows a reference on its own initiative.
+  */
+  dv_instance *inst = load(
+    "local inb = queue.lookup('inbox') "
+    "local t = { n = 1 } "
+    "t.self = t "
+    "local id, msg = queue.wait({inb}) "
+    "return 0", 0);
+  dv_waitset ws;
+  dv_frame f;
+  uint32_t n = 0;
+  int lvl;
+  uint8_t buf[4096], path[64];
+  size_t len = 0, plen;
+  char name[64];
+  mpc c;
+  static const char *const deep[] = { "self", "self", "self", "n" };
+  if (inst == NULL) { ok(0, "load"); return; }
+  memset(&ws, 0, sizeof(ws));
+  eq_st(dv_run(inst, &ws), DV_IDLE, "the program parks holding a cycle");
+  dv_frame_count(inst, &n);
+  lvl = innermost_lua_frame(inst, n, &f);
+  if (lvl < 0) { ok(0, "a Lua frame"); dv_free(inst); return; }
+  plen = mkpath(path, deep, 4);
+  eq_st(dv_local(inst, (uint32_t)lvl, 2, path, plen, buf, sizeof(buf), &len),
+        DV_OK, "a path through a cycle terminates, because the path is finite");
+  eq_i(open_local(&c, buf, len, name, sizeof(name)), DV_VAL_INT,
+       "and arrives at the scalar on the far side of three self-references");
+  eq_i(mpc_int(&c), 1, "with its value");
+  eq_st(dv_waitset_get(inst, &ws), DV_OK, "and the instance is still parked");
+  dv_free(inst);
 }
 
 
@@ -2915,6 +3615,14 @@ static void the_fast_tier_flag_reaches_the_host (void) {
 int main (void) {
   printf("=== dv ABI contract ===\n");
   layout();
+  frames_are_readable_while_parked();
+  internal_locals_are_filtered_out();
+  a_woken_instance_reports_that_its_names_are_gone();
+  a_local_reads_back_with_its_name_and_value();
+  a_table_local_expands_one_level_only();
+  a_cyclic_table_is_described_rather_than_refused();
+  a_path_descends_past_the_first_level();
+  a_path_walks_a_cycle_without_looping();
   version();
   build_facts();
   run_to_completion();

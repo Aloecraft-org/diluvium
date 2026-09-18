@@ -15,6 +15,7 @@
 
 #include "lprefix.h"
 
+#include <limits.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -23,6 +24,7 @@
 #include "lauxlib.h"
 #include "lualib.h"
 #include "dlibs.h"
+#include "dmsgpack.h"
 #include "dendpoint.h"
 #include "dqueue.h"
 #include "dshim.h"
@@ -261,13 +263,44 @@ static void *dv_alloc (void *ud, void *ptr, size_t osize, size_t nsize) {
 */
 static void dv_insn_hook (lua_State *L, lua_Debug *ar) {
   dv_instance *inst;
-  (void)ar;
+  int step;
+  /*
+  ** Only a count event is instructions. The mask this file arms is
+  ** LUA_MASKCOUNT alone, so today this branch is taken every time; it is
+  ** here because a 'lua_State' has one hook slot and one hook function, and
+  ** anything that adds LUA_MASKLINE to share it -- a debugger -- arrives at
+  ** this same function with 'ar->event' as LUA_HOOKLINE. Charging a line
+  ** event as instructions would invent them.
+  */
+  if (ar->event != LUA_HOOKCOUNT)
+    return;
   lua_getfield(L, LUA_REGISTRYINDEX, "diluvium.instance");
   inst = (dv_instance *)lua_touserdata(L, -1);
   lua_pop(L, 1);
   if (inst == NULL)
     return;
-  inst->insn_used += DV_HOOK_STEP;
+  /*
+  ** The count in force, not DV_HOOK_STEP.
+  **
+  ** They are the same number while the two 'lua_sethook' calls in this file
+  ** are the only things that arm the hook, which is why the constant was the
+  ** accounting and why this changes nothing today. It is the trap underneath
+  ** that change: a hook re-armed at a finer granularity -- a stepper wants 1
+  ** -- would still be charged 1000 per fire, so an instance stepped through
+  ** would exhaust a budget a thousand times too early and 'dv_usage' would be
+  ** wrong by that factor rather than by the rounding its comment promises. A
+  ** budget stored, reported by an accessor, and enforced wrongly is the defect
+  ** the M0-M7 audit found twice; reading the count back costs one load.
+  **
+  ** Zero cannot reach here -- 'lua_sethook' with a count of 0 leaves
+  ** 'hookcount' at 0, which the decrement in 'luaG_traceexec' never brings to
+  ** 0 -- but charging it would freeze 'insn_used' and with it the budget, so
+  ** the fallback is the old constant rather than nothing.
+  */
+  step = lua_gethookcount(L);
+  if (step <= 0)
+    step = DV_HOOK_STEP;
+  inst->insn_used += (uint64_t)step;
   if (inst->insn_limit != 0 && inst->insn_used >= inst->insn_limit) {
     inst->exceeded = 1;
     /*
@@ -943,7 +976,18 @@ uint32_t dv_layout (uint32_t *out, size_t n) {
     (uint32_t)offsetof(dv_waitset, n),
     (uint32_t)offsetof(dv_waitset, ids),
     (uint32_t)offsetof(dv_waitset, timeout_ms),
-    (uint32_t)offsetof(dv_waitset, for_write)
+    (uint32_t)offsetof(dv_waitset, for_write),
+    (uint32_t)sizeof(dv_frame),
+    (uint32_t)offsetof(dv_frame, pc),
+    (uint32_t)offsetof(dv_frame, currentline),
+    (uint32_t)offsetof(dv_frame, is_c),
+    (uint32_t)offsetof(dv_frame, is_tail),
+    (uint32_t)offsetof(dv_frame, is_vararg),
+    (uint32_t)offsetof(dv_frame, has_source),
+    (uint32_t)offsetof(dv_frame, nlocals),
+    (uint32_t)offsetof(dv_frame, source),
+    (uint32_t)offsetof(dv_frame, name),
+    (uint32_t)offsetof(dv_frame, what)
   };
   size_t i;
   size_t want = (n < DV_LAYOUT_COUNT) ? n : DV_LAYOUT_COUNT;
@@ -952,6 +996,424 @@ uint32_t dv_layout (uint32_t *out, size_t n) {
   for (i = 0; i < want; i++)
     out[i] = table[i];
   return (uint32_t)want;
+}
+
+
+/* ------------------------------------------------------------- inspection -- */
+
+/*
+** Copy a string into one of 'dv_frame''s fixed fields, always NUL-terminated.
+**
+** Fixed arrays rather than pointers so the struct is self-contained: a host
+** reading it through 'dv_layout' on wasm has no lifetime to reason about, and
+** there is nothing for a later call to invalidate.
+*/
+static void frame_str (char *dst, size_t cap, const char *src) {
+  size_t n;
+  if (src == NULL) { dst[0] = '\0'; return; }
+  n = strlen(src);
+  if (n >= cap) n = cap - 1;
+  memcpy(dst, src, n);
+  dst[n] = '\0';
+}
+
+
+/*
+** Is this the VM's own bookkeeping rather than the program's?
+**
+** 'lua_getlocal' reports '(for state)', '(temporary)' and friends alongside a
+** program's own locals -- doc/Lab.md 3.4's transcript shows three of them around
+** one loop variable. The filter is here, in the ABI, and not in each front end,
+** because otherwise every panel reimplements it and one of them forgets.
+*/
+static int internal_local (const char *name) {
+  return name == NULL || name[0] == '(';
+}
+
+
+/*
+** The parked thread, or NULL with the reason set.
+**
+** Parked is the same precondition 'dv_snapshot' has, for the same reason: a
+** suspended coroutine's call chain is written down and a running one's is on
+** the C stack.
+*/
+static lua_State *inspectable (dv_instance *inst) {
+  if (inst->co == NULL || !inst->parked) {
+    set_error(inst, "the instance is not parked; its frames are only readable "
+                    "between a park and the next resume");
+    return NULL;
+  }
+  return inst->co;
+}
+
+
+/*
+** Named locals at 'level', and the 'n' of the 'i'th of them.
+**
+** One walk serves both the count in 'dv_frame' and the lookup 'dv_local' will
+** do, so the two cannot disagree about which slot index means what. 'want' is
+** 1-based over the *named* locals; pass 0 to count them. Returns the count when
+** counting, or the underlying 'lua_getlocal' index when looking one up, or 0
+** when there is no such named local. Every value pushed is popped again.
+*/
+static int walk_locals (lua_State *co, lua_Debug *ar, int want,
+                        const char **out_name) {
+  int slot, found = 0;
+  const char *name;
+  for (slot = 1; (name = lua_getlocal(co, ar, slot)) != NULL; slot++) {
+    lua_pop(co, 1);                     /* the value 'lua_getlocal' pushed */
+    if (internal_local(name))
+      continue;
+    found++;
+    if (want != 0 && found == want) {
+      if (out_name != NULL) *out_name = name;
+      return slot;
+    }
+  }
+  return (want == 0) ? found : 0;
+}
+
+
+dv_status dv_frame_count (dv_instance *inst, uint32_t *out) {
+  lua_State *co;
+  lua_Debug ar;
+  int n = 0;
+  if (inst == NULL || out == NULL)
+    return DV_ERROR;
+  *out = 0;
+  if ((co = inspectable(inst)) == NULL)
+    return DV_BUSY;
+  while (lua_getstack(co, n, &ar))
+    n++;
+  *out = (uint32_t)n;
+  return DV_OK;
+}
+
+
+dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out) {
+  lua_State *co;
+  lua_Debug ar;
+  if (inst == NULL || out == NULL)
+    return DV_ERROR;
+  memset(out, 0, sizeof(*out));
+  out->pc = -1;
+  out->currentline = -1;
+  if ((co = inspectable(inst)) == NULL)
+    return DV_BUSY;
+  if (level > (uint32_t)INT_MAX || !lua_getstack(co, (int)level, &ar)) {
+    set_error(inst, "dv_frame_info: no such frame");
+    return DV_ERROR;
+  }
+  /*
+  ** 'S' and 'l' for the source and line, 'n' for the name, 't' for the tail
+  ** call, 'u' for the vararg flag. Asking for them together is one call into
+  ** the debug machinery rather than five.
+  */
+  if (!lua_getinfo(co, "Slntu", &ar)) {
+    set_error(inst, "dv_frame_info: the frame would not describe itself");
+    return DV_ERROR;
+  }
+  out->currentline = (int32_t)ar.currentline;
+  out->is_c = (uint8_t)(ar.what != NULL && strcmp(ar.what, "C") == 0);
+  out->is_tail = (uint8_t)(ar.istailcall != 0);
+  out->is_vararg = (uint8_t)(ar.isvararg != 0);
+  frame_str(out->source, sizeof(out->source), ar.short_src);
+  frame_str(out->name, sizeof(out->name), ar.name);
+  frame_str(out->what, sizeof(out->what), ar.what);
+  /*
+  ** A stripped prototype -- which is every prototype in a restored instance,
+  ** since 10.5 hashes and stores the stripped dump -- carries no 'lineinfo', so
+  ** it reports no current line. That is the whole test. A restored chunk is also
+  ** named "=snapshot" and comparing against it was tempting, but the name is a
+  ** host's to choose: a host that called 'dv_load' with "=snapshot" would have
+  ** had its own unstripped frames reported as nameless. The line is the fact.
+  **
+  ** 'is_c' is separate because a C frame has no line either and is not what this
+  ** flag is about -- it has no names to lose.
+  */
+  out->has_source = (uint8_t)(!out->is_c && ar.currentline > 0);
+  /*
+  ** 'pc' is not in 'lua_Debug': the offset a breakpoint would name comes from
+  ** the shim, which counts frames from the outermost while 'lua_getstack'
+  ** counts from the innermost. The conversion is the one thing doc/Lab.md 3.1
+  ** warns produces a plausible stack in the wrong order, so it is written once,
+  ** here.
+  */
+  if (!out->is_c) {
+    int total = diluvium_shim_framecount(co);
+    diluvium_frame f;
+    if (total > 0 && (uint32_t)total > level &&
+        diluvium_shim_frame(co, total - 1 - (int)level, &f))
+      out->pc = (int32_t)f.pc;
+  }
+  out->nlocals = (int32_t)walk_locals(co, &ar, 0, NULL);
+  return DV_OK;
+}
+
+
+/*
+** One value, described. 'expand' is 1 only for the local itself.
+**
+** Never recursive: 'expand' is 0 for everything reached from inside a table, so
+** a nested table is DV_VAL_OPAQUE rather than another level. That is the whole
+** cycle story -- there is no traversal to loop, so there is nothing to detect.
+*/
+static void push_value_envelope (lua_State *L, int idx, int expand);
+
+
+static void push_table_envelope (lua_State *L, int idx) {
+  int env, entries, written = 0;
+  lua_Integer count = 0;
+  luaL_checkstack(L, 8, "dv_local: describing a table");
+  lua_createtable(L, 4, 0);
+  env = lua_gettop(L);
+  lua_pushinteger(L, DV_VAL_TABLE);
+  lua_rawseti(L, env, 1);
+  lua_createtable(L, DV_LOCAL_MAX_ENTRIES, 0);
+  entries = lua_gettop(L);
+  /*
+  ** 'lua_next' is a raw traversal, which is the property that matters here: a
+  ** '__index' or '__pairs' would be guest code, and a parked instance cannot run
+  ** any -- so a cooked read would either deadlock or have to resume the program
+  ** behind its host's back. Raw is also what 'diluvium_repl_complete' chose, for
+  ** the same reason.
+  */
+  lua_pushnil(L);
+  while (lua_next(L, idx) != 0) {
+    int vidx = lua_gettop(L);
+    int kidx = vidx - 1;
+    count++;
+    if (written < DV_LOCAL_MAX_ENTRIES) {
+      lua_createtable(L, 2, 0);
+      push_value_envelope(L, kidx, 0);
+      lua_rawseti(L, -2, 1);
+      push_value_envelope(L, vidx, 0);
+      lua_rawseti(L, -2, 2);
+      written++;
+      lua_rawseti(L, entries, written);
+    }
+    lua_pop(L, 1);            /* the value; the key stays for 'lua_next' */
+  }
+  lua_pushinteger(L, count);
+  lua_rawseti(L, env, 2);
+  lua_pushboolean(L, count > (lua_Integer)written);
+  lua_rawseti(L, env, 3);
+  lua_pushvalue(L, entries);
+  lua_rawseti(L, env, 4);
+  lua_settop(L, env);         /* the envelope alone */
+}
+
+
+static void push_value_envelope (lua_State *L, int idx, int expand) {
+  int t = lua_type(L, idx);
+  luaL_checkstack(L, 4, "dv_local: describing a value");
+  switch (t) {
+    case LUA_TNIL: case LUA_TNONE:
+      lua_createtable(L, 1, 0);
+      lua_pushinteger(L, DV_VAL_NIL);
+      lua_rawseti(L, -2, 1);
+      return;
+    case LUA_TBOOLEAN:
+      lua_createtable(L, 2, 0);
+      lua_pushinteger(L, DV_VAL_BOOL);
+      lua_rawseti(L, -2, 1);
+      lua_pushboolean(L, lua_toboolean(L, idx));
+      lua_rawseti(L, -2, 2);
+      return;
+    case LUA_TNUMBER:
+      lua_createtable(L, 2, 0);
+      /* Integer and float are separate tags because they are separate types in
+         this VM: 5.2's rule is that round-tripping an integer yields an integer,
+         and a panel showing 1.0 where the program holds 1 is the same lie. */
+      lua_pushinteger(L, lua_isinteger(L, idx) ? DV_VAL_INT : DV_VAL_FLOAT);
+      lua_rawseti(L, -2, 1);
+      lua_pushvalue(L, idx);
+      lua_rawseti(L, -2, 2);
+      return;
+    case LUA_TSTRING:
+      lua_createtable(L, 2, 0);
+      lua_pushinteger(L, DV_VAL_STR);
+      lua_rawseti(L, -2, 1);
+      lua_pushvalue(L, idx);
+      lua_rawseti(L, -2, 2);
+      return;
+    case LUA_TTABLE:
+      if (expand) {
+        push_table_envelope(L, lua_absindex(L, idx));
+        return;
+      }
+      break;                  /* opaque, named "table" */
+    default:
+      break;
+  }
+  lua_createtable(L, 2, 0);
+  lua_pushinteger(L, DV_VAL_OPAQUE);
+  lua_rawseti(L, -2, 1);
+  lua_pushstring(L, lua_typename(L, t));
+  lua_rawseti(L, -2, 2);
+}
+
+
+/*
+** Follow the path, replacing the value at 'validx' with what it names.
+**
+** Raises on a step that cannot be taken, which is why this only ever runs inside
+** 'local_build''s protected call: the message it raises becomes the instance's
+** last error and the host gets a status.
+*/
+static void follow_path (lua_State *L, int validx, int pathidx) {
+  lua_Integer i, steps = (lua_Integer)lua_rawlen(L, pathidx);
+  lua_pushvalue(L, validx);             /* the value we are walking */
+  for (i = 1; i <= steps; i++) {
+    lua_Integer tag;
+    if (!lua_istable(L, -1))
+      luaL_error(L, "dv_local: step %I of the path indexes a %s, which holds "
+                    "nothing to name", i, luaL_typename(L, -1));
+    if (lua_rawgeti(L, pathidx, i) != LUA_TTABLE)
+      luaL_error(L, "dv_local: step %I of the path is not a key description", i);
+    lua_rawgeti(L, -1, 1);
+    tag = lua_tointeger(L, -1);
+    lua_pop(L, 1);
+    if (tag == DV_VAL_OPAQUE || tag == DV_VAL_NIL)
+      luaL_error(L, "dv_local: step %I names a key that is not a scalar; a table "
+                    "or a function key is identity, and a description carries "
+                    "none", i);
+    if (tag == DV_VAL_TABLE)
+      luaL_error(L, "dv_local: step %I is a table description, not a key", i);
+    lua_rawgeti(L, -1, 2);              /* the key itself */
+    lua_remove(L, -2);                  /* the step */
+    /*
+    ** Raw, like the listing: a '__index' would be guest code, and a parked
+    ** instance cannot run any. Absent is an answer -- a missing key leaves nil
+    ** here and is described as DV_VAL_NIL -- because a panel asking about a
+    ** field a program has not set yet has asked a fair question.
+    */
+    lua_rawget(L, -2);
+    lua_remove(L, -2);                  /* the container */
+  }
+  lua_replace(L, validx);
+}
+
+
+/*
+** The protected half: build the reply and encode it.
+**
+** Protected because every step of it can raise -- 'lua_createtable' against a
+** memory budget, and the codec on anything it will not write -- and 'dv_local'
+** is called from host code running under no protection of the runtime's. The
+** same reasoning 'dv_array_adopt' states: the failure has to become a return
+** here or it takes the process with it.
+**
+** Called with the name at 1, the value at 2 and the decoded path at 3 (or nil);
+** leaves the encoded string.
+*/
+static int local_build (lua_State *L) {
+  if (lua_istable(L, 3))
+    follow_path(L, 2, 3);
+  lua_createtable(L, 2, 0);
+  lua_pushvalue(L, 1);
+  lua_rawseti(L, -2, 1);
+  push_value_envelope(L, 2, 1);
+  lua_rawseti(L, -2, 2);
+  diluvium_msgpack_encode(L, -1);
+  return 1;
+}
+
+
+/* Decode the caller's path bytes into a table, or push nil. Protected. */
+static int path_decode (lua_State *L) {
+  const uint8_t *bytes = (const uint8_t *)lua_touserdata(L, 1);
+  size_t n = (size_t)lua_tointeger(L, 2);
+  if (bytes == NULL || n == 0) {
+    lua_pushnil(L);
+    return 1;
+  }
+  diluvium_msgpack_decode(L, (const char *)bytes, n);
+  if (!lua_istable(L, -1))
+    return luaL_error(L, "dv_local: the path is not an array of key "
+                         "descriptions");
+  return 1;
+}
+
+
+dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
+                    const uint8_t *path, size_t path_len,
+                    uint8_t *buf, size_t cap, size_t *len) {
+  lua_State *co, *L;
+  lua_Debug ar;
+  const char *name = NULL;
+  const char *bytes;
+  size_t n = 0;
+  int slot, base;
+  if (inst == NULL || len == NULL)
+    return DV_ERROR;
+  *len = 0;
+  if ((co = inspectable(inst)) == NULL)
+    return DV_BUSY;
+  if (level > (uint32_t)INT_MAX || !lua_getstack(co, (int)level, &ar)) {
+    set_error(inst, "dv_local: no such frame");
+    return DV_ERROR;
+  }
+  if (index == 0 || index > (uint32_t)INT_MAX ||
+      (slot = walk_locals(co, &ar, (int)index, &name)) == 0) {
+    set_error(inst, "dv_local: no such local at that index");
+    return DV_ERROR;
+  }
+  /*
+  ** Built on the instance's main state, not on the parked thread.
+  **
+  ** The value is read off 'co' and moved across with 'lua_xmove' -- the same
+  ** pattern 'diluvium_shim_pushslot' uses, and legal because both belong to one
+  ** Lua state. Doing the work on 'co' instead would push a CallInfo onto the
+  ** chain that 'dv_resume' and 'dv_snapshot' are both about to read, and an
+  ** error inside it would unwind a suspension that has to survive this call
+  ** untouched. Inspecting a parked program must not disturb the park.
+  */
+  L = inst->L;
+  base = lua_gettop(L);
+  if (!lua_checkstack(L, 6)) {
+    set_error(inst, "dv_local: cannot grow the instance's stack");
+    return DV_ERROR;
+  }
+  /* The path is decoded first and under its own protection: it is caller bytes,
+     so a malformed one must be a status and not a raise through host code. */
+  lua_pushcfunction(L, path_decode);
+  lua_pushlightuserdata(L, (void *)(uintptr_t)path);  /* read-only; path_decode never writes through it */
+  lua_pushinteger(L, (lua_Integer)path_len);
+  if (lua_pcall(L, 2, 1, 0) != LUA_OK) {
+    set_error_from(inst, L);
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  lua_pushcfunction(L, local_build);
+  lua_pushstring(L, name);
+  if (lua_getlocal(co, &ar, slot) == NULL) {
+    set_error(inst, "dv_local: the local went away between counting and reading");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  lua_xmove(co, L, 1);
+  lua_pushvalue(L, base + 1);           /* the decoded path */
+  if (lua_pcall(L, 3, 1, 0) != LUA_OK) {
+    set_error_from(inst, L);
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  bytes = lua_tolstring(L, -1, &n);
+  if (bytes == NULL) {
+    set_error(inst, "dv_local: the description did not encode");
+    lua_settop(L, base);
+    return DV_ERROR;
+  }
+  *len = n;
+  if (buf == NULL || cap < n) {
+    lua_settop(L, base);
+    return DV_BUFFER_TOO_SMALL;
+  }
+  memcpy(buf, bytes, n);
+  lua_settop(L, base);
+  return DV_OK;
 }
 
 

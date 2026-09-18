@@ -59,14 +59,25 @@ extern "C" {
 ** every function correctly and still misdecode a message is worse off than one
 ** that refused to start.
 **
-** 2 is the numeric round: 'dv_features', 'dv_build', 'dv_array_adopt' and the
-** 'dv_numeric_*' block below are new, so a wrapper built against 1 does not
-** know the surface it is holding. A build13 snapshot does not restore into a
-** version-2 runtime and a version-1 host is refused by 'dv_new'; both are the
-** intended consequence rather than collateral, which is what this number is
-** for.
+** 3 is the inspection round: 'dv_frame_count', 'dv_frame_info' and 'dv_local'
+** are new, with the 'dv_frame' struct, its DV_LAYOUT_* entries and the DV_VAL_*
+** tags the descriptions carry. A wrapper built against 2 does not know the
+** surface it is holding.
+**
+** One bump for the three of them on purpose. 'dv_new' refuses a config whose
+** 'abi_version' is not exactly this number, so every bump breaks every binding
+** pinned to the old one at the same moment; landing the frame read in one
+** release and the local read in the next would have cost two of those for
+** nothing. The ext registry did not move -- the value descriptions are tagged
+** arrays and not ext objects, for the reason 'dv_local' gives -- so a message
+** encoded by a version-2 runtime still decodes here.
+**
+** 2 was the numeric round: 'dv_features', 'dv_build', 'dv_array_adopt' and the
+** 'dv_numeric_*' block. A build13 snapshot does not restore into a version-2
+** runtime and a version-1 host is refused by 'dv_new'; both are the intended
+** consequence rather than collateral, which is what this number is for.
 */
-#define DV_ABI_VERSION	2u
+#define DV_ABI_VERSION	3u
 
 uint32_t dv_abi_version (void);
 
@@ -476,7 +487,18 @@ dv_status dv_endpoint_close (dv_instance *inst, dv_queue_id id);
 #define DV_LAYOUT_WAITSET_IDS		12
 #define DV_LAYOUT_WAITSET_TIMEOUT	13
 #define DV_LAYOUT_WAITSET_FOR_WRITE	14
-#define DV_LAYOUT_COUNT			15
+#define DV_LAYOUT_FRAME_SIZE		15
+#define DV_LAYOUT_FRAME_PC		16
+#define DV_LAYOUT_FRAME_CURRENTLINE	17
+#define DV_LAYOUT_FRAME_IS_C		18
+#define DV_LAYOUT_FRAME_IS_TAIL		19
+#define DV_LAYOUT_FRAME_IS_VARARG	20
+#define DV_LAYOUT_FRAME_HAS_SOURCE	21
+#define DV_LAYOUT_FRAME_NLOCALS		22
+#define DV_LAYOUT_FRAME_SOURCE		23
+#define DV_LAYOUT_FRAME_NAME		24
+#define DV_LAYOUT_FRAME_WHAT		25
+#define DV_LAYOUT_COUNT			26
 
 /*
 ** Per-instance limits (9.4).
@@ -528,6 +550,161 @@ dv_status dv_memory (dv_instance *inst, uint64_t *bytes_now,
 
 /* Did this instance stop because it ran out of budget? */
 int dv_exceeded (dv_instance *inst);
+
+
+/* ------------------------------------------------------------- inspection -- */
+
+/*
+** Reading a parked instance's frames (doc/Lab.md 3.1-3.2).
+**
+** The instance must be *parked*, which is the same condition 'dv_snapshot'
+** requires and for the same reason: a suspended coroutine's call chain is
+** written down, and a running one's is on the machine's C stack. DV_BUSY says
+** it is not, exactly as 'dv_waitset_get' does.
+**
+** This grants a host nothing it did not already have. 'dv_snapshot' already
+** writes the parked program, its call chain and its reachable values into a
+** host buffer on any parked instance with no flag set; what was missing was a
+** way to read one value without decoding a snapshot to get it. So there is no
+** flag here, and DV_FLAG_UNSAFE_DEBUG is not consulted: that flag governs what
+** the *guest* may reach, and this is the host reading its own instance.
+**
+** Nothing here hands back a 'lua_State'. That is deliberate and it is the
+** header's central claim -- dv.h contains no Lua type and no Lua header -- so
+** the frame walk happens inside the runtime and a host sees plain data. A host
+** that wants to reach 'inst->co' itself is on the wrong side of the layer
+** boundary 'dvs.h' names, and this exists so it does not have to.
+*/
+
+/* Longest 'source' or 'name' reported. LUA_IDSIZE is 60; the extra rounds it. */
+#define DV_FRAME_STRMAX	64
+
+typedef struct dv_frame {
+  int32_t pc;             /* code offset into the prototype, -1 for a C frame */
+  int32_t currentline;    /* -1 when the prototype carries no line info */
+  int32_t nlocals;        /* named locals readable here; see 'dv_local' */
+  uint8_t is_c;
+  uint8_t is_tail;        /* reached by a tail call: its caller is not above it */
+  uint8_t is_vararg;
+  /*
+  ** Whether 'source', 'name' and 'currentline' mean anything.
+  **
+  ** Zero on a restored instance, and that is not a defect to fix here. A
+  ** snapshot carries *stripped* dumps (10.5 wants line numbers and source names
+  ** out of the hash domain, so a comment reflow does not invalidate every cached
+  ** agent), and 'lua_dump' with strip drops 'locvars', 'upvalues', 'lineinfo'
+  ** and 'source' together. A woken instance therefore has values and no names,
+  ** its chunk is called "=snapshot", and a front end that wants names for one
+  ** must map them from a static analysis of the source it started from.
+  **
+  ** Reported rather than papered over: a panel showing 'local 3' honestly is
+  ** better than one showing a name it guessed.
+  */
+  uint8_t has_source;
+  char source[DV_FRAME_STRMAX];   /* short_src, or "" */
+  char name[DV_FRAME_STRMAX];     /* what the function is called, or "" */
+  char what[16];                  /* "Lua", "C", "main", or "" */
+} dv_frame;
+
+/*
+** How many frames the parked program has, innermost first.
+**
+** Returns 0 and reports DV_BUSY when the instance is not parked. Level 0 is the
+** *innermost* frame, which is 'lua_getstack''s direction and the opposite of
+** 'diluvium_shim_frame''s -- the conversion is done here, once, because getting
+** it wrong produces a plausible stack in the wrong order.
+*/
+dv_status dv_frame_count (dv_instance *inst, uint32_t *out);
+
+/*
+** Describe one frame. DV_ERROR for a level that does not exist.
+*/
+dv_status dv_frame_info (dv_instance *inst, uint32_t level, dv_frame *out);
+
+/*
+** Read one named local, as msgpack.
+**
+** 'index' is 1-based over the *named* locals of that frame -- the ones
+** 'dv_frame_info' counted. The VM's own slots ('(for state)', '(temporary)')
+** are not in the numbering, so index 2 is the program's second local and not
+** whatever the VM parked beside it. Filtered here rather than in each front end.
+**
+** The bytes are a value *description*, not the value. A queue message is the
+** value and has to decode back into one; this is read by something drawing a
+** panel, which needs to know that a field is a table of twelve entries before it
+** can decide whether to ask for them. So every value is written as an array
+** whose first element is one of the DV_VAL_* tags below:
+**
+**   [DV_VAL_NIL]                     nil
+**   [DV_VAL_BOOL,   true|false]
+**   [DV_VAL_INT,    n]
+**   [DV_VAL_FLOAT,  x]
+**   [DV_VAL_STR,    s]
+**   [DV_VAL_TABLE,  count, truncated, [[key, value], ...]]
+**   [DV_VAL_OPAQUE, "function"|"thread"|"userdata"|"table"]
+**
+** and the whole reply is ["name", <value>].
+**
+** **Nothing here recurses.** A table is expanded one level, and any table inside
+** it is DV_VAL_OPAQUE "table" rather than another expansion. That is what makes
+** this safe on arbitrary program state rather than merely usually safe: a cyclic
+** table cannot be followed, because nothing follows anything. The plain codec
+** guards cycles with a nesting cap and *raises* when it trips -- fine for a
+** message a program chose to send, useless for inspecting a program that did not
+** choose anything. A panel descends by asking again, which is also the only way
+** it can render lazily.
+**
+** Keys are described exactly as values are, so a table keyed by anything other
+** than a string still reads. Traversal is raw: no '__index', no '__pairs', and
+** so no guest code runs to answer a host's question -- which it could not do
+** anyway, since the instance is parked.
+**
+** At most DV_LOCAL_MAX_ENTRIES pairs are written and 'truncated' says whether
+** more were there. 'count' is the real number either way.
+**
+** DV_BUFFER_TOO_SMALL sets '*len' to what is needed and writes nothing, the same
+** contract 'dv_queue_pop' has. DV_BUSY when the instance is not parked, DV_ERROR
+** for a level or index that does not exist.
+**
+** ---------------------------------------------------------------- the path
+**
+** 'path' descends into what the local holds, and is how a panel sees past the
+** one level the description expands. It is msgpack: an array of the *key
+** descriptions* a previous call handed back, in order. To open 'cfg.retries' a
+** caller sends [[DV_VAL_STR, "retries"]] -- which is byte for byte the key it
+** was already given, so a front end copies rather than constructs, and a key
+** that is a number or a boolean needs no separate spelling. NULL, or a zero
+** 'path_len', reads the local itself.
+**
+** Each step is a raw index of the value the last step produced, so descending is
+** as free of guest code as the first level. A step naming a key that is not
+** there yields [DV_VAL_NIL] -- absent is an answer, not a failure -- while a step
+** into something that is not a table is DV_ERROR, because the caller asked for
+** something that cannot exist.
+**
+** A key that is itself a table or a function cannot be named: identity does not
+** survive a description, and DV_VAL_OPAQUE carries none. Such an entry is
+** therefore visible in a listing and not descendable, which is stated here
+** because it is a real edge and not an oversight.
+**
+** The name in the reply stays the *local's* name however deep the path goes.
+** The caller knows the path it sent; inventing a name for a position would only
+** be another thing to disagree with.
+*/
+#define DV_VAL_NIL	0
+#define DV_VAL_BOOL	1
+#define DV_VAL_INT	2
+#define DV_VAL_FLOAT	3
+#define DV_VAL_STR	4
+#define DV_VAL_TABLE	5
+#define DV_VAL_OPAQUE	6
+
+/* Pairs written for one expanded table before 'truncated' is set. */
+#define DV_LOCAL_MAX_ENTRIES	64
+
+dv_status dv_local (dv_instance *inst, uint32_t level, uint32_t index,
+                    const uint8_t *path, size_t path_len,
+                    uint8_t *buf, size_t cap, size_t *len);
 
 
 /* ---------------------------------------------------------------- numeric -- */

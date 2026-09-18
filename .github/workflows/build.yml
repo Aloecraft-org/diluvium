@@ -19,12 +19,26 @@ on:
         type: string
         required: false
         default: ''
+      dev:
+        description: 'Fast path: Linux x86_64 only, no cross-compilation, no wasm'
+        type: boolean
+        required: false
+        default: false
   workflow_call:
     inputs:
       ref:
         type: string
         required: false
         default: ''
+      # doc/ALIGNMENT.md 7: "a dev tag builds one platform and skips
+      # cross-compilation, wasm and the slow suites". Narrowed here rather
+      # than in a second workflow, so the dev path and the release path
+      # cannot drift into building different things -- which is how
+      # diluvium-drt does it too.
+      dev:
+        type: boolean
+        required: false
+        default: false
     outputs:
       sha:
         description: 'The exact commit that was built'
@@ -76,15 +90,20 @@ jobs:
         with:
           ref: ${{ needs.resolve.outputs.sha }}
 
+      # NOT skipped for a dev build: 'make build_linux_static' runs the
+      # x86_64 build inside PODMAN_RUN_ALPINE, so the one platform a dev
+      # build does keep needs this.
       - name: Install Podman
         run: |
           sudo apt-get update
           sudo apt-get -y install podman
 
       - name: Install QEMU (for ARM support)
+        if: ${{ !inputs.dev }}
         uses: docker/setup-qemu-action@v3
 
       - name: Build WASM
+        if: ${{ !inputs.dev }}
         run: make build_wasm
 
       # The browser wasm (web/diluvium_browser.wasm): the language, the compiler
@@ -95,12 +114,14 @@ jobs:
       # workflow's 'browser' job (which the release gate runs) validates it, so
       # here it is only built and staged into the bundle alongside its loader.
       - name: Install the browser wasm toolchain (no container)
+        if: ${{ !inputs.dev }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             clang-20 lld-20 libclang-rt-20-dev-wasm32 wasi-libc
 
       - name: Build the browser wasm and stage it
+        if: ${{ !inputs.dev }}
         run: |
           set -eu
           make build_browser
@@ -111,6 +132,7 @@ jobs:
         run: make build_linux_static ARCHl=x86_64
 
       - name: Build Linux static (aarch64 / Raspberry Pi 3-5)
+        if: ${{ !inputs.dev }}
         run: |
           # --platform triggers QEMU emulation; ARCHl is the build arch, which
           # the Makefile maps to the arm64 artifact name (doc/ALIGNMENT.md §4).
@@ -119,6 +141,7 @@ jobs:
             ARCHl=aarch64
 
       - name: Build Linux static (armv7l / Pi Zero)
+        if: ${{ !inputs.dev }}
         run: |
           make build_linux_static \
             PODMAN_RUN_ALPINE="podman run --rm --platform linux/arm/v7 -v $(pwd)/.data:/data -w /data alpine:latest" \
@@ -162,6 +185,7 @@ jobs:
       # run. QEMU and the container are already set up from building them,
       # so running the binary costs one more invocation each.
       - name: Smoke test the ARM static binaries
+        if: ${{ !inputs.dev }}
         run: |
           set -eu
           # spec: <podman platform> <build arch> <artifact arch token (§4)>
@@ -181,6 +205,7 @@ jobs:
       # exception-handling instructions -- see script/wasi_check.sh. v27
       # has no such flag and cannot parse the module at all.
       - name: Install wasmtime
+        if: ${{ !inputs.dev }}
         env:
           WASMTIME_VERSION: v38.0.1
         run: |
@@ -198,6 +223,7 @@ jobs:
       # build -- counts are supposed to describe the bytecode rather than
       # the machine, and this is what makes that checkable.
       - name: Run the WASI artifact we ship
+        if: ${{ !inputs.dev }}
         run: |
           set -eu
           script/wasi_check.sh \
@@ -214,6 +240,7 @@ jobs:
   build-macos:
     name: macOS (${{ matrix.os }})
     needs: resolve
+    if: ${{ !inputs.dev }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -255,6 +282,7 @@ jobs:
   build-windows:
     name: Windows (MSYS2 MINGW64)
     needs: resolve
+    if: ${{ !inputs.dev }}
     runs-on: windows-latest
     timeout-minutes: 60
     steps:
@@ -299,6 +327,18 @@ jobs:
   bundle:
     name: Bundle + checksums
     needs: [resolve, build-linux-and-wasm, build-macos, build-windows]
+    # A skipped job makes its dependents skip too, and a dev build skips the
+    # macOS and Windows legs on purpose -- so without this the bundle, and
+    # with it the whole release, would silently produce nothing. 'always()'
+    # plus the explicit failure checks keeps a real build failure fatal while
+    # letting a deliberate skip through. Downloading with a pattern below is
+    # what makes the missing artifacts a non-event.
+    if: always() && needs.resolve.result == 'success'
+      && needs.build-linux-and-wasm.result == 'success'
+      && needs.build-macos.result != 'failure'
+      && needs.build-windows.result != 'failure'
+      && needs.build-macos.result != 'cancelled'
+      && needs.build-windows.result != 'cancelled'
     runs-on: ubuntu-latest
     outputs:
       artifact: diluvium-${{ needs.resolve.outputs.short_sha }}-all
