@@ -56,13 +56,86 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "0.16.1"
+    tag: v0.16.1
+    date: 2026-09-19
+    status: released
+    stable: true
+    mirror: true
+    latest: true
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **The dev-build machinery, and nothing else. The runtime is byte-for-byte
+      0.16.0's: no source file changed, the dv ABI is still 2, and a program
+      that ran on 0.16.0 runs here identically.**
+
+      This release exists so the released line keeps moving while a breaking
+      change is developed elsewhere. `doc/ALIGNMENT.md` §7's dev builds were
+      specified and never wired: no workflow carried a `schedule:` trigger,
+      `build.yml` had no push trigger and its only caller was `release.yml` on
+      a `v*` tag, and no `v*-dev.*` tag had ever been cut. Merging ran the
+      tests and published nothing.
+
+      **A consumer that tracks this repository by git can take this safely.**
+      That is the point of it: the ABI 3 work lives on `release/0.18.0` and
+      reaches `main` only when it ships, so a spot fix never arrives welded to
+      a breaking change.
+    added:
+      - |
+        **Dev builds and nightlies (`doc/ALIGNMENT.md` §7).**
+        `script/dev-tag.sh` allocates the next `v<version>-dev.<n>` from the
+        tags that exist rather than from a counter in the tree, so a nightly
+        commits nothing and two branches cannot collide; `make dev-tag` prints
+        it. `nightly.yml` builds nothing itself -- it allocates a number and
+        dispatches `release.yml`, on push to `release/**`, on a cron that
+        skips an unmoved HEAD, and on dispatch.
+
+        The counter is global and never reused, so a number names one build
+        forever and does not restart when the version base moves.
+      - |
+        **`doc/ALIGNMENT.md` §7 gains "Where a dev build is cut from, and why
+        not `main`".** The rule stated generally: a repository other projects
+        track by git keeps `main` releasable. A git dependency updates all or
+        nothing, so a `main` carrying an unreleased break means a consumer
+        wanting a one-line fix can only have it by porting to the break --
+        frozen rather than protected, and the two are indistinguishable until
+        someone needs the fix.
+    changed:
+      - |
+        **`release.yml` branches on the tag suffix.** A `v*-dev.*` tag skips
+        the changelog's release-check (a dev build has no entry, by design),
+        is always a prerelease, takes its notes from the newest entry, and is
+        titled by its tag. `build.yml` gains a `dev` input that skips macOS,
+        Windows, the ARM builds and both wasm builds -- one platform, as §7
+        asks. A dev build takes about seven minutes against a full release's
+        thirty-five.
+      - |
+        **`docker.yml` no longer fires on a dev tag.** An image per nightly is
+        noise, and §7's retention argument applies to a registry the way it
+        applies to the mirror.
+    known_issues:
+      - |
+        **§7's own `tags-ignore` snippet does not work**, and the other
+        repositories that copy it will hit this: GitHub rejects `tags` and
+        `tags-ignore` together for one event. The exclusion is spelled as a
+        negative pattern inside `tags:` here instead. §7 is not yet corrected.
+      - |
+        **A dev build's binary reports the tree's version, not its tag.**
+        `DILUVIUM_BUILD` is compiled from the `VERSION` file, so two dev
+        builds cut from one tree report the same string. Does not affect this
+        release, whose version and tag agree.
+    upgrading: |
+      **Nothing to do.** No source file changed between 0.16.0 and this
+      release, so the binaries differ only in the version string they report.
+      The dv ABI is 2, unchanged; snapshots, bytecode and every binding work
+      exactly as they did.
   - version: "0.16.0"
     tag: v0.16.0
     date: 2026-09-17
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |

@@ -1,8 +1,9 @@
 {
   "schema": 1,
   "repo": "Aloecraft-org/diluvium",
-  "latest": "v0.16.0",
+  "latest": "v0.16.1",
   "mirror_tags": [
+    "v0.16.1",
     "v0.16.0",
     "v0.15.1",
     "v5.5.1_build14",
@@ -23,6 +24,34 @@
   ],
   "releases": [
     {
+      "version": "0.16.1",
+      "tag": "v0.16.1",
+      "date": "2026-09-19",
+      "status": "released",
+      "stable": true,
+      "mirror": true,
+      "lua_base": "5.5.1",
+      "bytecode_format": 70,
+      "summary": "**The dev-build machinery, and nothing else. The runtime is byte-for-byte\n0.16.0's: no source file changed, the dv ABI is still 2, and a program\nthat ran on 0.16.0 runs here identically.**\n\nThis release exists so the released line keeps moving while a breaking\nchange is developed elsewhere. `doc/ALIGNMENT.md` \u00a77's dev builds were\nspecified and never wired: no workflow carried a `schedule:` trigger,\n`build.yml` had no push trigger and its only caller was `release.yml` on\na `v*` tag, and no `v*-dev.*` tag had ever been cut. Merging ran the\ntests and published nothing.\n\n**A consumer that tracks this repository by git can take this safely.**\nThat is the point of it: the ABI 3 work lives on `release/0.18.0` and\nreaches `main` only when it ships, so a spot fix never arrives welded to\na breaking change.\n",
+      "upgrading": "**Nothing to do.** No source file changed between 0.16.0 and this\nrelease, so the binaries differ only in the version string they report.\nThe dv ABI is 2, unchanged; snapshots, bytecode and every binding work\nexactly as they did.\n",
+      "latest": true,
+      "sections": {
+        "added": [
+          "**Dev builds and nightlies (`doc/ALIGNMENT.md` \u00a77).**\n`script/dev-tag.sh` allocates the next `v<version>-dev.<n>` from the\ntags that exist rather than from a counter in the tree, so a nightly\ncommits nothing and two branches cannot collide; `make dev-tag` prints\nit. `nightly.yml` builds nothing itself -- it allocates a number and\ndispatches `release.yml`, on push to `release/**`, on a cron that\nskips an unmoved HEAD, and on dispatch.\n\nThe counter is global and never reused, so a number names one build\nforever and does not restart when the version base moves.\n",
+          "**`doc/ALIGNMENT.md` \u00a77 gains \"Where a dev build is cut from, and why\nnot `main`\".** The rule stated generally: a repository other projects\ntrack by git keeps `main` releasable. A git dependency updates all or\nnothing, so a `main` carrying an unreleased break means a consumer\nwanting a one-line fix can only have it by porting to the break --\nfrozen rather than protected, and the two are indistinguishable until\nsomeone needs the fix.\n"
+        ],
+        "changed": [
+          "**`release.yml` branches on the tag suffix.** A `v*-dev.*` tag skips\nthe changelog's release-check (a dev build has no entry, by design),\nis always a prerelease, takes its notes from the newest entry, and is\ntitled by its tag. `build.yml` gains a `dev` input that skips macOS,\nWindows, the ARM builds and both wasm builds -- one platform, as \u00a77\nasks. A dev build takes about seven minutes against a full release's\nthirty-five.\n",
+          "**`docker.yml` no longer fires on a dev tag.** An image per nightly is\nnoise, and \u00a77's retention argument applies to a registry the way it\napplies to the mirror.\n"
+        ],
+        "known_issues": [
+          "**\u00a77's own `tags-ignore` snippet does not work**, and the other\nrepositories that copy it will hit this: GitHub rejects `tags` and\n`tags-ignore` together for one event. The exclusion is spelled as a\nnegative pattern inside `tags:` here instead. \u00a77 is not yet corrected.\n",
+          "**A dev build's binary reports the tree's version, not its tag.**\n`DILUVIUM_BUILD` is compiled from the `VERSION` file, so two dev\nbuilds cut from one tree report the same string. Does not affect this\nrelease, whose version and tag agree.\n"
+        ]
+      },
+      "notes_md": "## [0.16.1] - 2026-09-19\n\n`v0.16.1` &middot; Lua 5.5.1 &middot; bytecode format `0x46`\n\n**The dev-build machinery, and nothing else. The runtime is byte-for-byte\n0.16.0's: no source file changed, the dv ABI is still 2, and a program\nthat ran on 0.16.0 runs here identically.**\n\nThis release exists so the released line keeps moving while a breaking\nchange is developed elsewhere. `doc/ALIGNMENT.md` \u00a77's dev builds were\nspecified and never wired: no workflow carried a `schedule:` trigger,\n`build.yml` had no push trigger and its only caller was `release.yml` on\na `v*` tag, and no `v*-dev.*` tag had ever been cut. Merging ran the\ntests and published nothing.\n\n**A consumer that tracks this repository by git can take this safely.**\nThat is the point of it: the ABI 3 work lives on `release/0.18.0` and\nreaches `main` only when it ships, so a spot fix never arrives welded to\na breaking change.\n\n### Added\n\n- **Dev builds and nightlies (`doc/ALIGNMENT.md` \u00a77).**\n  `script/dev-tag.sh` allocates the next `v<version>-dev.<n>` from the\n  tags that exist rather than from a counter in the tree, so a nightly\n  commits nothing and two branches cannot collide; `make dev-tag` prints\n  it. `nightly.yml` builds nothing itself -- it allocates a number and\n  dispatches `release.yml`, on push to `release/**`, on a cron that\n  skips an unmoved HEAD, and on dispatch.\n\n  The counter is global and never reused, so a number names one build\n  forever and does not restart when the version base moves.\n- **`doc/ALIGNMENT.md` \u00a77 gains \"Where a dev build is cut from, and why\n  not `main`\".** The rule stated generally: a repository other projects\n  track by git keeps `main` releasable. A git dependency updates all or\n  nothing, so a `main` carrying an unreleased break means a consumer\n  wanting a one-line fix can only have it by porting to the break --\n  frozen rather than protected, and the two are indistinguishable until\n  someone needs the fix.\n\n### Changed\n\n- **`release.yml` branches on the tag suffix.** A `v*-dev.*` tag skips\n  the changelog's release-check (a dev build has no entry, by design),\n  is always a prerelease, takes its notes from the newest entry, and is\n  titled by its tag. `build.yml` gains a `dev` input that skips macOS,\n  Windows, the ARM builds and both wasm builds -- one platform, as \u00a77\n  asks. A dev build takes about seven minutes against a full release's\n  thirty-five.\n- **`docker.yml` no longer fires on a dev tag.** An image per nightly is\n  noise, and \u00a77's retention argument applies to a registry the way it\n  applies to the mirror.\n\n### Known issues\n\n- **\u00a77's own `tags-ignore` snippet does not work**, and the other\n  repositories that copy it will hit this: GitHub rejects `tags` and\n  `tags-ignore` together for one event. The exclusion is spelled as a\n  negative pattern inside `tags:` here instead. \u00a77 is not yet corrected.\n- **A dev build's binary reports the tree's version, not its tag.**\n  `DILUVIUM_BUILD` is compiled from the `VERSION` file, so two dev\n  builds cut from one tree report the same string. Does not affect this\n  release, whose version and tag agree.\n\n### Upgrading\n\n**Nothing to do.** No source file changed between 0.16.0 and this\nrelease, so the binaries differ only in the version string they report.\nThe dv ABI is 2, unchanged; snapshots, bytecode and every binding work\nexactly as they did.\n"
+    },
+    {
       "version": "0.16.0",
       "tag": "v0.16.0",
       "date": "2026-09-17",
@@ -33,7 +62,7 @@
       "bytecode_format": 70,
       "summary": "**The numeric round: a typed array tier whose float results are the\nsame bits on every target, fourteen new syntax forms, and the last of\nthe ambient nondeterminism a pure program could observe.**\n\nThe language gains default parameters, numeral separators and `0b`\nliterals, `const`, spread, expression-bodied functions, lambdas,\ndestructuring, `if` and `switch` as expressions, slicing, `export` and\nclasses -- fourteen forms across three tiers, every one a parse error\nin stock Lua 5.5, none of them a reserved word, none of them an opcode.\n(`continue` landed in `0.15.1` and is unchanged.)\n\nAlongside it, an `array` type behind the `numeric` build feature, with\nkernels whose answers are bit-identical across x86-64, aarch64, wasm\nand Windows, and the libm that makes that true of `math` as well. And\ntwo things a program could watch vary from one run to the next that it\nno longer can: the order `pairs` visits table, function, userdata and\ncoroutine keys in, and the result of `^`.\n",
       "upgrading": "**Nothing to do for a program.** Every new form is syntax that was a\nsyntax error before, no existing construct changed meaning, and the\nbytecode format byte does not move. Two results can differ from\n`0.15.1` on the same machine: a `^` between non-trivial floats can move\nby one ulp (it used to move by one ulp between machines instead), and a\nloop over a table keyed by objects now sees creation order -- a program\nthat depended on the old order was depending on the allocator. And\n`tostring` of a table, function or coroutine reads `table: #N` rather\nthan `table: 0x...`; a program that scraped the hex out of it was\nscraping an address, and `string.format(\"%p\")` still hands one over.\n\n**A host built against dv ABI 1 is refused by `dv_new`, and a snapshot\ntaken by one will not restore here.** That is the ABI bump doing its\njob. Rebuild the host against this `dv.h`; drain or replay snapshots\nbefore upgrading a deployment that holds them.\n",
-      "latest": true,
+      "latest": false,
       "sections": {
         "added": [
           "**A numeric tier: the `array` type and the kernels over it.** Typed,\n1D and 2D, strided views, `f64`/`i64`/`u8`/`c128`, with elementwise\nand reduction kernels, sorting, grouping, linear algebra, and the\ntransforms -- `fft`/`ifft`, `rfft`/`irfft`, `ntt`/`intt`, and\n`convolve`/`correlate`, which goes through the NTT and stays exact\nwhen both operands hold integers. A slice of an array is a view.\n\nBehind the `numeric` build feature: off in a default build, on in the\nrelease builds. `dv_features()` is what a host should ask.\n",
