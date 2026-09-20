@@ -1,8 +1,9 @@
 {
   "schema": 1,
   "repo": "Aloecraft-org/diluvium",
-  "latest": "v0.16.1",
+  "latest": "v0.17.1",
   "mirror_tags": [
+    "v0.17.1",
     "v0.16.1",
     "v0.16.0",
     "v0.15.1",
@@ -24,6 +25,30 @@
   ],
   "releases": [
     {
+      "version": "0.17.1",
+      "tag": "v0.17.1",
+      "date": "2026-09-20",
+      "status": "released",
+      "stable": true,
+      "mirror": true,
+      "lua_base": "5.5.1",
+      "bytecode_format": 70,
+      "summary": "**A version number, and nothing else. The tree is 0.16.1's, which was\n0.16.0's: no file under `src/` or `bindings/` has changed since 0.16.0,\nthe dv ABI is still 2, and a program that ran on either of those runs\nhere identically.**\n\nThe number goes 0.16.1 -> 0.17.1 because 0.17.0 is spoken for. Two dev\nbuilds, `v0.17.0-dev.1` and `v0.17.0-dev.2`, were cut from the branch\ncarrying the ABI 3 inspection work, before that branch was renumbered\nto `release/0.18.0` to keep it clear of the released line. Their notes\ndescribe a break this release does not contain, and a stable `v0.17.0`\nsitting under two prereleases that ship different code would read as\nthe release those prereleases led to. It is not. The released line\ntakes the next free number instead, and 0.17.0 stays unused.\n\n**A consumer that tracks this repository by git can take this safely.**\nThat remains the arrangement 0.16.1 set up: the ABI 3 work lives on\n`release/0.18.0` and reaches `main` only when it ships, so the released\nline can keep moving without welding a spot fix to a breaking change.\n",
+      "upgrading": "**Nothing to do.** No source file changed between 0.16.0 and this\nrelease, so the binaries differ only in the version string they report.\nThe dv ABI is 2, unchanged; snapshots, bytecode and every binding work\nexactly as they did.\n",
+      "latest": true,
+      "sections": {
+        "changed": [
+          "**The released line is at 0.17.1.** `VERSION`, `.technoproj` and this\nfile move together, as `changelog.py consistency` requires. Nothing\nelse moves: the diff against `v0.16.1` is those three plus\n`CHANGELOG.md` and `changelog.json`, which are generated from this\nfile.\n"
+        ],
+        "known_issues": [
+          "**`v0.17.0` does not exist and will not be cut.** The two\n`v0.17.0-dev.*` prereleases are the only tags in that series, and\nthey point at commits on the ABI 3 branch, not at anything in the\nreleased line. Do not read them as previews of this release; the work\nthey carry ships as 0.18.0.\n",
+          "**\u00a77's own `tags-ignore` snippet does not work**, and the other\nrepositories that copy it will hit this: GitHub rejects `tags` and\n`tags-ignore` together for one event. The exclusion is spelled as a\nnegative pattern inside `tags:` here instead. \u00a77 is not yet\ncorrected. Carried forward from 0.16.1, still true here.\n",
+          "**A dev build's binary reports the tree's version, not its tag.**\n`DILUVIUM_BUILD` is compiled from the `VERSION` file, so two dev\nbuilds cut from one tree report the same string. Does not affect this\nrelease, whose version and tag agree. Carried forward from 0.16.1,\nstill true here.\n"
+        ]
+      },
+      "notes_md": "## [0.17.1] - 2026-09-20\n\n`v0.17.1` &middot; Lua 5.5.1 &middot; bytecode format `0x46`\n\n**A version number, and nothing else. The tree is 0.16.1's, which was\n0.16.0's: no file under `src/` or `bindings/` has changed since 0.16.0,\nthe dv ABI is still 2, and a program that ran on either of those runs\nhere identically.**\n\nThe number goes 0.16.1 -> 0.17.1 because 0.17.0 is spoken for. Two dev\nbuilds, `v0.17.0-dev.1` and `v0.17.0-dev.2`, were cut from the branch\ncarrying the ABI 3 inspection work, before that branch was renumbered\nto `release/0.18.0` to keep it clear of the released line. Their notes\ndescribe a break this release does not contain, and a stable `v0.17.0`\nsitting under two prereleases that ship different code would read as\nthe release those prereleases led to. It is not. The released line\ntakes the next free number instead, and 0.17.0 stays unused.\n\n**A consumer that tracks this repository by git can take this safely.**\nThat remains the arrangement 0.16.1 set up: the ABI 3 work lives on\n`release/0.18.0` and reaches `main` only when it ships, so the released\nline can keep moving without welding a spot fix to a breaking change.\n\n### Changed\n\n- **The released line is at 0.17.1.** `VERSION`, `.technoproj` and this\n  file move together, as `changelog.py consistency` requires. Nothing\n  else moves: the diff against `v0.16.1` is those three plus\n  `CHANGELOG.md` and `changelog.json`, which are generated from this\n  file.\n\n### Known issues\n\n- **`v0.17.0` does not exist and will not be cut.** The two\n  `v0.17.0-dev.*` prereleases are the only tags in that series, and\n  they point at commits on the ABI 3 branch, not at anything in the\n  released line. Do not read them as previews of this release; the work\n  they carry ships as 0.18.0.\n- **\u00a77's own `tags-ignore` snippet does not work**, and the other\n  repositories that copy it will hit this: GitHub rejects `tags` and\n  `tags-ignore` together for one event. The exclusion is spelled as a\n  negative pattern inside `tags:` here instead. \u00a77 is not yet\n  corrected. Carried forward from 0.16.1, still true here.\n- **A dev build's binary reports the tree's version, not its tag.**\n  `DILUVIUM_BUILD` is compiled from the `VERSION` file, so two dev\n  builds cut from one tree report the same string. Does not affect this\n  release, whose version and tag agree. Carried forward from 0.16.1,\n  still true here.\n\n### Upgrading\n\n**Nothing to do.** No source file changed between 0.16.0 and this\nrelease, so the binaries differ only in the version string they report.\nThe dv ABI is 2, unchanged; snapshots, bytecode and every binding work\nexactly as they did.\n"
+    },
+    {
       "version": "0.16.1",
       "tag": "v0.16.1",
       "date": "2026-09-19",
@@ -34,7 +59,7 @@
       "bytecode_format": 70,
       "summary": "**The dev-build machinery, and nothing else. The runtime is byte-for-byte\n0.16.0's: no source file changed, the dv ABI is still 2, and a program\nthat ran on 0.16.0 runs here identically.**\n\nThis release exists so the released line keeps moving while a breaking\nchange is developed elsewhere. `doc/ALIGNMENT.md` \u00a77's dev builds were\nspecified and never wired: no workflow carried a `schedule:` trigger,\n`build.yml` had no push trigger and its only caller was `release.yml` on\na `v*` tag, and no `v*-dev.*` tag had ever been cut. Merging ran the\ntests and published nothing.\n\n**A consumer that tracks this repository by git can take this safely.**\nThat is the point of it: the ABI 3 work lives on `release/0.18.0` and\nreaches `main` only when it ships, so a spot fix never arrives welded to\na breaking change.\n",
       "upgrading": "**Nothing to do.** No source file changed between 0.16.0 and this\nrelease, so the binaries differ only in the version string they report.\nThe dv ABI is 2, unchanged; snapshots, bytecode and every binding work\nexactly as they did.\n",
-      "latest": true,
+      "latest": false,
       "sections": {
         "added": [
           "**Dev builds and nightlies (`doc/ALIGNMENT.md` \u00a77).**\n`script/dev-tag.sh` allocates the next `v<version>-dev.<n>` from the\ntags that exist rather than from a counter in the tree, so a nightly\ncommits nothing and two branches cannot collide; `make dev-tag` prints\nit. `nightly.yml` builds nothing itself -- it allocates a number and\ndispatches `release.yml`, on push to `release/**`, on a cron that\nskips an unmoved HEAD, and on dispatch.\n\nThe counter is global and never reused, so a number names one build\nforever and does not restart when the version base moves.\n",

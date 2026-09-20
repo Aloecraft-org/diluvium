@@ -56,13 +56,71 @@ schema: 1
 repo: Aloecraft-org/diluvium
 
 releases:
+  - version: "0.17.1"
+    tag: v0.17.1
+    date: 2026-09-20
+    status: released
+    stable: true
+    mirror: true
+    latest: true
+    lua_base: "5.5.1"
+    bytecode_format: 0x46
+    summary: |
+      **A version number, and nothing else. The tree is 0.16.1's, which was
+      0.16.0's: no file under `src/` or `bindings/` has changed since 0.16.0,
+      the dv ABI is still 2, and a program that ran on either of those runs
+      here identically.**
+
+      The number goes 0.16.1 -> 0.17.1 because 0.17.0 is spoken for. Two dev
+      builds, `v0.17.0-dev.1` and `v0.17.0-dev.2`, were cut from the branch
+      carrying the ABI 3 inspection work, before that branch was renumbered
+      to `release/0.18.0` to keep it clear of the released line. Their notes
+      describe a break this release does not contain, and a stable `v0.17.0`
+      sitting under two prereleases that ship different code would read as
+      the release those prereleases led to. It is not. The released line
+      takes the next free number instead, and 0.17.0 stays unused.
+
+      **A consumer that tracks this repository by git can take this safely.**
+      That remains the arrangement 0.16.1 set up: the ABI 3 work lives on
+      `release/0.18.0` and reaches `main` only when it ships, so the released
+      line can keep moving without welding a spot fix to a breaking change.
+    changed:
+      - |
+        **The released line is at 0.17.1.** `VERSION`, `.technoproj` and this
+        file move together, as `changelog.py consistency` requires. Nothing
+        else moves: the diff against `v0.16.1` is those three plus
+        `CHANGELOG.md` and `changelog.json`, which are generated from this
+        file.
+    known_issues:
+      - |
+        **`v0.17.0` does not exist and will not be cut.** The two
+        `v0.17.0-dev.*` prereleases are the only tags in that series, and
+        they point at commits on the ABI 3 branch, not at anything in the
+        released line. Do not read them as previews of this release; the work
+        they carry ships as 0.18.0.
+      - |
+        **§7's own `tags-ignore` snippet does not work**, and the other
+        repositories that copy it will hit this: GitHub rejects `tags` and
+        `tags-ignore` together for one event. The exclusion is spelled as a
+        negative pattern inside `tags:` here instead. §7 is not yet
+        corrected. Carried forward from 0.16.1, still true here.
+      - |
+        **A dev build's binary reports the tree's version, not its tag.**
+        `DILUVIUM_BUILD` is compiled from the `VERSION` file, so two dev
+        builds cut from one tree report the same string. Does not affect this
+        release, whose version and tag agree. Carried forward from 0.16.1,
+        still true here.
+    upgrading: |
+      **Nothing to do.** No source file changed between 0.16.0 and this
+      release, so the binaries differ only in the version string they report.
+      The dv ABI is 2, unchanged; snapshots, bytecode and every binding work
+      exactly as they did.
   - version: "0.16.1"
     tag: v0.16.1
     date: 2026-09-19
     status: released
     stable: true
     mirror: true
-    latest: true
     lua_base: "5.5.1"
     bytecode_format: 0x46
     summary: |
