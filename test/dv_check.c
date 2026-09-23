@@ -125,6 +125,37 @@ static void run_to_completion (void) {
 }
 
 
+/*
+** The compiler, from source a guest writes. 'export' creates its module table
+** at the first export, and the slot after that NEWTABLE was patched before it
+** was reserved: one instruction written past the code array whenever NEWTABLE
+** took the array's last slot. The array starts at four and doubles, so two
+** one-instruction statements ahead of the first export were enough, and the
+** release binary, on musl, segfaulted compiling a sample from the homepage.
+** On glibc the write usually lands in allocator slack and nothing shows, which
+** is why the check is here: the ASan build of this file is where it aborts.
+*/
+static void an_export_on_a_code_array_boundary (void) {
+  int n, wrong = 0;
+  for (n = 0; n <= 64; n++) {
+    char src[4096];
+    size_t len = 0;
+    int i;
+    dv_instance *inst;
+    for (i = 0; i < n; i++)
+      len += (size_t)snprintf(src + len, sizeof(src) - len,
+                              "local v%d = %d\n", i, 1000000 + i);
+    snprintf(src + len, sizeof(src) - len,
+             "export function g() return %d end\n", n);
+    inst = load(src, 0);
+    if (inst == NULL || dv_run(inst, NULL) != DV_DONE) wrong++;
+    if (inst != NULL) dv_free(inst);
+  }
+  eq_i(wrong, 0, "an export compiles and runs after 0 to 64 statements, "
+                 "each code-array boundary included");
+}
+
+
 static void errors (void) {
   dv_instance *inst = load("local function inner() error('boom', 0) end inner()", 0);
   const char *msg;
@@ -2918,6 +2949,7 @@ int main (void) {
   version();
   build_facts();
   run_to_completion();
+  an_export_on_a_code_array_boundary();
   errors();
   queues();
   a_disabled_queue_refuses_a_host_push();
