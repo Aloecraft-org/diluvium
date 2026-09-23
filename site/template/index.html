@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Diluvium — a small language that runs anywhere</title>
-<meta name="description" content="Diluvium is a small, sealed, portable language. Classes, lambdas, destructuring, regular expressions and string interpolation, compiled to one portable bytecode under 1 MiB — with float results that are bit-identical on every target. DRT is the runtime around it, dollup installs the programs, and it is running in your browser right now.">
+<meta name="description" content="Diluvium is a small, sealed, portable language. Classes, lambdas, destructuring, regular expressions and string interpolation, compiled to one portable bytecode under 1 MiB. DRT is the runtime around it, dollup installs the programs, and it is running in your browser right now.">
 <meta property="og:title" content="Diluvium — a small language that runs anywhere">
-<meta property="og:description" content="A small, sealed, portable language and the runtime around it. Modern syntax, one bytecode, and the same bits on every target. Try it in the browser, no install.">
+<meta property="og:description" content="A small, sealed, portable language and the runtime around it. Modern syntax and one portable bytecode. Try it in the browser, no install.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://diluvium.aloecraft.org/">
 <link rel="icon" href="favicon.ico">
@@ -73,9 +73,8 @@ try {
         string interpolation, <code>switch</code>, <code>defer</code> — compiled
         to <strong>one portable bytecode</strong> that behaves the same in a
         browser tab, on a server, or on hardware with a few hundred kilobytes to
-        spare. The whole runtime is under a megabyte, a program can reach nothing
-        you did not hand it, and a float computed here is bit-for-bit the float
-        computed there.
+        spare. The whole runtime is under a megabyte, and a program can reach
+        nothing you did not hand it.
       </p>
       <p class="lede-note">
         The syntax is a compatible superset of Lua 5.5, so existing Lua code runs
@@ -99,7 +98,7 @@ try {
     <a class="tile current" href="#language">
       <span class="tile-name">Diluvium</span>
       <span class="tile-what">The language and its core: compiler, portable bytecode, the
-        instance ABI, the numeric kernels. Under a megabyte, and running in this page.</span>
+        instance ABI, and an opt-in numeric tier. Under a megabyte, and running in this page.</span>
       <span class="tile-where">this page</span>
     </a>
     <a class="tile" href="#drt">
@@ -366,8 +365,7 @@ end</code></pre>
         semantics behind it. The same file runs under WebAssembly in this page,
         on x86_64 and ARM64 natively, and on hardware smaller than either.
         Natively it is one static binary under a megabyte, with nothing to
-        install alongside it — typed numeric arrays, regular expressions and
-        the transforms included.</p>
+        install alongside it, regular expressions included.</p>
       </article>
 
       <article class="feature">
@@ -381,14 +379,18 @@ end</code></pre>
 
       <article class="feature">
         <h3>The same bits, every target</h3>
-        <p>A float computed here is bit-for-bit the float computed there. Not a
-        promise about a platform — a property the build enforces: a canonical
-        reduction order, a total order with NaN last, and a vendored libm, so a
-        sum, a sort or a Fourier transform does not depend on which CPU or
-        which compiler ran it. CI diffs 102 lines of raw IEEE bit patterns
-        across x86-64 and aarch64 on every change, and the same corpus still
-        comes out <em>different</em> under <code>-ffast-math</code>, which is
-        how we know it can still see a divergence.</p>
+        <p>Built with its <code>numeric</code> feature, a float computed here is
+        bit-for-bit the float computed there. Not a promise about a platform —
+        a property the build enforces: a canonical reduction order, a total
+        order with NaN last, and a vendored libm, so a sum, a sort or a Fourier
+        transform does not depend on which CPU or which compiler ran it. CI
+        diffs 103 lines of raw IEEE bit patterns across x86-64 and aarch64 on
+        every change, and the same corpus still comes out <em>different</em>
+        under <code>-ffast-math</code>, which is how we know it can still see a
+        divergence.</p>
+        <p>The feature is opt-in: <code>make NUMERIC=1</code>, or the
+        <code>numeric</code> cargo feature. The prebuilt binaries on the release
+        page, and the interpreter in this page, are built without it.</p>
       </article>
 
       <article class="feature">
@@ -414,7 +416,9 @@ end</code></pre>
       hostcall connectors, orchestration, transport, observability, and a REPL.
       The two are concentric, not parallel — DRT embeds the language core, so
       there is never a second runtime with different behaviour for the same
-      program, and installing DRT gets you everything.
+      program. Which release of the core is inside is written on the binary:
+      <code>drt buildinfo</code> names it, and the syntax above needs
+      Diluvium 0.16 or later.
     </p>
 
     <div class="grid">
