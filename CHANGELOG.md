@@ -12,6 +12,89 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
+## [0.17.2] - unreleased (prerelease)
+
+`v0.17.2` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**A compiler fix, and corrections to what 0.16.0 said about itself.
+Compiling a chunk that uses `export` could write one instruction past
+the end of the function's code array: a heap overflow reached from
+source text alone, in every release since 0.16.0.**
+
+The dv ABI is still 2 and nothing else in the runtime moves. What
+changes for a program is that one chunk shape, which could crash the
+compiler or quietly corrupt its heap, now compiles cleanly.
+
+### Security
+
+- **`export` wrote past the code array.** The module table `export`
+  creates is a `NEWTABLE` whose extra-argument slot was patched before
+  it was reserved, so whenever that `NEWTABLE` took the last slot of
+  the code array the patch wrote four bytes beyond it. The array starts
+  at four slots and doubles, so a chunk whose first `export` followed
+  exactly two one-instruction statements was enough -- the homepage's
+  "Small things that add up" sample is one -- and so were six, fourteen
+  and thirty. The value written is fixed, not chosen by the source, but
+  it lands in heap memory the compiler does not own: the static musl
+  binary segfaults, glibc usually absorbs it in allocator slack, and a
+  host compiling guest source in-process carries the corruption either
+  way. Where it did not overflow, the slot was left holding a zero
+  instruction instead of `EXTRAARG`, which the VM skips, so execution
+  was unaffected.
+
+  Affects 0.16.0, 0.16.1 and 0.17.1; 0.15.1 and earlier have no
+  `export`. Fixed by reserving the slot first, as the table
+  constructor and `defer` already did. `dv_check` now walks the first
+  export across every code-array boundary up to 64 instructions and
+  aborts under AddressSanitizer on the unfixed compiler. Every other
+  form Diluvium adds was swept the same way under the sanitizer, at
+  every position up to 64 instructions, and is clean.
+
+### Known issues
+
+- **The prebuilt binaries do not carry the `numeric` feature**, though
+  0.16.0's notes say it is on in the release builds. No release
+  workflow sets `NUMERIC=1`, so every artifact on the release page --
+  the native binaries, `diluvium_browser.wasm` and the WASI modules --
+  is built without it, and `array` is `nil` in them. A build with it is
+  `make NUMERIC=1`, or the `numeric` cargo feature through the Rust
+  binding. Whether release builds should turn it on is open: it also
+  moves `^` and `math` onto the vendored libm, which changes some
+  results in their last bit.
+- **0.16.0's notes say an ABI 1 snapshot will not restore; it does.**
+  Only `dv_new` checks the ABI number. A snapshot's header is checked
+  against the runtime fingerprint, the permanents, the capability set
+  and the host stamp, and none of those moved: a snapshot taken by
+  0.15.1 restores and resumes on this tree, with `numeric` on or off.
+  What differs after the restore is `pairs` order over object keys,
+  which follows the restoring runtime.
+- **`_DILUVIUM.version` reads `5.5.1` in the Linux static and WASI
+  builds**, the Lua base rather than Diluvium's own version, because
+  `build_linux_static` and `build_wasm` do not pass `DILUVIUM_BUILD`
+  and `dlibs.c` falls back to the Lua version. The browser build
+  reads `0.17.1` as it should, and per the Makefile so do the macOS
+  and Windows builds.
+- **§7's own `tags-ignore` snippet does not work**, and the other
+  repositories that copy it will hit this: GitHub rejects `tags` and
+  `tags-ignore` together for one event. The exclusion is spelled as a
+  negative pattern inside `tags:` here instead. §7 is not yet
+  corrected. Carried forward from 0.16.1, still true here.
+- **A dev build's binary reports the tree's version, not its tag.**
+  `DILUVIUM_BUILD` is compiled from the `VERSION` file, so two dev
+  builds cut from one tree report the same string. Does not affect
+  this release, whose version and tag agree. Carried forward from
+  0.16.1, still true here.
+
+### Upgrading
+
+**Nothing to do.** A chunk compiles to the same instructions as
+before, except that a chunk using `export` now carries `EXTRAARG`
+after its module table's `NEWTABLE` where it carried a zero
+instruction the VM skipped. Bytecode compiled by 0.16.0 through 0.17.1
+loads and runs here unchanged, the dv ABI is 2, and snapshots cross in
+both directions.
+
+
 ## [0.17.1] - 2026-09-20
 
 `v0.17.1` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
