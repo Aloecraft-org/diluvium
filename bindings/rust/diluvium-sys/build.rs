@@ -90,15 +90,34 @@ fn numeric_flags(toolchain: &Toolchain) -> Vec<String> {
     v
 }
 
+/// `canonicalize` on Windows answers the verbatim form, `\\?\C:\…`,
+/// which is the one spelling a GCC-style compiler there cannot open:
+/// mingw's gcc fails with "cc1.exe: fatal error: \\onelua.c: No such
+/// file". The prefix off, it is the same path, and the one every other
+/// tool on that platform reads. A UNC path keeps its `\\server\share`.
+/// Elsewhere there is no prefix and nothing changes.
+fn plain(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    match text.strip_prefix(r"\\?\") {
+        Some(rest) => match rest.strip_prefix(r"UNC\") {
+            Some(unc) => PathBuf::from(format!(r"\\{unc}")),
+            None => PathBuf::from(rest),
+        },
+        None => path,
+    }
+}
+
 fn main() {
     let target = std::env::var("TARGET").expect("cargo sets TARGET");
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
 
     // src/ is four levels up: bindings/rust/diluvium-sys -> repo root.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../..")
-        .canonicalize()
-        .expect("cannot locate the repository root");
+    let root = plain(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../..")
+            .canonicalize()
+            .expect("cannot locate the repository root"),
+    );
     let src = root.join("src");
 
     println!("cargo:rerun-if-changed={}", src.display());
