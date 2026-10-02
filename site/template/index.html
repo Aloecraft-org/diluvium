@@ -105,7 +105,7 @@ try {
     <a class="tile" href="#drt">
       <span class="tile-name">DRT</span>
       <span class="tile-what">The Diluvium RunTime: one binary that embeds the language and
-        runs a deployment — swarm, host, connectors, relay, REPL.</span>
+        runs a deployment — swarm, host, connectors, peer-to-peer sessions, REPL.</span>
       <span class="tile-where">below · releases on software.aloecraft.org</span>
     </a>
     <a class="tile" href="https://dollup.aloecraft.org/">
@@ -411,7 +411,8 @@ end</code></pre>
     <p class="section-lede">
       Diluvium is purely the language. <strong>DRT</strong> is everything around
       a running program: the swarm, a transparent host with root config,
-      hostcall connectors, orchestration, transport, observability, and a REPL.
+      hostcall connectors, orchestration, transport, observability, a REPL, and
+      peer-to-peer sessions that a browser can join.
       The two are concentric, not parallel — DRT embeds the language core, so
       there is never a second runtime with different behaviour for the same
       program, and installing DRT gets you everything.
@@ -420,15 +421,32 @@ end</code></pre>
     <div class="grid">
 
       <article class="feature">
-        <h3>One binary, three verbs</h3>
+        <h3>One binary, six verbs</h3>
         <pre><code class="language-sh">drt run prog.dlua                 # one program, to completion
 drt repl                          # a REPL, which is an instance
-drt --config app.host.lua start   # a deployment: swarm, listeners, relay</code></pre>
-        <p>A static binary with no runtime dependencies, and a
-        <code>tunnel</code> verb that carries ssh to anything from anywhere
-        through the relay. <code>drt start</code> reads a
-        <code>diluvium-host</code> config unchanged, so a deployment moves to
-        DRT by swapping the binary and editing no files.</p>
+drt --config app.json start       # a deployment: swarm, listeners, relay
+drt p2p --listen 4000             # serve this machine to a peer, directly
+drt ssh me@drt://s.example/v1/pc  # a shell on a peer, over that session
+drt ps                            # what a running deployment holds</code></pre>
+        <p>A static binary with no runtime dependencies. <code>drt p2p</code>
+        connects two machines directly: a signalling server passes one
+        512-byte record each way and never sees a byte of the session, and a
+        relay carries it only when you ask. <code>drt ps</code> attaches to a
+        running deployment over its own SSH listener. <code>drt start</code>
+        reads a <code>diluvium-host</code> config unchanged, so a deployment
+        moves to DRT by swapping the binary and editing no files.</p>
+      </article>
+
+      <article class="feature">
+        <h3>A browser reaches a host directly</h3>
+        <pre><code class="language-sh">drt p2p --listen 4000 --forward ssh://127.0.0.1:22
+# prints a record; a page, or another drt, connects to it</code></pre>
+        <p>A stock browser opens a data channel to the process and carries TCP
+        streams to the targets the host names — no extension, no plugin, and
+        nothing between the two but the network. The same wire carries a
+        shell in a browser tab, a REPL as bytes for a terminal, and a page that
+        answers calls itself. The browser library and the SSH page ship with
+        every release.</p>
       </article>
 
       <article class="feature">
@@ -446,8 +464,10 @@ host.call("sql/exec", {sql = "..."})</code></pre>
       <article class="feature">
         <h3>Two profiles, and the facts travel with the bytes</h3>
         <p>Every release ships <code>full</code> — the connectors, listeners,
-        the relay and tunnel — and <code>slim</code>, the distribution-size
-        profile. Which connectors each carries, which diluvium revision is
+        the relay and peer-to-peer — and <code>slim</code>, the
+        distribution-size profile, for Linux, macOS and Windows, beside a WASI
+        module and the web build that puts the same <code>drt</code> in a
+        page. Which connectors each carries, which diluvium revision is
         inside and which dv ABI it speaks are recorded in
         <code>BUILDINFO.txt</code> beside the binaries, and
         <code>drt buildinfo</code> reads the same facts back off the binary
@@ -462,6 +482,8 @@ host.call("sql/exec", {sql = "..."})</code></pre>
       <a href="https://github.com/Aloecraft-org/diluvium-drt" rel="noopener">Source</a> ·
       <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/SPEC.md" rel="noopener">Spec</a> ·
       <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/GUARANTEES.md" rel="noopener">Guarantees</a> ·
+      <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/doc/P2P.md" rel="noopener">Peer to peer</a> ·
+      <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/doc/BrowserAccess.md" rel="noopener">Browser access</a> ·
       <a href="https://github.com/Aloecraft-org/diluvium-drt/blob/main/doc/Relay.md" rel="noopener">The relay</a> ·
       <a href="https://software.aloecraft.org/releases/diluvium-drt/">Releases</a>
     </p>
@@ -579,8 +601,8 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
           <code>SHA256SUMS.txt</code>, and <code>drt buildinfo</code> printed at
           the end so you can see which diluvium revision is inside.
           <code>DRT_SLIM=1</code> takes the size profile;
-          <code>DRT_VERSION=vX.Y.Z</code> pins a release. Linux x86-64 and macOS
-          today; Linux ARM64 and Windows are not built yet.
+          <code>DRT_VERSION=vX.Y.Z</code> pins a release. Linux x86-64 and
+          ARM64, and macOS; on Windows, take the <code>.exe</code> from the list.
         </p>
       </div>
 
