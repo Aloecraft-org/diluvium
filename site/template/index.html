@@ -392,6 +392,20 @@ end</code></pre>
       </article>
 
       <article class="feature">
+        <h3>Typed arrays, with the kernels</h3>
+        <pre><code class="language-lua">local a = array.from{3.0, 1.0, 2.0}
+print(a:sum(), a:mean(), a:max())      --> 6.0  2.0  3.0
+local v = array.arange("i64", 0, 6)[3:5]  -- a view, not a copy
+print(array.rfft(array.from{1.0, 2.0, 3.0, 4.0}))</code></pre>
+        <p>An <code>array</code> is typed and flat — <code>f64</code>,
+        <code>i64</code>, <code>u8</code>, <code>c128</code> — in one or two
+        dimensions, with elementwise arithmetic, reductions, sorting, grouping,
+        the transforms and convolution built in, and every function also a
+        method. A slice is a view that shares storage. The kernels are what
+        the bit-identical promise below is made about.</p>
+      </article>
+
+      <article class="feature">
         <h3>Freeze and resume</h3>
         <p>A running program can be snapshotted mid-execution into a flat string
         of bytes and brought back later at the exact instruction it left — in
