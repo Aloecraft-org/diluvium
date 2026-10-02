@@ -12,9 +12,9 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
-## [0.17.2] - unreleased (prerelease)
+## [0.17.3] - unreleased (prerelease)
 
-`v0.17.2` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+`v0.17.3` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
 **A compiler fix, and corrections to what 0.16.0 said about itself.
 Compiling a chunk that uses `export` could write one instruction past
@@ -42,8 +42,8 @@ compiler or quietly corrupt its heap, now compiles cleanly.
   instruction instead of `EXTRAARG`, which the VM skips, so execution
   was unaffected.
 
-  Affects 0.16.0, 0.16.1 and 0.17.1; 0.15.1 and earlier have no
-  `export`. Fixed by reserving the slot first, as the table
+  Affects 0.16.0, 0.16.1, 0.17.1 and 0.17.2; 0.15.1 and earlier have
+  no `export`. Fixed by reserving the slot first, as the table
   constructor and `defer` already did. `dv_check` now walks the first
   export across every code-array boundary up to 64 instructions and
   aborts under AddressSanitizer on the unfixed compiler. Every other
@@ -72,7 +72,7 @@ compiler or quietly corrupt its heap, now compiles cleanly.
   builds**, the Lua base rather than Diluvium's own version, because
   `build_linux_static` and `build_wasm` do not pass `DILUVIUM_BUILD`
   and `dlibs.c` falls back to the Lua version. The browser build
-  reads `0.17.1` as it should, and per the Makefile so do the macOS
+  reads Diluvium's version as it should, and per the Makefile so do the macOS
   and Windows builds.
 - **§7's own `tags-ignore` snippet does not work**, and the other
   repositories that copy it will hit this: GitHub rejects `tags` and
@@ -90,9 +90,31 @@ compiler or quietly corrupt its heap, now compiles cleanly.
 **Nothing to do.** A chunk compiles to the same instructions as
 before, except that a chunk using `export` now carries `EXTRAARG`
 after its module table's `NEWTABLE` where it carried a zero
-instruction the VM skipped. Bytecode compiled by 0.16.0 through 0.17.1
+instruction the VM skipped. Bytecode compiled by 0.16.0 through 0.17.2
 loads and runs here unchanged, the dv ABI is 2, and snapshots cross in
 both directions.
+
+
+## [0.17.2] - 2026-10-02
+
+`v0.17.2` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**One build-script fix for Rust hosts on Windows; the runtime is
+0.17.1's.** No file under `src/` has changed, the dv ABI is still 2,
+and a program that ran on 0.17.1 runs here identically. What moves
+is `bindings/rust/diluvium-sys/build.rs`, for a host that compiles
+the C core on a Windows machine rather than cross-building it.
+
+### Fixed
+
+- **`diluvium-sys` builds with a native Windows GCC.** The build
+  script canonicalizes the repository root, which on Windows is the
+  verbatim `\\?\C:\…` form, and mingw's gcc cannot open that
+  (`cc1.exe: fatal error: \\onelua.c: No such file`). The prefix
+  comes off before the path reaches the compiler; a UNC path keeps
+  its `\\server\share`, and nothing changes elsewhere. Found by
+  drt's Windows CI row, which builds this crate on the runner with
+  MSYS2's mingw-w64; cross-builds from Linux never saw it.
 
 
 ## [0.17.1] - 2026-09-20
