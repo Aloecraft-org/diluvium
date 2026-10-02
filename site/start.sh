@@ -61,17 +61,19 @@ os=$(uname -s 2>/dev/null || echo unknown)
 arch=$(uname -m 2>/dev/null || echo unknown)
 
 case "$os" in
-    Linux)  os_part=linux_static ;;
-    Darwin) os_part=darwin ;;
+    Linux|Darwin) ;;
     MINGW*|MSYS*|CYGWIN*)
         die "Windows: download diluvium_windows_x86_64.exe from $BASE/latest/" ;;
     *) die "unsupported operating system: $os" ;;
 esac
 
+# The names are doc/ALIGNMENT.md §4's: <name>_<os>_<arch>[_<libc>]. The
+# Linux builds are static musl binaries and say so; the mirror's
+# SHA256SUMS.txt for a release is the list.
 case "$os:$arch" in
-    Linux:x86_64|Linux:amd64)    asset=diluvium_linux_static_x86_64 ;;
-    Linux:aarch64|Linux:arm64)   asset=diluvium_linux_static_aarch64 ;;
-    Linux:armv7l|Linux:armv6l)   asset=diluvium_linux_static_armv7l ;;
+    Linux:x86_64|Linux:amd64)    asset=diluvium_linux_x86_64_musl ;;
+    Linux:aarch64|Linux:arm64)   asset=diluvium_linux_arm64_musl ;;
+    Linux:armv7l|Linux:armv6l)   asset=diluvium_linux_armv7_musl ;;
     Darwin:arm64)                asset=diluvium_darwin_arm64 ;;
     Darwin:x86_64)               asset=diluvium_darwin_x86_64 ;;
     *) die "no build for $os $arch — see $BASE/ for what exists" ;;

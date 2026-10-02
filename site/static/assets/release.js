@@ -45,18 +45,23 @@ export const KERNEL_URL = `${RELEASE_BASE}/latest/libdiluvium_wasi.wasm`;
 // The downloadable binaries, per platform. Names come from each release
 // workflow; the mirrors carry them verbatim. `id` is what guessTarget()
 // answers with, so a platform DRT does not build for simply has no DRT row.
+// The spelling is doc/ALIGNMENT.md §4's, `<name>_<os>_<arch>[_<libc>]`,
+// which both repositories moved to in September 2026; the mirror's
+// SHA256SUMS.txt for the latest release is the check.
 export const TARGETS = [
-  { id: 'linux-x86_64',  label: 'Linux · x86-64',        asset: 'diluvium_linux_static_x86_64' },
-  { id: 'linux-aarch64', label: 'Linux · ARM64',         asset: 'diluvium_linux_static_aarch64' },
-  { id: 'linux-armv7l',  label: 'Linux · ARMv7',         asset: 'diluvium_linux_static_armv7l' },
+  { id: 'linux-x86_64',  label: 'Linux · x86-64',        asset: 'diluvium_linux_x86_64_musl' },
+  { id: 'linux-aarch64', label: 'Linux · ARM64',         asset: 'diluvium_linux_arm64_musl' },
+  { id: 'linux-armv7l',  label: 'Linux · ARMv7',         asset: 'diluvium_linux_armv7_musl' },
   { id: 'darwin-arm64',  label: 'macOS · Apple silicon', asset: 'diluvium_darwin_arm64' },
   { id: 'darwin-x86_64', label: 'macOS · Intel',         asset: 'diluvium_darwin_x86_64' },
   { id: 'windows-x86_64', label: 'Windows · x86-64',     asset: 'diluvium_windows_x86_64.exe' },
 ];
 export const DRT_TARGETS = [
-  { id: 'linux-x86_64',  label: 'Linux · x86-64',        asset: 'drt_linux_static_x86_64' },
+  { id: 'linux-x86_64',  label: 'Linux · x86-64',        asset: 'drt_linux_x86_64_musl' },
+  { id: 'linux-aarch64', label: 'Linux · ARM64',         asset: 'drt_linux_arm64_musl' },
   { id: 'darwin-arm64',  label: 'macOS · Apple silicon', asset: 'drt_darwin_arm64' },
   { id: 'darwin-x86_64', label: 'macOS · Intel',         asset: 'drt_darwin_x86_64' },
+  { id: 'windows-x86_64', label: 'Windows · x86-64',     asset: 'drt_windows_x86_64.exe' },
 ];
 
 // Best-effort, and only used to decide which download to show first. Every
