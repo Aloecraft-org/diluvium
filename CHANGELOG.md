@@ -12,6 +12,28 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
+## [0.17.2] - 2026-10-02
+
+`v0.17.2` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**One build-script fix for Rust hosts on Windows; the runtime is
+0.17.1's.** No file under `src/` has changed, the dv ABI is still 2,
+and a program that ran on 0.17.1 runs here identically. What moves
+is `bindings/rust/diluvium-sys/build.rs`, for a host that compiles
+the C core on a Windows machine rather than cross-building it.
+
+### Fixed
+
+- **`diluvium-sys` builds with a native Windows GCC.** The build
+  script canonicalizes the repository root, which on Windows is the
+  verbatim `\\?\C:\…` form, and mingw's gcc cannot open that
+  (`cc1.exe: fatal error: \\onelua.c: No such file`). The prefix
+  comes off before the path reaches the compiler; a UNC path keeps
+  its `\\server\share`, and nothing changes elsewhere. Found by
+  drt's Windows CI row, which builds this crate on the runner with
+  MSYS2's mingw-w64; cross-builds from Linux never saw it.
+
+
 ## [0.17.1] - 2026-09-20
 
 `v0.17.1` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
