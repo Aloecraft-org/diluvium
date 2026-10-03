@@ -3626,9 +3626,14 @@ static int exporttable (LexState *ls) {
   FuncState *fs = ls->fs;
   if (ls->exportv < 0) {
     int reg = fs->freereg;
-    luaK_settablesize(fs, luaK_codevABCk(fs, OP_NEWTABLE, reg, 0, 0, 0),
-                      reg, 0, 0);
+    /* Reserve the extra argument's slot before 'luaK_settablesize' writes
+       it, as 'constructor' does. The other order wrote one instruction past
+       the code array whenever NEWTABLE landed in its last slot -- a chunk
+       whose first 'export' followed two one-instruction statements -- and
+       elsewhere left the slot holding a zero instruction instead. */
+    int pc = luaK_codevABCk(fs, OP_NEWTABLE, reg, 0, 0, 0);
     luaK_code(fs, 0);  /* space for the extra argument */
+    luaK_settablesize(fs, pc, reg, 0, 0);
     luaK_reserveregs(fs, 1);
     ls->exportv = new_varkind(ls, ls->modn, RDKCONST);
     adjustlocalvars(ls, 1);

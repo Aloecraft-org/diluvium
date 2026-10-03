@@ -126,6 +126,24 @@ assert_eq(connect, nil, "and an export is not a global")
 assert_nocompile("export A = 1 return 2", "an explicit return is refused")
 assert_nocompile("local function f() export A = 1 end", "not inside a function")
 assert_nocompile("do export A = 1 end", "not inside a block")
+-- The module table's NEWTABLE lands wherever the first 'export' falls, and
+-- its extra-argument slot was once patched before it was reserved: a write
+-- past the code array whenever the table took the array's last slot, which
+-- two one-instruction statements ahead of it were enough to reach. Walk the
+-- first export across every boundary up to 64. On glibc the stray write
+-- lands in allocator slack and this passes either way; dv_check.c under
+-- ASan is where a regression aborts. This is the behaviour half.
+do
+  local wrong = 0
+  for n = 0, 64 do
+    local src = {}
+    for i = 1, n do src[#src + 1] = ("local v%d = %d"):format(i, 1000000 + i) end
+    src[#src + 1] = ("export function g() return %d end"):format(n)
+    local chunk = load(table.concat(src, "\n"))
+    if not chunk or chunk().g() ~= n then wrong = wrong + 1 end
+  end
+  assert_eq(wrong, 0, "an export after 0 to 64 statements, every boundary")
+end
 
 print("-- 5. Destructuring")
 local cfg = {host = "h", port = 80, tls = true}
