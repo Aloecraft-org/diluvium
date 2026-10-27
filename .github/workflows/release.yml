@@ -42,6 +42,15 @@ on:
         type: boolean
         required: false
         default: true
+      # A dev tag takes the Linux-only fast path; `full` builds every
+      # platform for it anyway, so a dev build can be tried on Windows and
+      # macOS before a release. It widens the build only: the tag still
+      # decides that this is a dev build, its notes and its prerelease flag.
+      full:
+        description: 'For a dev tag: build every platform, not the Linux leg alone'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: write
@@ -211,7 +220,7 @@ jobs:
     uses: ./.github/workflows/build.yml
     with:
       ref: ${{ inputs.ref || github.sha }}
-      dev: ${{ needs.preflight.outputs.dev == 'true' }}
+      dev: ${{ needs.preflight.outputs.dev == 'true' && !inputs.full }}
 
   publish:
     name: Publish release

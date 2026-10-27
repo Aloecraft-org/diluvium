@@ -89,7 +89,7 @@ releases:
         `check`, `use` and `remove` to manage them.
       - "An install links `dlua` beside `diluvium`, and writes tab completion for bash, zsh, fish and PowerShell under the prefix. No shell profile is edited; where one is needed the install prints the line to add."
       - "The REPL answers `:help` (`:h`, `:?`), `:quit` (`:q`, `:exit`) and `:clear`, the same colon commands as `drt repl`, and its banner says how to get help."
-      - "Every merge to `main` publishes a Linux dev build, `v<version>-dev.<n>`, and the installers' `list-all` and `dev` read them from the `release-log` branch."
+      - "Every merge to `main` publishes a Linux dev build, `v<version>-dev.<n>`, and the installers' `list-all` and `dev` read them from the `release-log` branch. Running \"Cut a dev tag\" by hand with `full` builds every platform, so a dev build can be tried on Windows and macOS."
     changed:
       - "Ctrl-L and `:clear` home the cursor and erase below it instead of clearing the whole screen, so VS Code's terminal no longer hides the redrawn line."
     security:
