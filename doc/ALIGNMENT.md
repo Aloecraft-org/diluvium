@@ -525,11 +525,14 @@ PyPI, which is why the exclusion is not optional.
   mirror entry with its own retention, configured on the lk2 side — nothing
   in a project repo changes for it beyond publishing the tag.
 
-### Where a dev build is cut from, and why not `main`
+### Where a dev build is cut from
+
+From every merge to `main`, and from every push to a `release/*` branch. A
+dev build reads a branch; it changes nothing about what the branch carries.
 
 **A repository other projects track by git keeps `main` releasable.** That is
-the rule; the dev-build trigger follows from it rather than the other way
-round.
+the rule for what lands on `main`, and it holds whether or not `main` is
+built.
 
 diluvium is the worked example, and the coupling is real rather than
 hypothetical. `diluvium-drt` depends on it as
@@ -549,8 +552,8 @@ So:
 
 | where | what lives there |
 |---|---|
-| `main` | the released line. A fix that lands here cuts a real patch release. |
-| `release/<version>` | the pending release, however breaking. Dev builds are cut from here. |
+| `main` | the released line. Every merge cuts a dev build toward the next patch; a fix still cuts a real patch release. |
+| `release/<version>` | the pending release, however breaking. Every push cuts a dev build of it. |
 | a tag `v<version>` | published from `main` when the release is ready |
 
 A consumer tracking `main` therefore always gets something releasable, and
@@ -561,7 +564,7 @@ at one of its `-dev.` tags — rather than by being handed it.
 runs on the default branch: GitHub uses `main`'s copy of the workflow file and
 sets `github.ref` to `main`. So a nightly meant to build the pending release
 cannot simply build "here" — it has to resolve the newest `release/*` branch
-and check it out. A `push:` trigger has no such problem, because a push uses
+and check it out, and builds `main` only when none is open. A `push:` trigger has no such problem, because a push uses
 the workflow file from the ref that was pushed.
 
 And the workflow file itself must therefore exist on `main` for the nightly to

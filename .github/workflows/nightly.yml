@@ -6,26 +6,23 @@
 # changelog entry). Two workflows that both built would be two things to keep
 # in step, which is the mistake §7's "the suffix decides the rigor" avoids.
 #
-# diluvium-drt cuts dev builds the same way and leaves the allocation to a
-# person running `script/dev-tag.sh`. The script is identical here; this adds
-# the two cases nobody should have to remember to run:
+# diluvium-drt cuts a dev build on every merge to main the same way, with the
+# same `script/dev-tag.sh`. The cases:
 #
+#   push to main       every merge gets a build to put in someone's hands,
+#                      without cutting a release for it
 #   push to release/** so a pending release always has a build to point a
 #                      consumer at, which is what an ABI bump needs
-#   schedule           nightly over the newest release branch, skipped when
-#                      HEAD has not moved since the last dev tag -- that is
-#                      `--if-changed`, and without it identical builds
-#                      accumulate
+#   schedule           nightly over the newest release branch, or main when
+#                      none is open, skipped when HEAD has not moved since the
+#                      last dev tag -- that is `--if-changed`, and without it
+#                      identical builds accumulate; a backstop for a push run
+#                      that failed or never queued
 #   workflow_dispatch  any ref, for cutting a branch by hand
 #
-# NOT main. main is the released line: a consumer that tracks this repository
-# by git -- diluvium-drt depends on it with no tag, rev or branch, so it
-# follows the default branch -- has to be able to take a spot fix from main
-# without also taking whatever breaking work is in flight. A bare git
-# dependency updates all or nothing, so main carrying an unreleased ABI would
-# mean a one-line fix could only be had by porting to it. Pending releases
-# live on release/<version> and reach main when they are ready to publish, and
-# a fix that lands on main cuts a real patch release rather than a dev build.
+# A dev build from main changes nothing about what main carries: diluvium-drt
+# follows the default branch by git, and main stays the released line, with
+# pending breaking work on release/<version>.
 #
 # Configurable values:
 #   NIGHTLY_CRON is the `schedule` below; RELEASE_WORKFLOW is what it dispatches.
@@ -33,7 +30,7 @@ name: Cut a dev tag
 
 on:
   push:
-    branches: ['release/**']
+    branches: [main, 'release/**']
   schedule:
     # 03:17 UTC. Not on the hour: scheduled runs compete for runners then, and
     # GitHub drops a schedule it cannot start rather than queueing it.
@@ -80,8 +77,8 @@ jobs:
       # version order, not by commit date: two release branches open at once
       # means the higher version is the one in flight.
       #
-      # No release branch open is the normal state between releases, and it is
-      # not an error: there is nothing pending to build, so the nightly stops.
+      # No release branch open is the normal state between releases: then the
+      # nightly builds main, which is already checked out.
       - name: Find the branch a nightly should build
         if: github.event_name == 'schedule'
         id: target
@@ -91,8 +88,8 @@ jobs:
                    | grep -E '^release/' \
                    | sort -V | tail -1 || true)
           if [ -z "$BRANCH" ]; then
-            echo "::notice::No release/* branch is open; nothing pending to build."
-            echo "none=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::No release/* branch is open; the nightly builds main."
+            echo "none=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           echo "::notice::Nightly target is $BRANCH"
