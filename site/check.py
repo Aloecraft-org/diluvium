@@ -134,16 +134,16 @@ SOURCE_MUST_HAVE = [
 
 # Every installer URL the site answers, and where it goes: each mode, with
 # -dlua, -drt or nothing (DRT's), with or without .sh, to the copy on that
-# project's mirror under latest/. Each release publishes all six of its own.
+# project's mirror under latest/. Each release publishes all eight of its own.
 INSTALLER_MIRRORS = {"-dlua": "diluvium", "-drt": "diluvium-drt", "": "diluvium-drt"}
-INSTALLER_MODES = ("start", "install", "get")
+INSTALLER_MODES = ("start", "install", "get", "help")
 # The nginx half, which matches by pattern rather than by listing.
 NGINX_MUST_HAVE = [
-    ("location ~ ^/(start|install|get)-dlua(\\.sh)?$",
+    ("location ~ ^/(start|install|get|help)-dlua(\\.sh)?$",
      "the -dlua installer URLs"),
     ("return 302 https://software.aloecraft.org/releases/diluvium/latest/$1-dlua.sh;",
      "where the -dlua installer URLs go"),
-    ("location ~ ^/(start|install|get)(-drt)?(\\.sh)?$",
+    ("location ~ ^/(start|install|get|help)(-drt)?(\\.sh)?$",
      "the -drt and bare installer URLs"),
     ("return 302 https://software.aloecraft.org/releases/diluvium-drt/latest/$1-drt.sh;",
      "where the -drt and bare installer URLs go"),

@@ -231,16 +231,16 @@ jobs:
           name: ${{ needs.build.outputs.bundle_artifact }}
           path: release_dist
 
-      # The installer ships as six release assets, so every curl|sh front
+      # The installer ships as eight release assets, so every curl|sh front
       # door has a URL that exists without any server-side work:
       #   $GITHUB/releases/latest/download/start-dlua.sh
       # start.sh and start-dlua.sh install the latest stable release;
       # install.sh, install-dlua.sh, get.sh and get-dlua.sh act on THIS
-      # release. A script piped to sh cannot see the URL it came from, so
+      # release; help.sh and help-dlua.sh print the usage. A script piped to sh cannot see the URL it came from, so
       # each copy is stamped with its release and its mode, and the step
       # fails if a stamp did not take: a sed that silently matched nothing
       # would publish a script that installs some other release. build.yml
-      # wrote SHA256SUMS.txt without knowing the tag, so the six are
+      # wrote SHA256SUMS.txt without knowing the tag, so the eight are
       # stamped here and their sums appended.
       - name: Installers, stamped for this release
         env:
@@ -248,7 +248,7 @@ jobs:
         run: |
           set -eu
           cd release_dist
-          for mode in start install get; do
+          for mode in start install get help; do
             for f in "$mode.sh" "$mode-dlua.sh"; do
               sed -e "s|^STAMPED_VERSION=.*|STAMPED_VERSION=$STAMP_TAG|" \
                   -e "s|^STAMPED_MODE=.*|STAMPED_MODE=$mode|" ../install.sh > "$f"

@@ -21,8 +21,8 @@ What it does, in order:
      bundler is gone, the guarantee is not.
   3. Writes index.html from site/template/index.html.
 
-The installers are not here. /start, /install, /get and their -dlua and
--drt forms redirect to the copies each release publishes on its mirror
+The installers are not here. /start, /install, /get, /help and their
+-dlua and -drt forms redirect to the copies each release publishes on its mirror
 (static/_redirects, nginx/diluvium.conf), so cutting a release changes
 what they serve with no deploy of this site.
 """

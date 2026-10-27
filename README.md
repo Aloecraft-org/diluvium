@@ -297,12 +297,13 @@ curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh
 
 That installs the latest stable release, verified against its
 `SHA256SUMS.txt`. Every release carries the script that does it,
-`install.sh` at the repo root, six times: `start.sh`, `install.sh` and
-`get.sh`, each also as `-dlua.sh`. `start` installs the latest release;
+`install.sh` at the repo root, eight times: `start.sh`, `install.sh`,
+`get.sh` and `help.sh`, each also as `-dlua.sh`. `start` installs the latest release;
 `install` and `get` act on the release that shipped them, `get` saving the
 binary in the current directory. Each takes `--version TAG` (`-r`,
 `--release`), `list`, `list-all`, `check`, `use TAG`, `remove [TAG]` and
-`--compiler`; `--help` lists them. Releases sit side by side under
+`--compiler`; `--help` lists them (`curl -fsSL
+https://diluvium.aloecraft.org/help-dlua | sh`, or `| sh -s -- --help`). Releases sit side by side under
 `<prefix>/share/diluvium/versions/`, the one in use linked into
 `<prefix>/bin`. The mirror comes first and GitHub Releases is the fallback.
 `diluvium.aloecraft.org/start-drt` is the same for DRT, and bare `/start`,
