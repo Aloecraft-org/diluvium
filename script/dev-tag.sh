@@ -17,7 +17,9 @@
 # Deliberately the same script, option for option, as diluvium-drt's
 # script/dev-tag.sh. The two repositories cut dev builds the same way because
 # §7 is one scheme across all of them, and a second spelling of it here would
-# be a second thing to keep in step.
+# be a second thing to keep in step. The one addition is the next-patch bump
+# below: diluvium's main carries the version it last released, where
+# diluvium-drt's carries the one in progress, so there it never applies.
 set -eu
 cd "$(dirname "$0")/.."
 
@@ -37,6 +39,13 @@ print("%d.%d.%d" % (v["major"], v["minor"], v["patch"]))
 
 # 'sort -n', never plain sort: the bug §7 warns about appears at dev.10,
 # where a lexical sort puts it behind dev.9 and the counter walks backwards.
+# main carries the version it last released, so once v<version> is tagged
+# a dev build from main is a build toward the next patch: v0.17.3-dev.5
+# would sort below v0.17.3, which it is newer than.
+if git rev-parse -q --verify "refs/tags/v$version" >/dev/null; then
+    version=$(echo "$version" | awk -F. '{ printf "%d.%d.%d", $1, $2, $3 + 1 }')
+fi
+
 last=$(git tag --list 'v*-dev.*' | sed -n 's/.*-dev\.\([0-9][0-9]*\)$/\1/p' | sort -n | tail -1)
 
 if [ "${1:-}" = --if-changed ] && [ -n "$last" ]; then
