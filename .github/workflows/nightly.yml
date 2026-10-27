@@ -51,11 +51,10 @@ on:
         default: false
 
 permissions:
-  contents: read
-  # To dispatch release.yml. The tag itself is created by that workflow's
-  # release step, not here -- pushing it from this job would not work anyway,
-  # since a tag pushed with GITHUB_TOKEN does not trigger another workflow, and
-  # release.yml's dispatch path refuses a tag that already exists.
+  # To push the tag that claims the number, below.
+  contents: write
+  # To dispatch release.yml. A tag pushed with GITHUB_TOKEN does not start a
+  # workflow, so pushing it builds nothing; the dispatch is what builds it.
   actions: write
 
 concurrency:
@@ -136,6 +135,20 @@ jobs:
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "::notice::Cutting $TAG at $(git rev-parse --short HEAD)"
+
+      # The number is claimed by *creating* the tag, before anything is built.
+      # The concurrency group serialises allocation, but release.yml used to
+      # create the tag only at the end of its build, so a run queued behind
+      # another read the same newest tag and picked the same number: a merge
+      # and a `full` dispatch minutes apart both got v0.17.3-dev.6, and the
+      # second release failed on "tag already exists". release.yml accepts an
+      # existing dev tag that names the commit it is building.
+      - name: Claim the number
+        if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true'
+        run: |
+          set -eu
+          git tag "${{ steps.pick.outputs.tag }}" "${{ steps.pick.outputs.sha }}"
+          git push origin "refs/tags/${{ steps.pick.outputs.tag }}"
 
       - name: Dispatch the release workflow
         if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true'
