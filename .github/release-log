@@ -1,0 +1,31 @@
+# Every published release of Aloecraft-org/diluvium, newest first: tag, channel, date.
+# Written by release.yml on every publish; do not edit by hand.
+v0.17.3-dev.4	dev	2026-10-27
+v0.17.2	stable	2026-10-02
+v0.17.1	stable	2026-09-20
+v0.16.1	stable	2026-09-19
+v0.18.0-dev.3	dev	2026-09-19
+v0.17.0-dev.2	dev	2026-09-18
+v0.17.0-dev.1	dev	2026-09-18
+v0.16.0	stable	2026-09-17
+v0.15.1	stable	2026-09-16
+v5.5.1_build14	stable	2026-09-12
+v5.5.1_build13	stable	2026-09-06
+v5.5.1_build12p1	stable	2026-09-02
+v5.5.1_build12	stable	2026-09-01
+v5.5.1_build11	stable	2026-08-24
+v5.5.1_build10	stable	2026-08-18
+v5.5.1_build9	stable	2026-08-15
+v5.5.1_build8	stable	2026-08-15
+v5.5.1_build7	stable	2026-08-13
+v5.5.1_build6	stable	2026-08-12
+v5.5.1_build5	stable	2026-08-12
+v5.5.1_build4	rc	2026-08-11
+v5.5.1_build3	rc	2026-08-10
+v5.5.1_build2	stable	2026-08-08
+v5.5.1_build1	stable	2026-08-07
+v5.4.7_release	stable	2026-08-05
+v5.4.7_rc4	stable	2026-01-21
+v5.4.7_rc3	stable	2026-01-21
+v5.4.7_rc2	stable	2026-01-20
+v5.4.7_rc	stable	2026-01-20
