@@ -82,7 +82,7 @@ try {
       </p>
       <div class="cta">
         <div class="oneliner">
-          <code id="install-cmd">curl -fsSL https://diluvium.aloecraft.org/start | sh</code>
+          <code id="install-cmd">curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh</code>
           <button id="copy-install" class="copy" type="button" aria-label="Copy install command">Copy</button>
         </div>
         <p class="cta-sub">
@@ -572,15 +572,17 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
       <div class="install-main">
         <h3>The language <span class="what">— <code>diluvium</code>, the interpreter</span></h3>
         <div class="oneliner wide">
-          <code id="install-cmd-2">curl -fsSL https://diluvium.aloecraft.org/start | sh</code>
+          <code id="install-cmd-2">curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh</code>
           <button id="copy-install-2" class="copy" type="button" aria-label="Copy install command">Copy</button>
         </div>
         <p class="note">
           Detects your platform, downloads from the
           <a href="https://software.aloecraft.org/releases/diluvium/">mirror</a>, and verifies the binary against the
-          <code>SHA256SUMS.txt</code> the release workflow published. Installs to
-          <code>/usr/local/bin</code>, or <code>~/.local/bin</code> when that is
-          not writable.
+          <code>SHA256SUMS.txt</code> the release workflow published. Installs
+          under <code>/usr/local</code>, or <code>~/.local</code> when that is
+          not writable, with releases side by side and the one in use linked
+          into <code>bin/</code>. <code>/get-dlua</code> downloads without
+          installing.
         </p>
         <details>
           <summary>Read it before you pipe it to a shell</summary>
@@ -589,11 +591,15 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
             dependencies beyond <code>curl</code> or <code>wget</code>:
           </p>
           <div class="oneliner wide">
-            <code>curl -fsSL https://diluvium.aloecraft.org/start | less</code>
+            <code>curl -fsSL https://diluvium.aloecraft.org/start-dlua | less</code>
           </div>
           <p>
-            Options: <code>--prefix DIR</code>, <code>--version TAG</code>,
+            Commands: <code>install</code>, <code>get</code>, <code>list</code>,
+            <code>list-all</code>, <code>check</code>, <code>use TAG</code>,
+            <code>remove [TAG]</code>. Options: <code>--version TAG</code>
+            (or <code>-r</code>), <code>--prefix DIR</code>,
             <code>--compiler</code> to also install the bytecode compiler.
+            <code>--help</code> says the rest.
           </p>
         </details>
       </div>
@@ -610,7 +616,7 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
       <div class="install-main">
         <h3>The runtime <span class="what">— <code>drt</code>, which embeds the language</span></h3>
         <div class="oneliner wide">
-          <code id="install-drt">curl -fsSL https://software.aloecraft.org/releases/diluvium-drt/latest/install.sh | sh</code>
+          <code id="install-drt">curl -fsSL https://diluvium.aloecraft.org/start-drt | sh</code>
           <button id="copy-install-drt" class="copy" type="button" aria-label="Copy DRT install command">Copy</button>
         </div>
         <p class="note">
@@ -618,8 +624,8 @@ dollup get drt             # the runtime, hash-checked, dropped beside it</code>
           <a href="https://software.aloecraft.org/releases/diluvium-drt/">DRT mirror</a>, a check against
           <code>SHA256SUMS.txt</code>, and <code>drt buildinfo</code> printed at
           the end so you can see which diluvium revision is inside.
-          <code>DRT_SLIM=1</code> takes the size profile;
-          <code>DRT_VERSION=vX.Y.Z</code> pins a release. Linux x86-64 and
+          The same commands as the language's; <code>--slim</code> takes the
+          size profile. Linux x86-64 and
           ARM64, and macOS; on Windows, take the <code>.exe</code> from the list.
         </p>
       </div>

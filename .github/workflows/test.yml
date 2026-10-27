@@ -654,11 +654,11 @@ jobs:
       - name: Build
         run: ./site/build.sh --out "$RUNNER_TEMP/out"
 
-      - name: The build produced the page, the installer, and stamped its assets
+      - name: The build produced the page, the installer redirects, and stamped its assets
         run: |
           set -eu
           test -s "$RUNNER_TEMP/out/index.html"
-          test -s "$RUNNER_TEMP/out/start"
+          test -s "$RUNNER_TEMP/out/_redirects"
           grep -q 'src="assets/app.js?v=' "$RUNNER_TEMP/out/index.html"
           grep -q "from './repl/terminal.js?v=" "$RUNNER_TEMP/out/assets/app.js"
 
