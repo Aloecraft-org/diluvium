@@ -25,7 +25,8 @@ TEMPLATE = os.path.join(HERE, "template", "index.html")
 STATIC = os.path.join(HERE, "static")
 ASSETS = os.path.join(STATIC, "assets")
 SITE_JSON = os.path.join(HERE, "site.json")
-INSTALLER = os.path.join(HERE, "start.sh")
+REDIRECTS = os.path.join(STATIC, "_redirects")
+NGINX = os.path.join(HERE, "nginx", "diluvium.conf")
 
 # (needle, why it matters when it goes missing)
 TEMPLATE_MUST_HAVE = [
@@ -55,10 +56,10 @@ TEMPLATE_MUST_HAVE = [
      "what the DRT binary carries, read off BUILDINFO.txt on the mirror"),
     ('id="footer-version"', "the release tags in the footer"),
     ('id="install-cmd"', "the one-liner the hero's copy button copies"),
-    ('curl -fsSL https://diluvium.aloecraft.org/start | sh',
-     "the install one-liner, at the URL start.sh is served from"),
-    ('curl -fsSL https://software.aloecraft.org/releases/diluvium-drt/latest/install.sh | sh',
-     "the DRT install one-liner, at the URL DRT's mirror serves it from"),
+    ('curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh',
+     "the install one-liner, at a URL _redirects sends to diluvium's start-dlua.sh"),
+    ('curl -fsSL https://diluvium.aloecraft.org/start-drt | sh',
+     "the DRT install one-liner, at a URL _redirects sends to DRT's start-drt.sh"),
     ('href="assets/vendor/xterm.css"', "xterm's stylesheet; the terminal is unusable without it"),
     ('href="assets/styles.css"', "the page's stylesheet"),
     ('src="assets/vendor/xterm.js"',
@@ -131,12 +132,30 @@ SOURCE_MUST_HAVE = [
      "DRT's mirror, read cross-origin for the version, the downloads and BUILDINFO.txt"),
 ]
 
-# The one URL the installer is built around. Everything else in start.sh
-# is an override.
-INSTALLER_MUST_HAVE = [
-    ("#!/bin/sh", "POSIX sh, because it runs on whatever /bin/sh the machine has"),
-    ('BASE="${DILUVIUM_BASE:-https://software.aloecraft.org/releases/diluvium}"',
-     "the mirror the installer downloads from by default"),
+# Every installer URL the site answers, and where it goes: each mode, with
+# -dlua, -drt or nothing (DRT's), with .sh or nothing (install.sh) or .ps1
+# (install.ps1), to the copy on that
+# project's mirror under latest/. Each release publishes all eight of its own.
+INSTALLER_MIRRORS = {"-dlua": "diluvium", "-drt": "diluvium-drt", "": "diluvium-drt"}
+INSTALLER_MODES = ("start", "install", "get", "help")
+# The nginx half, which matches by pattern rather than by listing.
+NGINX_MUST_HAVE = [
+    ("location ~ ^/(start|install|get|help)-dlua(\\.sh)?$",
+     "the -dlua installer URLs"),
+    ("return 302 https://software.aloecraft.org/releases/diluvium/latest/$1-dlua.sh;",
+     "where the -dlua installer URLs go"),
+    ("location ~ ^/(start|install|get|help)(-drt)?(\\.sh)?$",
+     "the -drt and bare installer URLs"),
+    ("return 302 https://software.aloecraft.org/releases/diluvium-drt/latest/$1-drt.sh;",
+     "where the -drt and bare installer URLs go"),
+    ("location ~ ^/(start|install|get|help)-dlua\\.ps1$",
+     "the -dlua PowerShell installer URLs"),
+    ("return 302 https://software.aloecraft.org/releases/diluvium/latest/$1-dlua.ps1;",
+     "where the -dlua PowerShell installer URLs go"),
+    ("location ~ ^/(start|install|get|help)(-drt)?\\.ps1$",
+     "the -drt and bare PowerShell installer URLs"),
+    ("return 302 https://software.aloecraft.org/releases/diluvium-drt/latest/$1-drt.ps1;",
+     "where the -drt and bare PowerShell installer URLs go"),
 ]
 
 IMPORT_REF = re.compile(r"""(?:\bfrom\s+|\bimport\s+)['"](\.{1,2}/[^'"?]+\.js)['"]""")
@@ -198,11 +217,29 @@ def problems_in_sources():
             bad.append("styles.css uses url(); render.py does not stamp CSS references, "
                        "so that asset would never cache-bust")
 
-    with open(INSTALLER, encoding="utf-8") as fh:
-        installer = fh.read()
-    for needle, why in INSTALLER_MUST_HAVE:
-        if needle not in installer:
-            bad.append("start.sh lost %r\n        %s" % (needle, why))
+    return bad
+
+
+def problems_in_redirects():
+    bad = []
+    want = set()
+    for mode in INSTALLER_MODES:
+        for suffix, mirror in INSTALLER_MIRRORS.items():
+            for ext, script in (("", ".sh"), (".sh", ".sh"), (".ps1", ".ps1")):
+                target = "https://software.aloecraft.org/releases/%s/latest/%s%s%s" % (
+                    mirror, mode, suffix or "-drt", script)
+                want.add("/%s%s%s %s 302" % (mode, suffix, ext, target))
+    with open(REDIRECTS, encoding="utf-8") as fh:
+        have = {l.strip() for l in fh if l.strip() and not l.startswith("#")}
+    for line in sorted(want - have):
+        bad.append("_redirects lacks %r" % line)
+    for line in sorted(have - want):
+        bad.append("_redirects has %r, which is not an installer URL this site serves" % line)
+    with open(NGINX, encoding="utf-8") as fh:
+        conf = fh.read()
+    for needle, why in NGINX_MUST_HAVE:
+        if needle not in conf:
+            bad.append("nginx/diluvium.conf lost %r\n        %s" % (needle, why))
     return bad
 
 
@@ -239,7 +276,8 @@ def main():
     with open(TEMPLATE, encoding="utf-8") as fh:
         report("%s (%d invariants)" % (os.path.relpath(TEMPLATE, REPO), len(TEMPLATE_MUST_HAVE)),
                problems_in_template(fh.read()))
-    report("site/static/assets and site/start.sh", problems_in_sources())
+    report("site/static/assets", problems_in_sources())
+    report("site/static/_redirects and site/nginx/diluvium.conf", problems_in_redirects())
     report("site/site.json", problems_in_site_json())
     print("PASS")
 

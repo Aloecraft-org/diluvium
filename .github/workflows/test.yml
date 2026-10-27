@@ -654,11 +654,11 @@ jobs:
       - name: Build
         run: ./site/build.sh --out "$RUNNER_TEMP/out"
 
-      - name: The build produced the page, the installer, and stamped its assets
+      - name: The build produced the page, the installer redirects, and stamped its assets
         run: |
           set -eu
           test -s "$RUNNER_TEMP/out/index.html"
-          test -s "$RUNNER_TEMP/out/start"
+          test -s "$RUNNER_TEMP/out/_redirects"
           grep -q 'src="assets/app.js?v=' "$RUNNER_TEMP/out/index.html"
           grep -q "from './repl/terminal.js?v=" "$RUNNER_TEMP/out/assets/app.js"
 
@@ -668,6 +668,37 @@ jobs:
         run: |
           ./site/build.sh --out "$RUNNER_TEMP/out2"
           diff -r "$RUNNER_TEMP/out" "$RUNNER_TEMP/out2"
+
+  installer:
+    name: Installer (sh)
+    needs: resolve
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # install.sh, offline, against a fake mirror and release log: every
+    # command, under the two shells a curl|sh most often lands in.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - run: sudo apt-get install -y -qq dash
+      - run: SH=dash script/test-installer.sh
+      - run: SH=bash script/test-installer.sh
+
+  installer-windows:
+    name: Installer (PowerShell)
+    needs: resolve
+    runs-on: windows-latest
+    timeout-minutes: 10
+    # install.ps1, the same cases, under PowerShell 7 and Windows
+    # PowerShell 5.1, which is what `irm | iex` gets on a stock machine.
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+      - shell: pwsh
+        run: ./script/test-installer.ps1 -Shell pwsh
+      - shell: pwsh
+        run: ./script/test-installer.ps1 -Shell powershell
 
   patch-guard:
     name: Core patch guard

@@ -291,6 +291,46 @@ and debugger, `doc/Determinism.md` an open design for a replayable scheduler, an
 
 ## Installation Instructions
 
+```sh
+curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh
+```
+
+That installs the latest stable release, verified against its
+`SHA256SUMS.txt`. Every release carries the script that does it,
+`install.sh` at the repo root, eight times: `start.sh`, `install.sh`,
+`get.sh` and `help.sh`, each also as `-dlua.sh`. `start` installs the latest release;
+`install` and `get` act on the release that shipped them, `get` saving the
+binary in the current directory. Each takes `--version TAG` (`-r`,
+`--release`), `list`, `list-all`, `check`, `use TAG`, `remove [TAG]` and
+`--compiler`; `--help` lists them (`curl -fsSL
+https://diluvium.aloecraft.org/help-dlua | sh`, or `| sh -s -- --help`).
+Every copy takes every command, so one alias covers all of it:
+
+```sh
+alias get-dlua='curl -fsSL https://diluvium.aloecraft.org/get-dlua | sh -s --'
+get-dlua                   # the latest diluvium, here
+get-dlua install v0.17.2   # or list, check, use, remove
+```
+
+On Windows, `install.ps1` is the same script in PowerShell, with the same
+commands, shipped the same eight ways as `.ps1`:
+
+```powershell
+irm https://diluvium.aloecraft.org/start-dlua.ps1 | iex
+& ([scriptblock]::Create((irm https://diluvium.aloecraft.org/get-dlua.ps1))) install v0.17.2
+```
+
+An install puts `diluvium` in `<prefix>/bin`, also as `dlua`, with tab
+completion for bash, zsh, fish and PowerShell. Bash needs the
+bash-completion package; zsh outside `/usr/local` and PowerShell need one
+line in your profile, which the install prints. Releases sit side by side under
+`<prefix>/share/diluvium/versions/`, the one in use linked into
+`<prefix>/bin`. The mirror comes first and GitHub Releases is the fallback.
+`diluvium.aloecraft.org/start-drt` is the same for DRT, and bare `/start`,
+`/install` and `/get` are DRT's.
+
+Or take the binary yourself:
+
 **Linux (Portable AMD64) Installation**
 ``` sh
 wget https://github.com/Aloecraft-org/diluvium/releases/latest/download/diluvium_linux_x86_64_musl

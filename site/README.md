@@ -26,7 +26,7 @@ build.sh              the contract entry point
 check.py              guards the template's load-bearing details; runs in build.sh and CI
 render.py             static/ + template -> _out, with asset URLs content-hashed
 site.json             what this site is, for the portal and the manifest
-start.sh              the installer, served at /start
+static/_redirects     /start, /install, /get, /help, their -dlua and -drt forms, and .ps1, for Pages
 template/index.html   the page
 static/
   assets/app.js       wiring
@@ -36,7 +36,7 @@ static/
   assets/styles.css   dark default, light behind [data-theme="light"]
   assets/vendor/      xterm.js 5.5.0, addon-fit 0.10.0, Prism 1.30.0 (MIT)
   favicon.ico, robots.txt
-nginx/diluvium.conf   how the page wants to be served: /start's type, the cache policy
+nginx/diluvium.conf   how the page wants to be served: the installer redirects, the cache policy
 test/smoke.mjs        drives the real page in a real browser
 test/stage-mirror.mjs copies enough of the deployed mirrors into _out/ for it
 ```
@@ -87,7 +87,15 @@ the version badge and the download links, and DRT's `latest/BUILDINFO.txt`
 for the connector list, so what the page says a release carries is read off
 the artifact rather than written here. `latest/` is a symlink the mirror
 maintains, so the kernel URL never needs updating when a release is cut.
-The installer at `/start` downloads from the same mirror.
+The installers are not on this site at all. Each release publishes its
+own (`install.sh` at the repo root of diluvium and of DRT, stamped eight
+ways), and `/start-dlua`, `/start-drt` and the rest redirect to the copy
+under the mirror's `latest/`, so a release changes what they serve with no
+deploy here. Bare `/start`, `/install` and `/get` are DRT's, and each
+name with `.ps1` goes to the PowerShell twin, `install.ps1`.
+`static/_redirects` is that list for Cloudflare Pages and
+`nginx/diluvium.conf` says it as two patterns; `check.py` holds them
+together.
 
 `diluvium.aloecraft.org/release/` and `/drt/` were the mirrors' first
 addresses. `/release/` is retiring behind the Lab and `/drt/` is gone;

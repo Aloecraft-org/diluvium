@@ -20,8 +20,11 @@ What it does, in order:
      every visit. This is the job webpack's [contenthash] used to do; the
      bundler is gone, the guarantee is not.
   3. Writes index.html from site/template/index.html.
-  4. Copies site/start.sh to --out/start: the installer, at the URL the
-     one-liner on the page names.
+
+The installers are not here. /start, /install, /get, /help and their
+-dlua and -drt forms redirect to the copies each release publishes on its mirror
+(static/_redirects, nginx/diluvium.conf), so cutting a release changes
+what they serve with no deploy of this site.
 """
 
 import argparse
@@ -35,8 +38,6 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 TEMPLATE = os.path.join(HERE, "template", "index.html")
 STATIC = os.path.join(HERE, "static")
-INSTALLER = os.path.join(HERE, "start.sh")
-INSTALLER_URL_NAME = "start"
 
 # A local reference in the template: src="assets/…" or href="assets/…", and
 # the favicon. Sibling paths on the vhost (/release/, /drt/, /lab/, /start),
@@ -122,15 +123,12 @@ def main():
     page = render_page(stamper)
     with open(os.path.join(out, "index.html"), "w", encoding="utf-8") as fh:
         fh.write(page)
-    # copyfile, not copy2: the installer's bytes are what matter, and its
-    # mode on the server is nginx's business, not the checkout's.
-    shutil.copyfile(INSTALLER, os.path.join(out, INSTALLER_URL_NAME))
 
     shown = os.path.relpath(out, REPO)
     if shown.startswith(".."):
         shown = out
-    print("   stamped %d asset(s); index.html and /%s written -> %s"
-          % (len(stamper.hashes), INSTALLER_URL_NAME, shown))
+    print("   stamped %d asset(s); index.html written -> %s"
+          % (len(stamper.hashes), shown))
 
 
 if __name__ == "__main__":
