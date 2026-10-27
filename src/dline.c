@@ -30,8 +30,15 @@
 
 
 #define DLINE_MAXLINE		4096
-#define DLINE_CLEAR		"\x1b[H\x1b[2J"	/* home, erase the screen */
 #define DLINE_MAXHISTORY	1000
+
+/*
+** Home, then erase to the end of the screen. Not ESC[2J: VS Code's terminal
+** answers that by scrolling the screen into scrollback and leaves its
+** viewport a row short, hiding the line just redrawn. Erasing below home
+** clears the same cells and scrolls nothing.
+*/
+#define DLINE_CLEAR		"\x1b[H\x1b[J"
 
 
 /* ====================================================================== */
