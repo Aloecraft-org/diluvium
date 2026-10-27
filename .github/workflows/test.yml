@@ -50,8 +50,13 @@ on:
 permissions:
   contents: read
 
+# A newer push or PR run on the same ref cancels the older one. A call from
+# release.yml gets a group of its own (`github.workflow` is the caller's name
+# there): two dev cuts of one commit, a merge's Linux cut and a `full`
+# dispatch, both pass the same ref, and sharing a group let the second
+# cancel the first one's gate, which cancelled its release.
 concurrency:
-  group: tests-${{ inputs.ref || github.ref }}
+  group: tests-${{ github.workflow == 'Tests' && (inputs.ref || github.ref) || github.run_id }}
   cancel-in-progress: true
 
 jobs:
