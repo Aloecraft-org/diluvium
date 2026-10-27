@@ -104,7 +104,7 @@ LIB_O=	lbaselib.o ldblib.o liolib.o lmathlib.o loslib.o ltablib.o lstrlib.o \
 	lutf8lib.o loadlib.o lcorolib.o linit.o
 
 LUA_T=	lua
-LUA_O=	lua.o
+LUA_O=	lua.o dlocalhost.o dsqlite.o
 
 
 ALL_T= $(CORE_T) $(LUA_T)
@@ -210,6 +210,9 @@ ltests.o: ltests.c lprefix.h lua.h luaconf.h lapi.h llimits.h lstate.h \
  ltable.h lualib.h
 ltm.o: ltm.c lprefix.h lua.h luaconf.h ldebug.h lstate.h lobject.h \
  llimits.h ltm.h lzio.h lmem.h ldo.h lgc.h lstring.h ltable.h lvm.h
+dlocalhost.o: dlocalhost.c lprefix.h lua.h luaconf.h lauxlib.h dhostlib.h \
+ dlocalhost.h dmsgpack.h sqlite/sqlite3.h
+dsqlite.o: dsqlite.c sqlite/sqlite3.c sqlite/sqlite3.h
 lua.o: lua.c lprefix.h lua.h luaconf.h lauxlib.h lualib.h llimits.h
 lundump.o: lundump.c lprefix.h lua.h luaconf.h ldebug.h lstate.h \
  lobject.h llimits.h ltm.h lzio.h lmem.h ldo.h lfunc.h lstring.h lgc.h \

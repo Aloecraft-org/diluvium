@@ -49,4 +49,10 @@
 
 LUAMOD_API int luaopen_dhostlib (lua_State *L);
 
+/* The same library, answered in-process: pops an answerer function,
+   answer(call, args) -> {status, value?, detail?}, and pushes a module
+   whose calls go to it instead of the queue pair. For a host that runs in
+   the program's own process -- the standalone binary (dlocalhost.c). */
+LUA_API void diluvium_hostlib_open_local (lua_State *L);
+
 #endif

@@ -166,6 +166,9 @@
 
 /* lua */
 #ifdef MAKE_LUA
+#if !defined(DILUVIUM_AS_LIBRARY)  /* the binary's own host; see lua.c */
+#include "dlocalhost.c"
+#endif
 #include "lua.c"
 #endif
 

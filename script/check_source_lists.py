@@ -25,8 +25,10 @@ SRC = ROOT / "src"
 # Files that are in the per-file build's object list but intentionally NOT
 # #included in the amalgamation, because they are their own translation unit
 # there. 'diluvium_api' is compiled beside onelua.c for the luac build (see
-# build_platform), not inside it. A new entry here needs a reason.
-EXCLUDE = {"diluvium_api"}
+# build_platform), not inside it. 'dsqlite' is SQLite, which cannot share
+# the amalgamation's translation unit (see src/dsqlite.c), so every binary
+# build compiles it beside onelua.c. A new entry here needs a reason.
+EXCLUDE = {"diluvium_api", "dsqlite"}
 
 # The runtime d*.c set, as onelua.c includes it inside the MAKE_LUAC guard.
 # dv.c is included there too but is intentionally NOT in this comparison set:
@@ -41,12 +43,17 @@ def amalgamation_includes(text):
 
 def makefile_objects(text):
     # AUX_O is a backslash-continued assignment; join its lines, then take the
-    # d*.o basenames.
-    m = re.search(r'^AUX_O=(.*?)(?=^\w+=|\Z)', text, re.M | re.S)
-    if not m:
-        sys.exit("check_source_lists: no AUX_O in src/makefile")
-    body = m.group(1).replace("\\\n", " ")
-    return {tok[:-2] for tok in body.split() if re.fullmatch(r'd[a-z0-9_]+\.o', tok)}
+    # d*.o basenames. LUA_O too: its d*.o files are the binary's own
+    # (dlocalhost), which onelua.c includes beside lua.c.
+    out = set()
+    for var in ("AUX_O", "LUA_O"):
+        m = re.search(r'^%s=(.*?)(?=^\w+=|\Z)' % var, text, re.M | re.S)
+        if not m:
+            sys.exit("check_source_lists: no %s in src/makefile" % var)
+        body = m.group(1).replace("\\\n", " ")
+        out |= {tok[:-2] for tok in body.split()
+                if re.fullmatch(r'd[a-z0-9_]+\.o', tok)}
+    return out
 
 
 def main():

@@ -1,0 +1,5 @@
+fs     a note, written through host.fs
+sql    a row, through host.sql
+exec   a child process, through host.exec
+crypto ba7816bf8f01cfea...
+time   a wall clock, in ms

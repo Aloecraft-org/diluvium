@@ -448,7 +448,10 @@ the `msgpack`, `queue`, `endpoint`, `bytes`, `json` and `time` libraries, the sh
 program that parks on a queue, embedding an instance from C, and running a swarm of them.
 Every sample in it was run against the tree.
 
-To run programs without writing a host in C, use
+The `diluvium` binary answers the `host` library itself (files, SQLite,
+subprocesses, crypto, the clock) with the rights a Lua script has, so a program
+that uses it needs nothing else to run: **[`examples/01-host-calls`](examples/01-host-calls)**.
+To run the same program sandboxed, under capabilities, use
 **[`diluvium-drt`](https://github.com/Aloecraft-org/diluvium-drt)** — one binary that
 embeds the language and implements the host protocol, with connectors, listeners and
 deployment config in Rust over the instance ABI. It reads a `*.host.lua` configuration

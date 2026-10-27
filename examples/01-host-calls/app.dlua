@@ -1,0 +1,19 @@
+-- One program, two hosts:
+--   diluvium app.dlua             plain dlua, with the rights a Lua script has
+--   drt run --config drt.json     DRT, with only what drt.json grants
+-- example: omits error handling; a refused call raises with the host's reason.
+
+host.fs.write("note.txt", "a note, written through host.fs")
+print("fs     " .. host.fs.read("note.txt"))
+
+local db = host.sql.open("notes.db")
+db.exec("drop table if exists notes")
+db.exec("create table notes (body text)")
+db.exec("insert into notes values (?)", "a row, through host.sql")
+print("sql    " .. db.query("select body from notes").rows[1][1])
+
+local child = host.exec.run({ "echo", "a child process, through host.exec" })
+print("exec   " .. child.stdout:gsub("\n$", ""))
+
+print("crypto " .. host.crypto.hash("abc"):sub(1, 16) .. "...")
+print("time   " .. (host.time() > 1.7e12 and "a wall clock, in ms" or "wrong"))

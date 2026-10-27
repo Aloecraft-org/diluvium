@@ -1,0 +1,23 @@
+{
+  "_comment": "What DRT needs to run app.dlua: each family granted and wired to a place. Plain dlua needs none of this, because it runs with the user's own rights.",
+
+  "program": { "path": "app.dlua" },
+
+  "caps": [
+    { "capability": "host:fs/*" },
+    { "capability": "host:sql/*" },
+    { "capability": "host:exec/run" },
+    { "capability": "host:crypto/hash" },
+    { "capability": "host:time" }
+  ],
+
+  "connectors": {
+    "fs":     { "scope": { "scope": ".", "access": "readwrite" } },
+    "sql":    { "scope": { "scope": ".", "access": "readwrite" } },
+    "exec":   { "scope": { "max_timeout_ms": 2000, "allow": ["/bin/echo"] } },
+    "crypto": { "scope": { "key": "host-calls-example-key-0000000000" } },
+    "time":   {}
+  },
+
+  "_omits": "example: omits budget, which a real deployment states."
+}

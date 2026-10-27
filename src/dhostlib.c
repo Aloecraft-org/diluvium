@@ -34,6 +34,14 @@
 
 
 static const char HOSTLIB_SRC[] =
+  "-- The transport. nil, as every embedding host opens this library, means\n"
+  "-- the queue pair below. A function means a host in this same process\n"
+  "-- answers directly: answer(call, args) returns the reply table a queue\n"
+  "-- would have carried ({status, value?, detail?}). Only the standalone\n"
+  "-- binary passes one (dlocalhost.c), and only through C, so no program\n"
+  "-- can reach it.\n"
+  "local answer = ...\n"
+  "\n"
   "local TIMEOUT_MS = 10000\n"
   "\n"
   "-- Tokens start high so the library's space is disjoint from the small\n"
@@ -73,6 +81,7 @@ static const char HOSTLIB_SRC[] =
   "-- raises -- level 2 in ask/try and level 3 here already name the\n"
   "-- program's own call site.\n"
   "local function roundtrip(call, args, waitms)\n"
+  "  if answer then return answer(call, args) end\n"
   "  ensure()\n"
   "  waitms = waitms or TIMEOUT_MS\n"
   "  tok = tok + 1\n"
@@ -316,6 +325,9 @@ static const char HOSTLIB_SRC[] =
   "local function spawn(spec)\n"
   "  if type(spec) ~= \"table\" or type(spec.code) ~= \"string\" then\n"
   "    error(\"host.spawn: spec.code must be the child's chunk, a string\", 2)\n"
+  "  end\n"  "  if answer then\n"
+  "    error(\"host.spawn: this host runs one program and has no swarm to \"\n"
+  "          .. \"spawn into; a swarm host such as drt does\", 2)\n"
   "  end\n"
   "  ensure_swarm()\n"
   "  local sent, why = queue.push(lifeq, { op = \"spawn\", code = spec.code,\n"
@@ -369,6 +381,7 @@ static const char HOSTLIB_SRC[] =
   "-- a drain, not a second place to sleep); a positive waitms parks here.\n"
   "-- Returns {event, id, detail?} or nil.\n"
   "local function events(waitms)\n"
+  "  if answer then return nil end  -- no swarm, so no lifecycle events\n"
   "  ensure_swarm()\n"
   "  if evhead <= evtail then\n"
   "    local ev = evbuf[evhead]\n"
@@ -424,4 +437,13 @@ LUAMOD_API int luaopen_dhostlib (lua_State *L) {
     return lua_error(L);
   lua_call(L, 0, 1);  /* the chunk returns the module table */
   return 1;
+}
+
+
+LUA_API void diluvium_hostlib_open_local (lua_State *L) {
+  if (luaL_loadbufferx(L, HOSTLIB_SRC, sizeof(HOSTLIB_SRC) - 1,
+                       "=host", "t") != LUA_OK)
+    lua_error(L);
+  lua_insert(L, -2);  /* the chunk under its one argument, the answerer */
+  lua_call(L, 1, 1);
 }

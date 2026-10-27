@@ -100,7 +100,7 @@ build_upstream() {
 build_diluvium() {
   ( cd src \
     && $CC -O1 -std=c99 -o "$WORK/lua_diluvium" \
-         onelua.c analyze.c diluvium_api.c -lm ) 2>/dev/null
+         onelua.c analyze.c diluvium_api.c dsqlite.c -lm ) 2>/dev/null
   echo "$WORK/lua_diluvium"
 }
 

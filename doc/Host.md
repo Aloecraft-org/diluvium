@@ -30,7 +30,10 @@ speaking the `dv_`/`dvs_` ABI. One OS process. An **instance** is one sandboxed
 `lua_State` holding one program. The **swarm** is C bookkeeping mapping ids to
 instances, parents, capabilities and budgets. The standalone `diluvium`
 executable is none of these: it runs a script unsealed in its own state, and
-the boundary machinery is never engaged.
+the boundary machinery is never engaged. It answers the `host` library itself, in the
+same process and with the user's own rights (`src/dlocalhost.c`,
+`doc/Guide.md` §2), so it implements none of the duties below: there is no
+grant to check and no queue to pump.
 
 The **generic host** (`host/`, `make build_host`) is the original reference
 implementation of this protocol, now deprecated in favour of DRT: one binary that drives a deployment from a

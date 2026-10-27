@@ -442,7 +442,8 @@ build_browser: _build_step0
 	@echo "web/diluvium_browser.wasm ($$(( $$(stat -c%s $(CURDIR)/web/diluvium_browser.wasm)/1024 )) KB)"
 
 test_build: _build_step0 test_libs
-	gcc $(TEST_CFLAGS) -o $(TEST_BIN) $(CURDIR)/.data/onelua.c -lm
+	gcc $(TEST_CFLAGS) -o $(TEST_BIN) $(CURDIR)/.data/onelua.c \
+	  $(CURDIR)/.data/dsqlite.c -lm
 
 failing_test_cases:
 	@echo 'Tests excluded from the default run (see test/run_tests.sh):'
