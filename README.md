@@ -341,8 +341,9 @@ diluvium -h       # the options
 
 Tab completes names, including through tables and metatable `__index`, so
 `string.f` offers `find` and `format`. The arrow keys walk history kept in
-`~/.diluvium_history`. Type `help()` for what Diluvium adds to Lua and what
-the editor's keys do. Set `NO_COLOR` to turn highlighting off.
+`~/.diluvium_history`. Type `:h` for what Diluvium adds to Lua, what the
+editor's keys do, and the colon commands: `:clear` clears the screen and
+`:q` exits. Set `NO_COLOR` to turn highlighting off.
 
 Line editing is built in — Diluvium links no readline and depends on
 nothing but libc.
