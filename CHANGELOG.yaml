@@ -58,7 +58,7 @@ repo: Aloecraft-org/diluvium
 releases:
   - version: "0.17.3"
     tag: v0.17.3
-    date: 2026-10-03
+    date: 2026-10-27
     status: released
     stable: true
     mirror: true
@@ -74,6 +74,24 @@ releases:
       The dv ABI is still 2 and nothing else in the runtime moves. What
       changes for a program is that one chunk shape, which could crash the
       compiler or quietly corrupt its heap, now compiles cleanly.
+
+      It also ships a new installer, `dlua` as a second name for
+      `diluvium`, and colon commands in the REPL.
+    added:
+      - |
+        **One installer, shipped as eight assets per release.** `install.sh`
+        and `install.ps1` are stamped into `start`, `install`, `get` and
+        `help`, each also as `-dlua`, in `.sh` and `.ps1`. `start` installs
+        the latest stable release, `install` the release that shipped the
+        copy, and `get` only downloads and verifies it into the current
+        directory. Releases sit side by side under
+        `<prefix>/share/diluvium/versions/<tag>/`, with `list`, `list-all`,
+        `check`, `use` and `remove` to manage them.
+      - "An install links `dlua` beside `diluvium`, and writes tab completion for bash, zsh, fish and PowerShell under the prefix. No shell profile is edited; where one is needed the install prints the line to add."
+      - "The REPL answers `:help` (`:h`, `:?`), `:quit` (`:q`, `:exit`) and `:clear`, the same colon commands as `drt repl`, and its banner says how to get help."
+      - "Every merge to `main` publishes a Linux dev build, `v<version>-dev.<n>`, and the installers' `list-all` and `dev` read them from the `release-log` branch. Running \"Cut a dev tag\" by hand with `full` builds every platform, so a dev build can be tried on Windows and macOS."
+    changed:
+      - "Ctrl-L and `:clear` home the cursor and erase below it instead of clearing the whole screen, so VS Code's terminal no longer hides the redrawn line."
     security:
       - |
         **`export` wrote past the code array.** The module table `export`

@@ -18,7 +18,9 @@
 #                      last dev tag -- that is `--if-changed`, and without it
 #                      identical builds accumulate; a backstop for a push run
 #                      that failed or never queued
-#   workflow_dispatch  any ref, for cutting a branch by hand
+#   workflow_dispatch  any ref, for cutting a branch by hand; with `full`,
+#                      every platform rather than the Linux leg alone, for
+#                      trying a dev build on Windows or macOS
 #
 # A dev build from main changes nothing about what main carries: diluvium-drt
 # follows the default branch by git, and main stays the released line, with
@@ -42,6 +44,11 @@ on:
         type: string
         required: false
         default: ''
+      full:
+        description: 'Build every platform, not the Linux leg alone'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -134,6 +141,8 @@ jobs:
         if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Empty on push and schedule, which build the Linux leg alone.
+          IN_FULL: ${{ inputs.full }}
         run: |
           set -eu
           # --ref selects which copy of release.yml runs, and that must be
@@ -144,7 +153,8 @@ jobs:
             --ref "${{ github.event.repository.default_branch }}" \
             -f ref="${{ steps.pick.outputs.sha }}" \
             -f tag="${{ steps.pick.outputs.tag }}" \
-            -f publish=true
+            -f publish=true \
+            -f full="${IN_FULL:-false}"
           echo "### Cut \`${{ steps.pick.outputs.tag }}\`" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
           echo "at \`${{ steps.pick.outputs.sha }}\`; the Release workflow builds and publishes it." >> "$GITHUB_STEP_SUMMARY"
