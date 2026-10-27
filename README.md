@@ -15,13 +15,190 @@
 
 </div>
 
+## 🚀 **Lightweight & Blazing Fast**
+
+**Diluvium** is a general purpose programming language with modern syntax compiled to one portable bytecode that compiles to WebAssembly, x86_64, ARM64, and more.
+
+It's blazing fast, tiny (~1MiB runtime), launches instantly and runs just about anywhere.
+
+## 🏃🏽‍♀️‍➡️ Try Diluvium in Your Browser
+
+See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#repl)
+
+## Quick Links
+- [Getting Started](#getting-started)
+  - [Option 1. Install](#option-1-install)
+    - [Install Diluvium Runtime (DRT) - Linux/MacOS](#install-diluvium-runtime-drt---linuxmacos)
+    - [Install Diluvium Runtime (DRT) - Windows](#install-diluvium-runtime-drt---windows)
+    - [Install Diluvium - Linux/MacOS](#install-diluvium---linuxmacos)
+    - [Install Diluvium - Windows](#install-diluvium---windows)
+  - [Option 2. Get Portable Executable](#option-2-get-portable-executable)
+    - [Get Portable Diluvium Runtime (DRT) - Linux/MacOS](#get-portable-diluvium-runtime-drt-saves-in-current-directory---linuxmacos)
+    - [Get Portable Diluvium Runtime (DRT) - Windows](#get-portable-diluvium-runtime-drt-saves-in-current-directory---windows)
+    - [Get Portable Diluvium - Linux/MacOS](#get-portable-diluvium-saves-in-current-directory---linuxmacos)
+    - [Get Portable Diluvium - Windows](#get-portable-diluvium-saves-in-current-directory---windows)
+  - [When in doubt](#when-in-doubt)
+    - [Helpful alias to manage versions - Linux/MacOS](#helpful-alias-to-manage-versions---linuxmacos)
+    - [Helpful Powershell Functions to manage versions - Windows](#helpful-powershell-functions-to-manage-versions---windows)
+    - [Show Help - Linux/MacOS](#show-help---linuxmacos)
+    - [Show Help - Windows](#show-help---windows)
+- [What is Diluvium?](#what-is-diluvium?)
+  - [Platforms](#platforms)
+  - [Do I need Diluvium or DRT?](#do-i-need-diluvium-or-drt)
+  - [Language Features](#language-features)
+
+## Getting Started
+
+Diluvium runs without dependencies on all major platforms. It can be installed or downloaded as a portable executable with either of the following options.
+
+[Do I need Diluvium or DRT?](#do-i-need-diluvium-or-drt)
+
+### Option 1. Install
+
+#### Install Diluvium Runtime (DRT) - Linux/MacOS
+``` sh
+curl -fsSL https://diluvium.aloecraft.org/start | sh
+```
+
+#### Install Diluvium Runtime (DRT) - Windows
+``` powershell
+irm https://diluvium.aloecraft.org/start.ps1 | iex
+```
+
+#### Install Diluvium - Linux/MacOS
+``` sh
+curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh
+```
+
+#### Install Diluvium - Windows
+``` powershell
+irm https://diluvium.aloecraft.org/start-dlua.ps1 | iex
+```
+Need help deciding?
+See: [Do I need Diluvium or DRT?](#do-i-need-diluvium-or-drt)
+
+### Option 2. Get Portable Executable
+
+#### Get Portable Diluvium Runtime (DRT) (saves in current directory) - Linux/MacOS
+``` sh
+curl -fsSL https://diluvium.aloecraft.org/get | sh
+```
+
+#### Get Portable Diluvium Runtime (DRT) (saves in current directory) - Windows
+``` powershell
+irm https://diluvium.aloecraft.org/get.ps1 | iex
+```
+
+#### Get Portable Diluvium (saves in current directory) - Linux/MacOS
+``` sh
+curl -fsSL https://diluvium.aloecraft.org/get-dlua | sh
+```
+
+#### Get Portable Diluvium (saves in current directory) - Windows
+``` powershell
+irm https://diluvium.aloecraft.org/get-dlua.ps1 | iex
+```
+Need help deciding?
+See: [Do I need Diluvium or DRT?](#do-i-need-diluvium-or-drt)
+
+### When in doubt
+
+
+#### Helpful alias to manage versions - Linux/MacOS
+``` sh
+alias get-drt='curl -fsSL https://diluvium.aloecraft.org/get | sh -s --'
+alias get-dlua='curl -fsSL https://diluvium.aloecraft.org/get-dlua | sh -s --'
+```
+
+
+#### Helpful Powershell Functions to manage versions - Windows
+``` powershell
+function get-drt { & ([scriptblock]::Create((irm https://diluvium.aloecraft.org/get.ps1))) @args }
+function get-dlua { & ([scriptblock]::Create((irm https://diluvium.aloecraft.org/get-dlua.ps1))) @args }
+```
+
+#### Show Help - Linux/MacOS
+``` sh
+curl -fsSL https://diluvium.aloecraft.org/help | sh
+```
+
+#### Show Help - Windows
+``` powershell
+irm https://diluvium.aloecraft.org/help.ps1 | iex
+```
+
 ## What is Diluvium?
 
-The Diluvium Programming Language is a **100% backward-compatible** extension of Lua with modern features like string interpolation, regular expressions, null coalescing, security enhancements, and more, without breaking legacy code. It's blazing fast, tiny (~1MiB runtime), and runs just about everywhere.
+Diluvium is a **100% backward-compatible** extension of Lua with modern features like string interpolation, regular expressions, null coalescing, security enhancements, and more, without breaking legacy code. 
 
-## Language Features
+🔄 **Lua Ecosystem Compatible**
 
-**String Interpolation**
+- Works with existing Lua libraries and tools
+- Standard Lua code runs unmodified
+
+### Platforms
+
+Download Here: [Github Releases](https://github.com/Aloecraft-org/diluvium/releases)
+
+| Platform	| Diluvium Build	|
+| --------	| ----	|
+| Linux (Ubuntu, Fedora, CentOS, Arch, etc.)	| diluvium_linux_x86_64_musl |
+| MacOS (Apple Silicon M1/M2/M3/M4)	| diluvium_darwin_arm64	|
+| MacOS (Intel)	| diluvium_darwin_x86_64	|
+| Windows	(64-bit) | diluvium_windows_x86_64.exe	| 
+| WASI	(wasmtime 28+ with -W exceptions=y) | diluvium_wasi.wasm |
+| WebAssembly (Browser) | diluvium_browser.wasm + diluvium.js |
+| Raspberry Pi 3/4/5 (64-bit ARM)	| diluvium_linux_arm64_musl |
+| Raspberry Pi Zero (32-bit ARM)	| diluvium_linux_armv7_musl |
+
+### Do I need Diluvium or DRT?
+
+**Diluvium** is the language: one small executable that runs Lua and Diluvium scripts, with a REPL. Pick it if you want a better Lua.
+
+**DRT** is the runtime around the language, and it includes Diluvium. It runs programs sandboxed: `io`, `os` and the network come only from capabilities you grant, through connectors (fs, sql, rest, ssh, ...). It also adds agents, deployments, networking (WebRTC peer-to-peer, WireGuard, SSH, STUN, and a relay if you configure one) and an attachable REPL. Pick it if you're building something that runs, talks to things or deploys.
+
+[Diluvium Runtime (Github)](https://github.com/Aloecraft-org/diluvium-drt)
+
+### Language Features
+
+  * [Interactive Mode (REPL)](#interactive-mode-repl)
+  * [String Interpolation](#string-interpolation)
+  * [Null Coalescing](#null-coalescing)
+  * [Secure Functions](#secure-functions)
+  * [Switch](#switch)
+  * [Continue](#continue)
+  * [Compound Assignment](#compound-assignment)
+  * [Defer](#defer)
+  * [Safe Navigation](#safe-navigation)
+  * [Format Specifications](#format-specifications)
+  * [Regular Expressions](#regular-expressions)
+  * [With](#with)
+  * [Shebangs](#shebangs)
+
+#### Interactive Mode (REPL)
+
+**Colon Commands**
+  - Help: `:help`, `:h`, `:?`
+  - Clear Screen: `:clear`
+  - Exit REPL: `:quit`, `:q`, `:exit`
+
+``` sh
+$ diluvium
+
+diluvium (lua) 5.5.1  aloecraft.org (C) 2026
+(original copyright (c) 1994-2026 lua.org)
+type 'help()' for what Diluvium adds, Ctrl-D to exit
+> 
+```
+
+**REPL Features:**
+- Tab Completion (including through tables and metatable __index)
+- Arrow keys navigate line history (`~/.diluvium_history`)
+- Cursor word jump with `ctrl+arrow`
+- Word delete with `ctrl+backspace`
+- Set NO_COLOR to turn highlighting off
+
+#### String Interpolation
 ```lua
 -- Standard Lua works perfectly
 local function greet(name)
@@ -35,7 +212,7 @@ function greet_modern(name)
 end
 ```
 
-**Null Coalescing**
+#### Null Coalescing
 ``` lua
 -- And null coalescing
 local config = user_config ?? default_config
@@ -43,7 +220,7 @@ local config = user_config ?? default_config
 print(nil ?? "hello!")
 ```
 
-**Secure Functions**
+#### Secure Functions
 
 **NOTE:** Secure functions are cryptographically weak but their contents cannot be read by simply opening a text editor.
 
@@ -64,8 +241,7 @@ secure function that decides, meaning that copy is hidden everywhere it
 is used. Nothing a secure function contains appears in the dump in the
 clear, whatever else in the chunk happens to use it.
 
-
-**Switch**
+#### Switch
 
 ``` lua
 -- The subject is evaluated once, a case can list several values,
@@ -87,7 +263,7 @@ that a subject cannot start with `(`, a string or a table constructor --
 `switch x do` (the usual Lua shape, as in `if x then` and `while x do`),
 or bind the subject to a local first.
 
-**Continue**
+#### Continue
 
 ``` lua
 -- skip to the next pass of the innermost loop
@@ -103,7 +279,7 @@ and any to-be-closed variable is closed on the way, exactly as reaching the
 end of the block would. Like `switch` and `defer` it is a contextual
 keyword, so `continue` keeps working as an ordinary name.
 
-**Compound Assignment**
+#### Compound Assignment
 
 ``` lua
 local total = 0
@@ -121,7 +297,7 @@ The target's prefix is evaluated once, so `t[next_key()] += 1` calls
 `next_key` a single time. There is no `~=` form, because `~=` already
 means "not equal".
 
-**Defer**
+#### Defer
 
 ``` lua
 local f = io.open("data.txt")
@@ -140,7 +316,7 @@ Deferred statements run in reverse order when the block ends, and on
 `break`, `goto`, `return`, an error, or `coroutine.close`. `defer` is a
 contextual keyword, so existing code using it as a name keeps working.
 
-**Safe Navigation**
+#### Safe Navigation
 
 ``` lua
 -- Once something is nil, the rest of the chain is skipped entirely --
@@ -156,7 +332,7 @@ local port = config?.server?.port ?? 8080
 `?.` and `?[` test for `nil` specifically, not for falsiness, so
 `false?.x` still raises exactly as `false.x` does.
 
-**Format Specifications**
+#### Format Specifications
 
 ``` lua
 local pi, items, total, name = 3.14159, 42, 1234.5, "widget"
@@ -174,7 +350,7 @@ has is available -- width, precision, alignment, `%q`, `%x`, `%e`. It is
 goes through `tostring`, so `nil`, booleans and tables interpolate rather
 than raising.
 
-**Regular Expressions**
+#### Regular Expressions
 
 ``` lua
 -- a backtick literal is a compiled regular expression, and it is raw:
@@ -211,7 +387,7 @@ compiled regex is an ordinary table, so an agent can be hibernated while
 holding one. [`doc/Guide.md`](doc/Guide.md) has the syntax table, the
 limits, and the two places this deliberately differs from Perl.
 
-**With**
+#### With
 
 ``` lua
 with f = assert(io.open("data.txt")) do
@@ -222,22 +398,34 @@ end                      -- f is closed here, however the block is left
 Each binding is a to-be-closed local scoped to the block, so the value
 must have a `__close` metamethod. Several bindings close in reverse order.
 
+#### Shebangs
+
+A first line starting with `#` is skipped, as in stock Lua, so a script can be run directly:
+``` lua
+#!/usr/bin/env dlua
+print($"hello from {arg[0]}")
+```
+``` sh
+chmod +x hello.dlua && ./hello.dlua
+```
+DRT skips the line too, and line numbers in errors stay correct:
+``` lua
+#!/usr/bin/env -S drt run
+```
+
+---
+---
+---
+
+## **WARNING**: There be dragons here (README out of date beyond this point)
+
 **And coming soon:** 
 - decimal literals and a literal-suffix registry
 - and more
 
-## Why Diluvium?
+**Thousands of Isolated Agents, In One Process**
 
-🚀 **Lightweight & Blazing Fast**
-
-The entire runtime is less than 1 MiB. Compiles to WebAssembly, x86_64, ARM64, and more, it launches instantly and runs anywhere.
-
-
-🏃🏽‍♀️‍➡️ **Try Diluvium in Your Browser**
-
-See it in action at [diluvium.aloecraft.org](https://diluvium.aloecraft.org/#repl)
-
-🐝 **Thousands of Isolated Agents, In One Process**
+(TODO: This belongs in diluvium-drt)
 
 Every agent is a sealed instance with its own heap, its own capability set, and its
 own instruction and memory budget. An idle one costs about **90 KB awake and 1.4 KB
@@ -249,11 +437,7 @@ Agents buy isolation and concurrency, not parallelism: the swarm layer is
 single-threaded and a host supplies its own. [`doc/Benchmarks.md`](doc/Benchmarks.md)
 has the measurements and `make swarm_bench` reproduces them.
 
-🔄 **Lua Ecosystem Compatible**
 
-- Works with existing Lua libraries and tools
-- Standard Lua code runs unmodified
-- Gradual adoption—use new features only where they help
 
 ---
 
@@ -290,46 +474,6 @@ and debugger, `doc/Determinism.md` an open design for a replayable scheduler, an
 `doc/audit/` the evidence behind §18.
 
 ## Installation Instructions
-
-```sh
-curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh
-```
-
-That installs the latest stable release, verified against its
-`SHA256SUMS.txt`. Every release carries the script that does it,
-`install.sh` at the repo root, eight times: `start.sh`, `install.sh`,
-`get.sh` and `help.sh`, each also as `-dlua.sh`. `start` installs the latest release;
-`install` and `get` act on the release that shipped them, `get` saving the
-binary in the current directory. Each takes `--version TAG` (`-r`,
-`--release`), `list`, `list-all`, `check`, `use TAG`, `remove [TAG]` and
-`--compiler`; `--help` lists them (`curl -fsSL
-https://diluvium.aloecraft.org/help-dlua | sh`, or `| sh -s -- --help`).
-Every copy takes every command, so one alias covers all of it:
-
-```sh
-alias get-dlua='curl -fsSL https://diluvium.aloecraft.org/get-dlua | sh -s --'
-get-dlua                   # the latest diluvium, here
-get-dlua install v0.17.2   # or list, check, use, remove
-```
-
-On Windows, `install.ps1` is the same script in PowerShell, with the same
-commands, shipped the same eight ways as `.ps1`:
-
-```powershell
-irm https://diluvium.aloecraft.org/start-dlua.ps1 | iex
-& ([scriptblock]::Create((irm https://diluvium.aloecraft.org/get-dlua.ps1))) install v0.17.2
-```
-
-An install puts `diluvium` in `<prefix>/bin`, also as `dlua`, with tab
-completion for bash, zsh, fish and PowerShell. Bash needs the
-bash-completion package; zsh outside `/usr/local` and PowerShell need one
-line in your profile, which the install prints. Releases sit side by side under
-`<prefix>/share/diluvium/versions/`, the one in use linked into
-`<prefix>/bin`. The mirror comes first and GitHub Releases is the fallback.
-`diluvium.aloecraft.org/start-drt` is the same for DRT, and bare `/start`,
-`/install` and `/get` are DRT's.
-
-Or take the binary yourself:
 
 **Linux (Portable AMD64) Installation**
 ``` sh
@@ -381,9 +525,8 @@ diluvium -h       # the options
 
 Tab completes names, including through tables and metatable `__index`, so
 `string.f` offers `find` and `format`. The arrow keys walk history kept in
-`~/.diluvium_history`. Type `:h` for what Diluvium adds to Lua, what the
-editor's keys do, and the colon commands: `:clear` clears the screen and
-`:q` exits. Set `NO_COLOR` to turn highlighting off.
+`~/.diluvium_history`. Type `help()` for what Diluvium adds to Lua and what
+the editor's keys do. Set `NO_COLOR` to turn highlighting off.
 
 Line editing is built in — Diluvium links no readline and depends on
 nothing but libc.
@@ -593,12 +736,11 @@ generated from [`CHANGELOG.yaml`](CHANGELOG.yaml), which is the source of
 truth for the release page and the release mirror alike -- edit that file
 and run `script/changelog.py generate`.
 
-## Testing
+## Testing (`test/`)
 
-The suite lives in `test/`. `test/run_tests.sh` is the single source of truth
-for which tests run, which are skipped and why — add new tests there, not to
-the Makefile.
+`test/run_tests.sh` runs active tests
 
+### Make targets for testing
 ``` sh
 make test_cases                        # build the debug binary, run everything
 make test_one T="strings test_fstrings"  # run named tests
@@ -613,24 +755,3 @@ test does not hide the state of the rest. It exits non-zero if anything failed.
 print, they assert no number, and they are deliberately outside CI and outside the
 sanitizers — timing under AddressSanitizer measures AddressSanitizer.
 [`doc/Benchmarks.md`](doc/Benchmarks.md) says what they do assert, which is progress.
-
-## Continuous integration
-
-Three workflows, all runnable by hand against **any commit** — enter a SHA in
-the `ref` box and every job builds that exact tree.
-
-| Workflow | Fires on | Does |
-| :--- | :--- | :--- |
-| **Tests** | every push and PR, or manually | Test suite on Linux and macOS, the bindings, the browser build driven from JavaScript, analysis-report validation, obfuscation audit |
-| **Build** | manually, or called by Release | Every platform artifact plus `SHA256SUMS.txt` and `BUILDINFO.txt`, uploaded to the run |
-| **Release** | a `v*` tag push, or manually | Tests, then a full build, then optionally publishes |
-
-**Releases are opt-in.** A manual Release run defaults to `publish: false`, so
-it is a full rehearsal — tests, every platform, checksums — that leaves the
-Releases page untouched. Flip `publish` on when you actually want it out; it
-creates the tag at the commit you named, so you can cut from any commit
-without moving a branch first. Pushing a `v*` tag publishes as before.
-
-Artifact names carry the short commit SHA, and `BUILDINFO.txt` records the
-commit, build time and workflow run, so a downloaded binary can always be
-traced back to its source.
