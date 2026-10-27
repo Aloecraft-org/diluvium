@@ -381,9 +381,12 @@ jobs:
       # GNU rather than MSVC: build.rs drives a GCC-style compiler and refuses
       # MSVC by name. If that changes, this is where it gets proved.
       - name: Windows toolchain
+        # Only the x86_64 posix compilers: the `mingw-w64` metapackage also
+        # pulls the i686 and win32 variants, about four times the download,
+        # and on a slow runner mirror that alone ran past the job's limit.
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix
           rustup target add x86_64-pc-windows-gnu
 
       - name: Cross-compile and link for Windows
@@ -425,7 +428,8 @@ jobs:
       - name: Windows toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y mingw-w64 wine64
+          sudo apt-get install -y --no-install-recommends gcc-mingw-w64-x86-64-posix g++-mingw-w64-x86-64-posix
+          sudo apt-get install -y wine64
           rustup target add x86_64-pc-windows-gnu
 
       - name: Test on Windows (mingw, under wine)
