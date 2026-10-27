@@ -26,7 +26,7 @@ build.sh              the contract entry point
 check.py              guards the template's load-bearing details; runs in build.sh and CI
 render.py             static/ + template -> _out, with asset URLs content-hashed
 site.json             what this site is, for the portal and the manifest
-static/_redirects     /start, /install, /get, /help and their -dlua and -drt forms, for Pages
+static/_redirects     /start, /install, /get, /help, their -dlua and -drt forms, and .ps1, for Pages
 template/index.html   the page
 static/
   assets/app.js       wiring
@@ -91,7 +91,8 @@ The installers are not on this site at all. Each release publishes its
 own (`install.sh` at the repo root of diluvium and of DRT, stamped eight
 ways), and `/start-dlua`, `/start-drt` and the rest redirect to the copy
 under the mirror's `latest/`, so a release changes what they serve with no
-deploy here. Bare `/start`, `/install` and `/get` are DRT's.
+deploy here. Bare `/start`, `/install` and `/get` are DRT's, and each
+name with `.ps1` goes to the PowerShell twin, `install.ps1`.
 `static/_redirects` is that list for Cloudflare Pages and
 `nginx/diluvium.conf` says it as two patterns; `check.py` holds them
 together.

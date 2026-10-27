@@ -45,7 +45,7 @@ usage: $SELF [command] [--version VERSION] [--prefix DIR] [--compiler]
   --compiler        also the bytecode compiler, as diluvium-compiler
 
 Env: DILUVIUM_VERSION, DILUVIUM_PREFIX, DILUVIUM_COMPILER=1,
-DILUVIUM_MIRROR (a file:// URL works).
+DILUVIUM_MIRROR and DILUVIUM_RELEASE_LOG (file:// URLs work).
 
 Piped from curl, a command goes after 'sh -s --':
   curl -fsSL https://diluvium.aloecraft.org/start-dlua | sh -s -- list
@@ -65,7 +65,7 @@ RAW="https://raw.githubusercontent.com/$REPO"
 # Every published release, dev builds included, one per line: tag, channel
 # (stable, rc or dev), date. release.yml rewrites it on its own branch on
 # every publish, so it lists what GitHub can serve and nothing pruned.
-RELEASE_LOG="$RAW/release-log/.github/release-log"
+RELEASE_LOG="${DILUVIUM_RELEASE_LOG:-$RAW/release-log/.github/release-log}"
 SELFTEST=-v
 PREFIX="${DILUVIUM_PREFIX:-}"
 COMPILER="${DILUVIUM_COMPILER:-0}"

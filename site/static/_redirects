@@ -1,30 +1,43 @@
 # Cloudflare Pages redirects. The installers live with their releases;
 # these send each short URL to the copy on the mirror's latest/, so a
 # release changes what they serve without a deploy of this site. Bare
-# /start, /install, /get and /help are DRT's. nginx/diluvium.conf says the
-# same for the current vhost; check.py holds both to this list.
+# /start, /install, /get and /help are DRT's; .ps1 is the PowerShell
+# twin. nginx/diluvium.conf says the same for the current vhost; check.py
+# holds both to this list.
 
 /start-dlua https://software.aloecraft.org/releases/diluvium/latest/start-dlua.sh 302
 /start-dlua.sh https://software.aloecraft.org/releases/diluvium/latest/start-dlua.sh 302
+/start-dlua.ps1 https://software.aloecraft.org/releases/diluvium/latest/start-dlua.ps1 302
 /start-drt https://software.aloecraft.org/releases/diluvium-drt/latest/start-drt.sh 302
 /start-drt.sh https://software.aloecraft.org/releases/diluvium-drt/latest/start-drt.sh 302
+/start-drt.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/start-drt.ps1 302
 /start https://software.aloecraft.org/releases/diluvium-drt/latest/start-drt.sh 302
 /start.sh https://software.aloecraft.org/releases/diluvium-drt/latest/start-drt.sh 302
+/start.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/start-drt.ps1 302
 /install-dlua https://software.aloecraft.org/releases/diluvium/latest/install-dlua.sh 302
 /install-dlua.sh https://software.aloecraft.org/releases/diluvium/latest/install-dlua.sh 302
+/install-dlua.ps1 https://software.aloecraft.org/releases/diluvium/latest/install-dlua.ps1 302
 /install-drt https://software.aloecraft.org/releases/diluvium-drt/latest/install-drt.sh 302
 /install-drt.sh https://software.aloecraft.org/releases/diluvium-drt/latest/install-drt.sh 302
+/install-drt.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/install-drt.ps1 302
 /install https://software.aloecraft.org/releases/diluvium-drt/latest/install-drt.sh 302
 /install.sh https://software.aloecraft.org/releases/diluvium-drt/latest/install-drt.sh 302
+/install.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/install-drt.ps1 302
 /get-dlua https://software.aloecraft.org/releases/diluvium/latest/get-dlua.sh 302
 /get-dlua.sh https://software.aloecraft.org/releases/diluvium/latest/get-dlua.sh 302
+/get-dlua.ps1 https://software.aloecraft.org/releases/diluvium/latest/get-dlua.ps1 302
 /get-drt https://software.aloecraft.org/releases/diluvium-drt/latest/get-drt.sh 302
 /get-drt.sh https://software.aloecraft.org/releases/diluvium-drt/latest/get-drt.sh 302
+/get-drt.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/get-drt.ps1 302
 /get https://software.aloecraft.org/releases/diluvium-drt/latest/get-drt.sh 302
 /get.sh https://software.aloecraft.org/releases/diluvium-drt/latest/get-drt.sh 302
+/get.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/get-drt.ps1 302
 /help-dlua https://software.aloecraft.org/releases/diluvium/latest/help-dlua.sh 302
 /help-dlua.sh https://software.aloecraft.org/releases/diluvium/latest/help-dlua.sh 302
+/help-dlua.ps1 https://software.aloecraft.org/releases/diluvium/latest/help-dlua.ps1 302
 /help-drt https://software.aloecraft.org/releases/diluvium-drt/latest/help-drt.sh 302
 /help-drt.sh https://software.aloecraft.org/releases/diluvium-drt/latest/help-drt.sh 302
+/help-drt.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/help-drt.ps1 302
 /help https://software.aloecraft.org/releases/diluvium-drt/latest/help-drt.sh 302
 /help.sh https://software.aloecraft.org/releases/diluvium-drt/latest/help-drt.sh 302
+/help.ps1 https://software.aloecraft.org/releases/diluvium-drt/latest/help-drt.ps1 302

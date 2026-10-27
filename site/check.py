@@ -133,7 +133,8 @@ SOURCE_MUST_HAVE = [
 ]
 
 # Every installer URL the site answers, and where it goes: each mode, with
-# -dlua, -drt or nothing (DRT's), with or without .sh, to the copy on that
+# -dlua, -drt or nothing (DRT's), with .sh or nothing (install.sh) or .ps1
+# (install.ps1), to the copy on that
 # project's mirror under latest/. Each release publishes all eight of its own.
 INSTALLER_MIRRORS = {"-dlua": "diluvium", "-drt": "diluvium-drt", "": "diluvium-drt"}
 INSTALLER_MODES = ("start", "install", "get", "help")
@@ -147,6 +148,14 @@ NGINX_MUST_HAVE = [
      "the -drt and bare installer URLs"),
     ("return 302 https://software.aloecraft.org/releases/diluvium-drt/latest/$1-drt.sh;",
      "where the -drt and bare installer URLs go"),
+    ("location ~ ^/(start|install|get|help)-dlua\\.ps1$",
+     "the -dlua PowerShell installer URLs"),
+    ("return 302 https://software.aloecraft.org/releases/diluvium/latest/$1-dlua.ps1;",
+     "where the -dlua PowerShell installer URLs go"),
+    ("location ~ ^/(start|install|get|help)(-drt)?\\.ps1$",
+     "the -drt and bare PowerShell installer URLs"),
+    ("return 302 https://software.aloecraft.org/releases/diluvium-drt/latest/$1-drt.ps1;",
+     "where the -drt and bare PowerShell installer URLs go"),
 ]
 
 IMPORT_REF = re.compile(r"""(?:\bfrom\s+|\bimport\s+)['"](\.{1,2}/[^'"?]+\.js)['"]""")
@@ -216,9 +225,9 @@ def problems_in_redirects():
     want = set()
     for mode in INSTALLER_MODES:
         for suffix, mirror in INSTALLER_MIRRORS.items():
-            target = "https://software.aloecraft.org/releases/%s/latest/%s%s.sh" % (
-                mirror, mode, suffix or "-drt")
-            for ext in ("", ".sh"):
+            for ext, script in (("", ".sh"), (".sh", ".sh"), (".ps1", ".ps1")):
+                target = "https://software.aloecraft.org/releases/%s/latest/%s%s%s" % (
+                    mirror, mode, suffix or "-drt", script)
                 want.add("/%s%s%s %s 302" % (mode, suffix, ext, target))
     with open(REDIRECTS, encoding="utf-8") as fh:
         have = {l.strip() for l in fh if l.strip() and not l.startswith("#")}

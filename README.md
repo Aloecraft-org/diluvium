@@ -310,6 +310,14 @@ Every copy takes every command, so one alias covers all of it:
 alias get-dlua='curl -fsSL https://diluvium.aloecraft.org/get-dlua | sh -s --'
 get-dlua                   # the latest diluvium, here
 get-dlua install v0.17.2   # or list, check, use, remove
+```
+
+On Windows, `install.ps1` is the same script in PowerShell, with the same
+commands, shipped the same eight ways as `.ps1`:
+
+```powershell
+irm https://diluvium.aloecraft.org/start-dlua.ps1 | iex
+& ([scriptblock]::Create((irm https://diluvium.aloecraft.org/get-dlua.ps1))) install v0.17.2
 ``` Releases sit side by side under
 `<prefix>/share/diluvium/versions/`, the one in use linked into
 `<prefix>/bin`. The mirror comes first and GitHub Releases is the fallback.
