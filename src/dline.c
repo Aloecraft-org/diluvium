@@ -30,6 +30,7 @@
 
 
 #define DLINE_MAXLINE		4096
+#define DLINE_CLEAR		"\x1b[H\x1b[2J"	/* home, erase the screen */
 #define DLINE_MAXHISTORY	1000
 
 
@@ -141,6 +142,10 @@ void diluvium_freeline (char *line) {
 char *diluvium_readline (lua_State *L, const char *prompt) {
   (void)L;
   return readplain(prompt);
+}
+
+void diluvium_clearscreen (void) {
+  /* no terminal to clear */
 }
 
 #else					/* }{ */
@@ -568,7 +573,7 @@ static int editline (EditState *e) {
       case DCTRL('u'): erase(e, 0, e->pos); break;
       case DCTRL('w'): erase(e, wordstart(e), e->pos); break;
       case DCTRL('l'): {  /* clear the screen, keep the line */
-        if (write(STDOUT_FILENO, "\x1b[H\x1b[2J", 7) < 0) { }
+        if (write(STDOUT_FILENO, DLINE_CLEAR, sizeof(DLINE_CLEAR) - 1) < 0) { }
         break;
       }
       case '\t': complete(e); continue;  /* 'complete' refreshes itself */
@@ -626,6 +631,12 @@ static int editline (EditState *e) {
     }
     refresh(e);
   }
+}
+
+
+void diluvium_clearscreen (void) {
+  if (isatty(STDOUT_FILENO) &&
+      write(STDOUT_FILENO, DLINE_CLEAR, sizeof(DLINE_CLEAR) - 1) < 0) { }
 }
 
 

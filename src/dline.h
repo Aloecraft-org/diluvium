@@ -34,6 +34,11 @@
 char *diluvium_readline (lua_State *L, const char *prompt);
 void diluvium_freeline (char *line);
 
+/* Clear the screen, when standard output is a terminal; otherwise do
+   nothing, so a redirected session's output stays clean. Ctrl-L is the
+   same thing from inside the editor. */
+void diluvium_clearscreen (void);
+
 /* History. 'add' ignores blank lines and immediate duplicates. */
 void diluvium_history_add (const char *line);
 int diluvium_history_load (const char *path);

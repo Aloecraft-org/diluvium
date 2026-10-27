@@ -275,6 +275,31 @@ static void print_version (void) {
 
 
 /*
+** Diluvium: lines the REPL answers itself instead of compiling. A line
+** of Diluvium never starts with ':', so none of these can take anything
+** a program could say. The same commands as 'drt repl', so the two
+** prompts answer alike.
+*/
+#define REPL_HINT	"Show help: <:h+enter>"
+
+static const char repl_commands[] =
+  "\n"
+  "Commands:\n"
+  "  :help, :h            this list\n"
+  "  :quit, :q            exit (so does Ctrl-D)\n"
+  "  :clear               clear the screen (so does Ctrl-L)\n";
+
+typedef enum { CMD_NONE, CMD_HELP, CMD_QUIT, CMD_CLEAR } ReplCommand;
+
+static const struct { const char *name; ReplCommand cmd; } repl_names[] = {
+  {":help", CMD_HELP}, {":h", CMD_HELP}, {":?", CMD_HELP},
+  {":quit", CMD_QUIT}, {":q", CMD_QUIT}, {":exit", CMD_QUIT},
+  {":clear", CMD_CLEAR},
+  {NULL, CMD_NONE}
+};
+
+
+/*
 ** Diluvium: what an interactive session prints before the first prompt.
 ** The version line alone said nothing about how to get out again or what
 ** the editor can do, which is the first thing anyone meeting a REPL
@@ -302,10 +327,12 @@ static int diluvium_help (lua_State *L) {
     "  Up/Down   history, kept in ~/.diluvium_history\n"
     "  Ctrl-A/E  start/end of line     Ctrl-W  delete word\n"
     "  Ctrl-C    abandon the line      Ctrl-D  exit\n"
+    "  Ctrl-L    clear the screen\n"
     "\n"
     "Set NO_COLOR to turn off syntax highlighting.\n";
   (void)L;
   lua_writestring(msg, sizeof(msg) - 1);
+  lua_writestring(repl_commands, sizeof(repl_commands) - 1);
   return 0;
 }
 
@@ -315,10 +342,9 @@ static void repl_intro (lua_State *L) {
   if (lua_isnil(L, -1)) {  /* nothing called 'help' already? */
     lua_pushcfunction(L, diluvium_help);
     lua_setglobal(L, "help");
-    lua_writestringerror("%s\n", "type 'help()' for what Diluvium adds, "
-                                  "Ctrl-D to exit");
   }
   lua_pop(L, 1);
+  lua_writestringerror("%s\n", REPL_HINT);
 }
 
 
@@ -666,6 +692,26 @@ static void checklocal (const char *line) {
 
 
 /*
+** Which command 'line' is, ignoring surrounding blanks; CMD_NONE for
+** anything else, which is then compiled as usual.
+*/
+static ReplCommand replcommand (const char *line) {
+  static const char space[] = " \t";
+  size_t len;
+  int i;
+  line += strspn(line, space);
+  len = strlen(line);
+  while (len > 0 && strchr(space, line[len - 1]) != NULL) len--;
+  for (i = 0; repl_names[i].name != NULL; i++) {
+    if (strlen(repl_names[i].name) == len &&
+        strncmp(line, repl_names[i].name, len) == 0)
+      return repl_names[i].cmd;
+  }
+  return CMD_NONE;
+}
+
+
+/*
 ** Read a line, and keep reading while it is an unfinished statement.
 **
 ** Diluvium: what to make of each attempt -- a value, more input needed,
@@ -680,9 +726,18 @@ static int loadline (lua_State *L) {
   const char *line;
   size_t len;
   int status;
-  lua_settop(L, 0);
-  if (!pushline(L, 1))
-    return -1;  /* no input */
+  for (;;) {
+    lua_settop(L, 0);
+    if (!pushline(L, 1))
+      return -1;  /* no input */
+    switch (replcommand(lua_tostring(L, 1))) {
+      case CMD_NONE: break;
+      case CMD_HELP: diluvium_help(L); continue;
+      case CMD_CLEAR: diluvium_clearscreen(); continue;
+      case CMD_QUIT: lua_settop(L, 0); return -1;
+    }
+    break;
+  }
   checklocal(lua_tostring(L, 1));
   for (;;) {
     line = lua_tolstring(L, 1, &len);
