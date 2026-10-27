@@ -94,6 +94,22 @@ has  "list-all: dev builds too" "$($SH "$SCRIPT" list-all)" "v1.2.0-dev.1"
 $SH "$SCRIPT" --prefix "$P" >/dev/null
 same "start installs latest" "$(in_use)" "v1.1.0"
 same "the link runs" "$("$P/bin/$NAME" --version)" "$NAME 1.1.0"
+same "dlua runs it too" "$("$P/bin/dlua" --version)" "$NAME 1.1.0"
+completions() {  # every completion file an install writes
+    for c in $NAME dlua; do
+        printf '%s\n' "$P/share/bash-completion/completions/$c" "$P/share/zsh/site-functions/_$c" "$P/share/fish/vendor_completions.d/$c.fish"
+    done
+}
+missing=""; for f in $(completions); do [ -s "$f" ] || missing="$missing $f"; done
+same "tab completion for bash, zsh and fish, both names" "$missing" ""
+if command -v bash >/dev/null; then
+    same "bash completes an option" "$(bash -c '. "$1"; COMP_WORDS=(dlua --ta); COMP_CWORD=1; _diluvium; echo "${COMPREPLY[*]}"' - "$P/share/bash-completion/completions/dlua")" "--task"
+fi
+for s in zsh fish; do
+    if command -v $s >/dev/null; then
+        for c in $NAME dlua; do $s -n "$(completions | grep "/$s/.*$c")" || bad "$s parses the completion for $c"; done
+    fi
+done
 
 $SH "$(stamp install v1.0.0)" --prefix "$P" >/dev/null
 same "install.sh installs its own release" "$(in_use)" "v1.0.0"
@@ -114,6 +130,7 @@ has "check marks the one in use" "$check" "v1.2.0-dev.1  $P  (in use)"
 
 $SH "$SCRIPT" --prefix "$P" use v1.0.0 >/dev/null
 same "use switches" "$("$P/bin/$NAME" --version)" "$NAME 1.0.0"
+same "and dlua with it" "$("$P/bin/dlua" --version)" "$NAME 1.0.0"
 [ ! -e "$P/bin/$NAME-compiler" ] && ok "a release without the compiler unlinks it" || bad "a release without the compiler unlinks it"
 fails_with "use refuses what is not installed" "not installed" $SH "$SCRIPT" --prefix "$P" use v9.9.9
 
@@ -126,6 +143,8 @@ has "the others stay" "$($SH "$SCRIPT" --prefix "$P" check)" "v1.1.0"
 
 $SH "$SCRIPT" --prefix "$P" remove >/dev/null
 [ ! -d "$P/share/$NAME" ] && ok "remove with no version removes all" || bad "remove with no version removes all"
+left=""; for f in "$P/bin/dlua" $(completions); do [ ! -e "$f" ] || left="$left $f"; done
+same "dlua and the completions with it" "$left" ""
 
 mkdir "$T/here"
 (cd "$T/here" && $SH "$(stamp get v1.0.0)" >/dev/null)

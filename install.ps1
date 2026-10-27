@@ -47,6 +47,9 @@ usage: $Self [command] [--version VERSION] [--prefix DIR] [--compiler]
                     (default %LOCALAPPDATA%\Programs\Aloecraft)
   --compiler        also the bytecode compiler, as diluvium-compiler
 
+An install puts diluvium.exe in DIR\bin, also as dlua.exe, and tab
+completion for PowerShell in DIR\share\diluvium\completion.ps1.
+
 Env: DILUVIUM_VERSION, DILUVIUM_PREFIX, DILUVIUM_COMPILER=1,
 DILUVIUM_MIRROR and DILUVIUM_RELEASE_LOG (file:// URLs work).
 
@@ -69,6 +72,8 @@ $Raw = "https://raw.githubusercontent.com/$Repo"
 # (stable, rc or dev), date. release.yml rewrites it on its own branch.
 $ReleaseLog = if ($env:DILUVIUM_RELEASE_LOG) { $env:DILUVIUM_RELEASE_LOG } else { "$Raw/release-log/.github/release-log" }
 $SelfTest = '-v'
+# More names in bin for the same binary: `dlua` runs diluvium.
+$Aliases = @('dlua')
 $Prefix = $env:DILUVIUM_PREFIX
 $Compiler = ($env:DILUVIUM_COMPILER -eq '1')
 
@@ -98,6 +103,23 @@ function Platform {
     }
     ,@('diluvium.exe', 'diluvium_windows_x86_64.exe')
     if ($Compiler) { ,@('diluvium-compiler.exe', 'diluvium_compiler_windows_x86_64.exe') }
+}
+
+# Tab completion, as a script $PROFILE dot-sources; $exe is the release in
+# use. diluvium takes the options in its -h and then a script, and when
+# this offers nothing PowerShell completes paths.
+function Completion([string]$exe) {
+@'
+Register-ArgumentCompleter -Native -CommandName diluvium, dlua -ScriptBlock {
+    param($word)
+    if (-not "$word".StartsWith('-')) { return }
+    foreach ($o in '-e', '-i', '-l', '-v', '-E', '-W', '-h', '--task', '--') {
+        if ($o.StartsWith("$word", [StringComparison]::Ordinal)) {
+            [System.Management.Automation.CompletionResult]::new($o, $o, 'ParameterName', $o)
+        }
+    }
+}
+'@
 }
 
 # ---------------------------------------------------------------- arguments
@@ -322,6 +344,7 @@ function Download([string]$tag, [string]$dir) {
 function DefaultPrefix { Join-Path $env:LOCALAPPDATA 'Programs\Aloecraft' }
 function VersionsDir([string]$p) { Join-Path $p "share\$Name\versions" }
 function ActiveFile([string]$p) { Join-Path $p "share\$Name\active" }
+function CompletionFile([string]$p) { Join-Path $p "share\$Name\completion.ps1" }
 function ActiveIn([string]$p) {
     $f = ActiveFile $p
     if (Test-Path -LiteralPath $f) { return ([IO.File]::ReadAllText($f)).Trim() }
@@ -366,7 +389,11 @@ function UseVersion([string]$p, [string]$tag) {
         }
     }
     foreach ($f in Get-ChildItem -LiteralPath $vdir -File) { PlaceFile $f.FullName (Join-Path $bin $f.Name) }
+    foreach ($a in $Aliases) { PlaceFile (Join-Path $vdir "$Name.exe") (Join-Path $bin "$a.exe") }
     [IO.File]::WriteAllText((ActiveFile $p), $tag)
+    # Written again on every install and use, so it matches the release in use.
+    $text = @(Completion (Join-Path $vdir "$Name.exe")) -join "`n"
+    if ($text) { [IO.File]::WriteAllText((CompletionFile $p), $text) }
     AddToPath $bin
 }
 
@@ -421,6 +448,11 @@ function DoInstall {
     $bin = Join-Path $Prefix "bin\$Name.exe"
     Say "installed $(RunSelfTest $bin) to $bin"
     Say "  source: $source"
+    $comp = CompletionFile $Prefix
+    if ((Test-Path -LiteralPath $comp) -and $PROFILE -and -not ((Test-Path -LiteralPath $PROFILE) -and (Select-String -LiteralPath $PROFILE -SimpleMatch $comp -Quiet))) {
+        Say "note: for tab completion, add this line to ${PROFILE}:"
+        Say "  if (Test-Path '$comp') { . '$comp' }"
+    }
 }
 
 function DoGet {
@@ -498,8 +530,8 @@ function DoRemove {
             Say "removed $tag from $p"
             $removed = $true
             if ($tag -eq $active) {
-                foreach ($f in $files) { Remove-Item -LiteralPath (Join-Path $bin $f) -Force -ErrorAction SilentlyContinue }
-                Remove-Item -LiteralPath (ActiveFile $p) -Force -ErrorAction SilentlyContinue
+                foreach ($f in $files + @($Aliases | ForEach-Object { "$_.exe" })) { Remove-Item -LiteralPath (Join-Path $bin $f) -Force -ErrorAction SilentlyContinue }
+                Remove-Item -LiteralPath (ActiveFile $p), (CompletionFile $p) -Force -ErrorAction SilentlyContinue
                 Say "$tag was in use; '$Self use VERSION' picks another"
             }
         } else {
@@ -508,6 +540,7 @@ function DoRemove {
                 if (Test-Path -LiteralPath $adir) {
                     foreach ($f in Get-ChildItem -LiteralPath $adir -File) { Remove-Item -LiteralPath (Join-Path $bin $f.Name) -Force -ErrorAction SilentlyContinue }
                 }
+                foreach ($a in $Aliases) { Remove-Item -LiteralPath (Join-Path $bin "$a.exe") -Force -ErrorAction SilentlyContinue }
             }
             Remove-Item -LiteralPath (Join-Path $p "share\$Name") -Recurse -Force
             if ((Test-Path -LiteralPath $bin) -and -not (Get-ChildItem -LiteralPath $bin)) {

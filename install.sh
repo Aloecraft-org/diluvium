@@ -44,6 +44,9 @@ usage: $SELF [command] [--version VERSION] [--prefix DIR] [--compiler]
                     (default /usr/local if writable, else ~/.local)
   --compiler        also the bytecode compiler, as diluvium-compiler
 
+An install puts diluvium in DIR/bin, also as dlua, and tab completion
+for bash, zsh and fish under DIR/share.
+
 Env: DILUVIUM_VERSION, DILUVIUM_PREFIX, DILUVIUM_COMPILER=1,
 DILUVIUM_MIRROR and DILUVIUM_RELEASE_LOG (file:// URLs work).
 
@@ -67,6 +70,11 @@ RAW="https://raw.githubusercontent.com/$REPO"
 # every publish, so it lists what GitHub can serve and nothing pruned.
 RELEASE_LOG="${DILUVIUM_RELEASE_LOG:-$RAW/release-log/.github/release-log}"
 SELFTEST=-v
+# More names in bin for the same binary: `dlua` runs diluvium.
+ALIASES=dlua
+# Shells that get tab completion. Each finds its file under the prefix by
+# itself, except zsh outside /usr/local (do_install says so).
+SHELLS="bash zsh fish"
 PREFIX="${DILUVIUM_PREFIX:-}"
 COMPILER="${DILUVIUM_COMPILER:-0}"
 
@@ -112,6 +120,58 @@ platform() {
         WANT="$WANT
 diluvium-compiler diluvium_compiler_$new diluvium_compiler_$old"
     fi
+}
+
+# Where a shell looks for the completion of command $3, under prefix $1.
+completion_path() {
+    case "$2" in
+        bash) printf '%s\n' "$1/share/bash-completion/completions/$3" ;;
+        zsh)  printf '%s\n' "$1/share/zsh/site-functions/_$3" ;;
+        fish) printf '%s\n' "$1/share/fish/vendor_completions.d/$3.fish" ;;
+    esac
+}
+
+# Tab completion for shell $1 and command $2, on stdout. diluvium takes the
+# options in its -h and then a script, so the files are the rest.
+completion() {
+    case "$1" in
+        bash) cat <<EOF
+_diluvium() {
+    case "\${COMP_WORDS[COMP_CWORD-1]}" in -e|-l) return ;; esac
+    case "\${COMP_WORDS[COMP_CWORD]}" in
+        -*) COMPREPLY=(\$(compgen -W '-e -i -l -v -E -W -h --task --' -- "\${COMP_WORDS[COMP_CWORD]}")) ;;
+    esac
+}
+complete -o default -F _diluvium $2
+EOF
+        ;;
+        zsh) cat <<EOF
+#compdef $2
+_arguments -s \\
+    '-e[execute string]:statement:' \\
+    '-i[enter interactive mode after the script]' \\
+    '*-l[require library]:module:' \\
+    '-v[show version information]' \\
+    '-E[ignore environment variables]' \\
+    '-W[turn warnings on]' \\
+    '-h[print the options]' \\
+    '--task[run coroutine-hosted, so the program can wait]' \\
+    '1:script:_files' \\
+    '*:: :_files'
+EOF
+        ;;
+        fish) cat <<EOF
+complete -c $2 -s e -r -d 'execute string'
+complete -c $2 -s i -d 'enter interactive mode after the script'
+complete -c $2 -s l -r -d 'require library'
+complete -c $2 -s v -d 'show version information'
+complete -c $2 -s E -d 'ignore environment variables'
+complete -c $2 -s W -d 'turn warnings on'
+complete -c $2 -s h -d 'print the options'
+complete -c $2 -l task -d 'run coroutine-hosted, so the program can wait'
+EOF
+        ;;
+    esac
 }
 
 # ---------------------------------------------------------------- arguments
@@ -342,6 +402,10 @@ link_version() {
         ln -sf "../share/$NAME/versions/$TAG/$b" "$PREFIX/bin/.$b.new"
         mv -f "$PREFIX/bin/.$b.new" "$PREFIX/bin/$b"
     done
+    for a in $ALIASES; do
+        ln -sf "../share/$NAME/versions/$TAG/$NAME" "$PREFIX/bin/.$a.new"
+        mv -f "$PREFIX/bin/.$a.new" "$PREFIX/bin/$a"
+    done
     # A link into another release for a file this one lacks would leave
     # half of the previous release in use.
     for f in "$PREFIX/bin"/*; do
@@ -349,6 +413,29 @@ link_version() {
             */share/$NAME/versions/"$TAG"/*) ;;
             */share/$NAME/versions/*) rm -f "$f" ;;
         esac
+    done
+    write_completions
+}
+
+# Written again on every install and use, so they match the release in use.
+# A shell whose directory cannot be made is skipped.
+write_completions() {
+    for cmd in $NAME $ALIASES; do
+        for sh in $SHELLS; do
+            f=$(completion_path "$PREFIX" "$sh" "$cmd")
+            mkdir -p "$(dirname "$f")" 2>/dev/null || continue
+            if completion "$sh" "$cmd" > "$f.new" 2>/dev/null && [ -s "$f.new" ]; then
+                mv -f "$f.new" "$f"
+            else
+                rm -f "$f.new"
+            fi
+        done
+    done
+}
+
+remove_completions() {  # $1 = prefix
+    for cmd in $NAME $ALIASES; do
+        for sh in $SHELLS; do rm -f "$(completion_path "$1" "$sh" "$cmd")"; done
     done
 }
 
@@ -370,6 +457,10 @@ do_install() {
     say "installed $("$PREFIX/bin/$NAME" $SELFTEST | head -1) to $PREFIX/bin/$NAME"
     say "  source: $SOURCE"
     case ":$PATH:" in *":$PREFIX/bin:"*) ;; *) say "note: $PREFIX/bin is not on your PATH" ;; esac
+    case "$PREFIX:${SHELL:-}" in
+        /usr/local:*|/usr:*) ;;
+        *zsh) say "note: for tab completion in zsh, put fpath+=($PREFIX/share/zsh/site-functions) before compinit in ~/.zshrc" ;;
+    esac
 }
 
 do_get() {
@@ -447,6 +538,7 @@ do_remove() {
                         */share/$NAME/versions/$TAG/*) rm -f "$f" ;;
                     esac
                 done
+                remove_completions "$p"
                 say "$TAG was in use; '$SELF use VERSION' picks another"
             fi
         else
@@ -456,6 +548,7 @@ do_remove() {
                 esac
             done
             rm -rf "$p/share/$NAME"
+            remove_completions "$p"
             say "removed every $NAME release from $p"
             removed=1
         fi

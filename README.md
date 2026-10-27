@@ -318,7 +318,12 @@ commands, shipped the same eight ways as `.ps1`:
 ```powershell
 irm https://diluvium.aloecraft.org/start-dlua.ps1 | iex
 & ([scriptblock]::Create((irm https://diluvium.aloecraft.org/get-dlua.ps1))) install v0.17.2
-``` Releases sit side by side under
+```
+
+An install puts `diluvium` in `<prefix>/bin`, also as `dlua`, with tab
+completion for bash, zsh, fish and PowerShell. Bash needs the
+bash-completion package; zsh outside `/usr/local` and PowerShell need one
+line in your profile, which the install prints. Releases sit side by side under
 `<prefix>/share/diluvium/versions/`, the one in use linked into
 `<prefix>/bin`. The mirror comes first and GitHub Releases is the fallback.
 `diluvium.aloecraft.org/start-drt` is the same for DRT, and bare `/start`,

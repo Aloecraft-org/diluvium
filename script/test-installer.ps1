@@ -88,8 +88,8 @@ function Step([string]$file) {
 }
 function FailsWith([string]$n, $got, $want) { if ($Code -ne 0) { Has $n $got $want } else { Bad "$n (it succeeded)" } }
 function InUse { (Get-Content -Raw (Join-Path $P "share\$Name\active")).Trim() }
-function BinIs([string]$tag) {
-    (Get-FileHash (Join-Path $P "bin\$Name.exe")).Hash -eq (Get-FileHash (Join-Path $P "share\$Name\versions\$tag\$Name.exe")).Hash
+function BinIs([string]$tag, [string]$as = $Name) {
+    (Get-FileHash (Join-Path $P "bin\$as.exe")).Hash -eq (Get-FileHash (Join-Path $P "share\$Name\versions\$tag\$Name.exe")).Hash
 }
 
 try {
@@ -108,6 +108,10 @@ try {
     Step $Script --prefix $P
     Same 'start installs latest' (InUse) 'v1.1.0'
     if (BinIs 'v1.1.0') { Ok 'bin holds the release in use' } else { Bad 'bin holds the release in use' }
+    if (BinIs 'v1.1.0' 'dlua') { Ok 'and dlua.exe is the same binary' } else { Bad 'and dlua.exe is the same binary' }
+    $comp = Join-Path $P "share\$Name\completion.ps1"
+    $done = & { . $comp; (TabExpansion2 'dlua --ta' 9).CompletionMatches | ForEach-Object { $_.CompletionText } }
+    Same 'the completion script completes an option' "$done" '--task'
 
     Step (Stamp 'install' 'v1.0.0') --prefix $P
     Same 'install.ps1 installs its own release' (InUse) 'v1.0.0'
@@ -128,6 +132,7 @@ try {
 
     Step $Script --prefix $P use v1.0.0
     if (BinIs 'v1.0.0') { Ok 'use switches' } else { Bad 'use switches' }
+    if (BinIs 'v1.0.0' 'dlua') { Ok 'and dlua.exe with it' } else { Bad 'and dlua.exe with it' }
     if (-not (Test-Path (Join-Path $P "bin\$Name-compiler.exe"))) { Ok 'a release without the compiler removes it' } else { Bad 'a release without the compiler removes it' }
     FailsWith 'use refuses what is not installed' (Run $Script --prefix $P use v9.9.9) 'not installed'
 
@@ -140,6 +145,7 @@ try {
 
     Step $Script --prefix $P remove
     if (-not (Test-Path (Join-Path $P "share\$Name"))) { Ok 'remove with no version removes all' } else { Bad 'remove with no version removes all' }
+    if (-not (Test-Path (Join-Path $P 'bin\dlua.exe'))) { Ok 'dlua.exe with it' } else { Bad 'dlua.exe with it' }
     $user = [Environment]::GetEnvironmentVariable('Path', 'User')
     if (-not $user -or ($user -split ';') -notcontains (Join-Path $P 'bin')) { Ok 'and takes bin off the PATH' } else { Bad 'and takes bin off the PATH' }
 
