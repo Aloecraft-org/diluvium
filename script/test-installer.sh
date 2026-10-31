@@ -94,6 +94,7 @@ has  "list-all: dev builds too" "$($SH "$SCRIPT" list-all)" "v1.2.0-dev.1"
 $SH "$SCRIPT" --prefix "$P" >/dev/null
 same "start installs latest" "$(in_use)" "v1.1.0"
 same "the link runs" "$("$P/bin/$NAME" --version)" "$NAME 1.1.0"
+same "the version directory is readable by everyone" "$(ls -ld "$P/share/$NAME/versions/v1.1.0" | cut -c1-10)" "drwxr-xr-x"
 same "dlua runs it too" "$("$P/bin/dlua" --version)" "$NAME 1.1.0"
 completions() {  # every completion file an install writes
     for c in $NAME dlua; do
