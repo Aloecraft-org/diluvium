@@ -25,6 +25,7 @@
 #include "dtask.h"
 #include "dlibs.h"
 #include "dline.h"
+#include "dlocalhost.h"
 #include "llimits.h"
 
 
@@ -121,6 +122,8 @@ static void print_usage_body (void) {
   "  -W        turn warnings on\n"
   "  -h        this message\n"
   "  --task    run coroutine-hosted, so the program can wait (not with -i)\n"
+  "  --queue-host  send host.* calls over the host/calls queue pair, for a\n"
+  "            program that answers them itself (default: answered here)\n"
   "  --        stop handling options\n"
   "  -         stop handling options and execute stdin\n"
   "\n"
@@ -453,6 +456,7 @@ static int handle_script (lua_State *L, char **argv) {
 #define has_E		16	/* -E */
 #define has_h		32	/* -h (Diluvium) */
 #define has_task	64	/* --task (Diluvium) */
+#define has_qhost	128	/* --queue-host (Diluvium) */
 
 
 /*
@@ -479,11 +483,15 @@ static int collectargs (char **argv, int *first) {
         return args;  /* stop handling options */
     switch (argv[i][1]) {  /* else check option */
       case '-':  /* '--' or a long option */
-        /* Diluvium: '--task' is the only long option, so this case does not
-           need a general parser yet. Anything else after '--' is still an
-           error, as upstream has it. */
+        /* Diluvium: '--task' and '--queue-host' are the only long options,
+           so this case does not need a general parser yet. Anything else
+           after '--' is still an error, as upstream has it. */
         if (strcmp(argv[i], "--task") == 0) {
           args |= has_task;
+          break;
+        }
+        if (strcmp(argv[i], "--queue-host") == 0) {
+          args |= has_qhost;
           break;
         }
         if (argv[i][2] != '\0')  /* extra characters after '--'? */
@@ -856,6 +864,14 @@ static int pmain (lua_State *L) {
     l_getenv = &getenv;
   luai_openlibs(L);  /* open standard libraries */
   diluvium_openlibs(L);  /* Diluvium: msgpack, and what follows it */
+#if !defined(DILUVIUM_AS_LIBRARY)
+  /* Diluvium: nothing else in this process drains 'host/calls', so the
+     binary answers 'host.*' itself, with the rights a Lua script has
+     (dlocalhost.c). '--queue-host' keeps the queue pair, for a program
+     that plays the host itself. */
+  if (!(args & has_qhost))
+    diluvium_localhost_install(L);
+#endif
   createargtable(L, argv, argc, script);  /* create table 'arg' */
   lua_gc(L, LUA_GCRESTART);  /* start GC... */
   lua_gc(L, LUA_GCGEN);  /* ...in generational mode */

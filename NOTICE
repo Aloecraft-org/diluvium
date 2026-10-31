@@ -21,6 +21,16 @@ file in src/ refers to as "Copyright Notice in lua.h".
   https://www.lua.org/license.html
 
 --------------------------------------------------------------------------------
+SQLite
+--------------------------------------------------------------------------------
+
+src/sqlite/sqlite3.c and src/sqlite/sqlite3.h are the SQLite 3.50.4
+amalgamation, unmodified. SQLite is in the public domain; the dedication is at
+the head of sqlite3.c.
+
+  https://sqlite.org/copyright.html
+
+--------------------------------------------------------------------------------
 lua-cmsgpack
 --------------------------------------------------------------------------------
 

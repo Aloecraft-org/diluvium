@@ -12,6 +12,40 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
+## [0.17.4] - unreleased
+
+`v0.17.4` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+**The `diluvium` binary answers the `host` library itself.** A program
+that calls `host.fs`, `host.sql`, `host.exec`, `host.crypto` or
+`host.time` now runs in plain dlua, with the rights a Lua script has,
+and the same file runs under DRT with the capabilities its config
+grants. Before this, plain dlua carried the library and nothing
+answered it: a call failed at once, or after ten seconds under
+`--task`, with no word that it needed DRT.
+
+### Added
+
+- **A local host in the binary** (`src/dlocalhost.c`). Each call is
+  answered in place, from Lua's own `io` and `os` plus a few C
+  primitives Lua lacks: a millisecond and a monotonic clock, the
+  platform's random source, directory listing and a subprocess runner.
+  The calls are synchronous, so they need no `--task` and work inside a
+  `table.sort` comparator. The rules a deployment does not set are
+  kept, so a program behaves the same in both: one SQL statement per
+  call, a writing statement refused by `sql/query`, `argv` a vector,
+  127 for a program that cannot run, and a `timeout_ms` that kills the
+  child's whole tree (a process group on unix, a Job Object on Windows).
+- **SQLite is built into the binary** (3.50.4, vendored in `src/sqlite`, public domain), so `host.sql` needs nothing installed. The release binaries grow by about 1.1 MB. WASI builds leave it out and refuse `sql` and `exec` with a reason.
+- The signing calls (`crypto.hmac`, `jwt_sign`, `jwt_verify`) use the key in `DILUVIUM_CRYPTO_KEY` and derive their subkeys as DRT and the C host do, so a token signed in plain dlua verifies under a DRT given the same key, and the reverse.
+- `--queue-host` keeps the queue transport, for a program that answers its own `host/calls`.
+- `examples/01-host-calls`, one program run both ways, and a CI step that runs every example as its README says and diffs its output.
+
+### Changed
+
+- What plain dlua cannot answer is refused at once with the reason instead of waiting out a timeout: `crypto.turn_credential` and named keys (no deployment config), `host.spawn` (no swarm; `host.events()` answers nil and `host.children()` nothing).
+
+
 ## [0.17.3] - 2026-10-27
 
 `v0.17.3` &middot; Lua 5.5.1 &middot; bytecode format `0x46`

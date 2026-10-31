@@ -265,6 +265,11 @@ jobs:
       - name: Check that Ctrl-C interrupts a runaway loop
         run: ./test/interrupt_check.sh --bin dist/diluvium_debug
 
+      # The examples are what a reader runs first. Each is run as its README
+      # says and must print its expected.txt exactly.
+      - name: Run the examples as a reader would
+        run: ./script/examples_check.sh --bin dist/diluvium_debug
+
   numeric:
     name: Numeric (${{ matrix.name }})
     needs: resolve
@@ -791,7 +796,8 @@ jobs:
           mkdir -p .data dist
           cp -r src/* .data/
           gcc -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g \
-            -DLUA_USE_LINUX -Wl,-E -ldl -o dist/diluvium_asan .data/onelua.c -lm
+            -DLUA_USE_LINUX -Wl,-E -ldl -o dist/diluvium_asan .data/onelua.c \
+            .data/dsqlite.c -lm
           gcc -fsanitize=address,undefined -fno-omit-frame-pointer -O1 -g \
             -o dist/luac_asan .data/onelua.c .data/analyze.c .data/diluvium_api.c \
             -DMAKE_LUAC -lm

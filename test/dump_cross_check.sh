@@ -77,11 +77,14 @@ done
 # ---------------------------------------------------------------- part B --
 # A build that really does disagree, and what happens when it does.
 
+# The binary links SQLite beside the amalgamation (src/dsqlite.c); it is
+# the same for both builds, so it is compiled once.
+$CC -O2 -std=c99 -I"$DATA" -c -o "$WORK/dsqlite.o" "$DATA/dsqlite.c"
 $CC -O2 -std=c99 -DLUA_USE_LINUX -DMAKE_LUA -I"$DATA" \
-  -o "$WORK/dv_pinned" "$DATA/onelua.c" -lm
+  -o "$WORK/dv_pinned" "$DATA/onelua.c" "$WORK/dsqlite.o" -lm
 $CC -O2 -std=c99 -DLUA_USE_LINUX -DMAKE_LUA -I"$DATA" \
   -DDILUVIUM_NUMBERS_UNPINNED -DLUA_32BITS \
-  -o "$WORK/dv_narrow" "$DATA/onelua.c" -lm
+  -o "$WORK/dv_narrow" "$DATA/onelua.c" "$WORK/dsqlite.o" -lm
 
 # Guard against a vacuous pass: if the second build were not actually
 # narrower, every refusal below would "succeed" for the wrong reason.

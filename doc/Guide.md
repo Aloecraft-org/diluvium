@@ -16,6 +16,7 @@ in it.
 ```
 diluvium script.lua          # ordinary Lua, plus the language in part 1
 diluvium --task script.lua    # the coroutine-hosted driver: the program may park
+diluvium --queue-host s.lua   # host.* over the queue pair, for a program that answers it
 diluvium -i                   # REPL
 diluvium_compiler -r f.lua    # static analysis report as JSON, to luac.out
 ```
@@ -866,6 +867,24 @@ looks a pre-declared pair up before declaring its own, and allocates its
 tokens from `2^30` up so a program's own small integers never collide
 (sequential mixing only: one reply queue cannot serve two concurrent
 consumers).
+
+**In the `diluvium` binary itself**, nothing else is in the process to drain
+`host/calls`, so the binary answers the library directly instead
+(`src/dlocalhost.c`). A program there has the rights a Lua script has, so
+there is no grant and no scope: `fs` paths and `sql` database names are the
+program's own, relative to where it runs, and `exec` runs any program on the
+`PATH`. The calls are synchronous, so they need no `--task` and work where a
+queue wait cannot, such as a `table.sort` comparator. The rules a deployment
+does not set are kept, so a program behaves the same under DRT: one SQL
+statement per call, a writing statement refused by `query`, `argv` a vector
+and 127 for a program that cannot run, a `timeout_ms` that kills the child's
+whole tree. `sql` is SQLite, built into the binary. The signing calls use the
+key in `DILUVIUM_CRYPTO_KEY` and derive their subkeys as DRT does, so a token
+signed here verifies under a DRT given the same key. What needs a deployment
+is refused at once with a reason, not a timeout: `crypto.turn_credential`,
+named keys, `host.spawn`. On WASI, `exec` and `sql` are refused too.
+`examples/01-host-calls` is one program run both ways. `--queue-host` keeps
+the queue pair, for a program that answers its own hostcalls.
 
 ---
 
