@@ -119,6 +119,17 @@ if (status.startsWith('ready')) {
   const recovered = await screen();
   check('an error is caught, not fatal', recovered.includes('boom') && recovered.includes('still alive'));
 
+  // Keys the editor has no binding for must not leak their escape text.
+  for (const k of ['PageUp', 'PageDown', 'Insert', 'F2', 'Control+ArrowLeft']) await page.keyboard.press(k);
+  await page.keyboard.press('Home');
+  await page.keyboard.type('print("keys")');
+  await page.keyboard.press('Delete');
+  await page.keyboard.press('Enter');
+  await page.waitForTimeout(400);
+  const keys = await screen();
+  check('unbound keys insert nothing', keys.includes('keys') && !keys.includes('[5~') && !keys.includes('unexpected symbol'),
+        keys.split('\n').slice(-6).join(' | '));
+
   await page.click('#repl-reset');
   await page.waitForTimeout(300);
   check('restart works', (await screen()).includes('kernel restarted'));

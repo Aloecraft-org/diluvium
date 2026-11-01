@@ -57,6 +57,12 @@ answered it: a call failed at once, or after ten seconds under
 - **The Windows installer says when the execution policy blocks the
   completion line it suggests,** and gives
   `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+- **Page Up, Page Down and other unbound keys no longer type escape
+  text into the site's REPL.** A key such as PgUp arrived as
+  `ESC [ 5 ~`; the editor dropped the ESC and inserted `[5~`. The
+  editor now reads each escape sequence whole and drops the ones it
+  has no binding for. PgUp and PgDn scroll the terminal a page, and
+  Delete deletes forward. `doc/repl-reference.html` has the same fix.
 
 
 ## [0.17.3] - 2026-10-27
