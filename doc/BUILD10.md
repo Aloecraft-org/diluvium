@@ -116,8 +116,10 @@ substrate.
 is not here, and could not honestly be: the swarm does not deliver
 endpoint references between instances (build7's recorded cap4 gap), so a
 parent cannot reach a child's queue and a wrapper pretending otherwise
-would fake a capability the runtime lacks. When endpoint delivery lands,
-it lands on these handles without changing a call site.
+would fake a capability the runtime lacks. It has since landed on these
+handles as `child.push(msg)` (dot-call, like `kill`), with `child.ref` and
+`host.ref(id?)`, for swarms that route endpoints, which drt's does.
+`dvs.c` still routes none, and there `child.push` raises saying so.
 
 Not in v1, and shaped so they slot in without changing call sites:
 restart/backoff helpers (`host.supervise`), spawn by **code ref** —
