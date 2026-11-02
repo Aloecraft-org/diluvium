@@ -18,6 +18,9 @@
 #                      last dev tag -- that is `--if-changed`, and without it
 #                      identical builds accumulate; a backstop for a push run
 #                      that failed or never queued
+#   release commit     push and schedule skip it (script/release-commit.sh):
+#                      a production release is being cut there, and a dev
+#                      tag on the same commit would be a second build of it
 #   workflow_dispatch  any ref, for cutting a branch by hand; with `full`,
 #                      every platform rather than the Linux leg alone, for
 #                      trying a dev build on Windows or macOS
@@ -102,8 +105,30 @@ jobs:
           git checkout -q "origin/$BRANCH"
           echo "none=false" >> "$GITHUB_OUTPUT"
 
+      # A release commit gets its release, not a dev build beside it: the
+      # merge of a release-prep PR lands here before the owner tags it, and
+      # cutting a dev tag on it raced the real Release run for the same
+      # commit (v0.17.4-dev.18 beside v0.17.4). A dispatch is someone asking
+      # for this commit on purpose, so it is not skipped.
+      - name: Skip a release commit
+        id: release
+        if: steps.target.outputs.none != 'true' && github.event_name != 'workflow_dispatch'
+        run: |
+          set -u
+          set +e
+          TAG=$(script/release-commit.sh)
+          rc=$?
+          set -e
+          if [ "$rc" -eq 0 ]; then
+            echo "::notice::$(git rev-parse --short HEAD) is the $TAG release commit; no dev build."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$rc" -ne 3 ]; then
+            echo "::error::script/release-commit.sh failed ($rc)."
+            exit 1
+          fi
+
       - id: pick
-        if: steps.target.outputs.none != 'true'
+        if: steps.target.outputs.none != 'true' && steps.release.outputs.skip != 'true'
         env:
           EVENT: ${{ github.event_name }}
         run: |
@@ -144,14 +169,14 @@ jobs:
       # second release failed on "tag already exists". release.yml accepts an
       # existing dev tag that names the commit it is building.
       - name: Claim the number
-        if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true'
+        if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true' && steps.release.outputs.skip != 'true'
         run: |
           set -eu
           git tag "${{ steps.pick.outputs.tag }}" "${{ steps.pick.outputs.sha }}"
           git push origin "refs/tags/${{ steps.pick.outputs.tag }}"
 
       - name: Dispatch the release workflow
-        if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true'
+        if: steps.target.outputs.none != 'true' && steps.pick.outputs.skip != 'true' && steps.release.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           # Empty on push and schedule, which build the Linux leg alone.
