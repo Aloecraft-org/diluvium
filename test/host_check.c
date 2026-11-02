@@ -2104,10 +2104,19 @@ static void the_host_library_spawns_without_the_raw_idiom (void) {
     "local okd, why = pcall(host.spawn,\n"
     "                       { code = 'local b = 2', caps = {'host:nope/*'} })\n"
     "local denied = (not okd) and tostring(why):find('denied') ~= nil\n"
+    "-- dvs.c routes no endpoints: no reference, and push and ref say so.\n"
+    "local noref = kid.ref == nil\n"
+    "local okp, pwhy = pcall(kid.push, {said = 'hi'})\n"
+    "local nopush = (not okp) and tostring(pwhy):find('no endpoint') ~= nil\n"
+    "local okr, rwhy = pcall(host.ref)\n"
+    "local refdenied = (not okr) and tostring(rwhy):find('denied') ~= nil\n"
     "queue.push(log, (has_id and 'id' or 'NOID') .. ':'\n"
     "             .. (seen and 'exited' or 'NOEXIT') .. ':'\n"
     "             .. (killed and 'killed' or 'NOKILL') .. ':'\n"
-    "             .. (denied and 'denied' or 'NODENY'))\n"
+    "             .. (denied and 'denied' or 'NODENY') .. ':'\n"
+    "             .. (noref and 'noref' or 'REF') .. ':'\n"
+    "             .. (nopush and 'nopush' or 'PUSHED') .. ':'\n"
+    "             .. (refdenied and 'refdenied' or 'REFOK'))\n"
     "queue.wait({park})\n");
   snprintf(cfgsrc, sizeof(cfgsrc),
            "return { supervisor = '%s/sup_spawnlib.lua',\n"
@@ -2123,10 +2132,12 @@ static void the_host_library_spawns_without_the_raw_idiom (void) {
   }
   log[0] = '\0';
   run_until_log(&h, log, sizeof(log), 3000);
-  ok(strcmp(log, "id:exited:killed:denied") == 0,
+  ok(strcmp(log, "id:exited:killed:denied:noref:nopush:refdenied") == 0,
      "host.spawn, handle.kill, host.events and a raised denial all work, "
-     "with no raw lifecycle push anywhere in the fixture");
-  if (strcmp(log, "id:exited:killed:denied") != 0)
+     "with no raw lifecycle push anywhere in the fixture, and on a swarm "
+     "that routes no endpoints child.ref is nil while child.push and "
+     "host.ref raise rather than pretend");
+  if (strcmp(log, "id:exited:killed:denied:noref:nopush:refdenied") != 0)
     printf("      (guest said: %s)\n", log);
   dh_host_close(&h);
 }

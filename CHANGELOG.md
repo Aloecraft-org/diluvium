@@ -40,6 +40,14 @@ answered it: a call failed at once, or after ten seconds under
 - The signing calls (`crypto.hmac`, `jwt_sign`, `jwt_verify`) use the key in `DILUVIUM_CRYPTO_KEY` and derive their subkeys as DRT and the C host do, so a token signed in plain dlua verifies under a DRT given the same key, and the reverse.
 - `--queue-host` keeps the queue transport, for a program that answers its own `host/calls`.
 - `examples/01-host-calls`, one program run both ways, and a CI step that runs every example as its README says and diffs its output.
+- **A spawned child's handle carries its endpoint reference.** On a
+  swarm that routes endpoints (drt), `host.spawn` returns `child.ref`
+  from the `spawned` event and `child.push(msg)` pushes into the
+  child's `inbox` through it; `host.ref(id?)` asks for a reference to
+  this instance or a descendant, to hand to another instance in a
+  message, which is how siblings meet. On a swarm that does not
+  (the C host's `dvs.c`), `child.ref` is nil and `child.push` and
+  `host.ref` raise saying so.
 
 ### Changed
 
