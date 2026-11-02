@@ -527,8 +527,11 @@ PyPI, which is why the exclusion is not optional.
 
 ### Where a dev build is cut from
 
-From every merge to `main`, and from every push to a `release/*` branch. A
-dev build reads a branch; it changes nothing about what the branch carries.
+From every merge to `main`, and from every push to a `release/*` branch,
+except a release commit: one whose newest changelog entry is released and
+either tagged there or released by that commit (`script/release-commit.sh`).
+That commit gets its release, not a dev build beside it. A dev build reads a
+branch; it changes nothing about what the branch carries.
 
 **A repository other projects track by git keeps `main` releasable.** That is
 the rule for what lands on `main`, and it holds whether or not `main` is
