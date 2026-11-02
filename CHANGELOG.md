@@ -12,7 +12,7 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
-## [0.17.4] - unreleased
+## [0.17.4] - 2026-11-02
 
 `v0.17.4` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
@@ -23,6 +23,21 @@ and the same file runs under DRT with the capabilities its config
 grants. Before this, plain dlua carried the library and nothing
 answered it: a call failed at once, or after ten seconds under
 `--task`, with no word that it needed DRT.
+
+It also carries what was prepared as 0.17.3, which was never
+tagged or published, so this is the first release with it:
+
+**A compiler fix, and corrections to what 0.16.0 said about itself.
+Compiling a chunk that uses `export` could write one instruction past
+the end of the function's code array: a heap overflow reached from
+source text alone, in every release since 0.16.0.**
+
+The dv ABI is still 2. What the fix changes for a program is that
+one chunk shape, which could crash the compiler or quietly corrupt
+its heap, now compiles cleanly.
+
+The release also ships a new installer, `dlua` as a second name for
+`diluvium`, and colon commands in the REPL.
 
 ### Added
 
@@ -48,10 +63,22 @@ answered it: a call failed at once, or after ten seconds under
   message, which is how siblings meet. On a swarm that does not
   (the C host's `dvs.c`), `child.ref` is nil and `child.push` and
   `host.ref` raise saying so.
+- **One installer, shipped as eight assets per release.** `install.sh`
+  and `install.ps1` are stamped into `start`, `install`, `get` and
+  `help`, each also as `-dlua`, in `.sh` and `.ps1`. `start` installs
+  the latest stable release, `install` the release that shipped the
+  copy, and `get` only downloads and verifies it into the current
+  directory. Releases sit side by side under
+  `<prefix>/share/diluvium/versions/<tag>/`, with `list`, `list-all`,
+  `check`, `use` and `remove` to manage them.
+- An install links `dlua` beside `diluvium`, and writes tab completion for bash, zsh, fish and PowerShell under the prefix. No shell profile is edited; where one is needed the install prints the line to add.
+- The REPL answers `:help` (`:h`, `:?`), `:quit` (`:q`, `:exit`) and `:clear`, the same colon commands as `drt repl`, and its banner says how to get help.
+- Every merge to `main` publishes a Linux dev build, `v<version>-dev.<n>`, and the installers' `list-all` and `dev` read them from the `release-log` branch. Running "Cut a dev tag" by hand with `full` builds every platform, so a dev build can be tried on Windows and macOS.
 
 ### Changed
 
 - What plain dlua cannot answer is refused at once with the reason instead of waiting out a timeout: `crypto.turn_credential` and named keys (no deployment config), `host.spawn` (no swarm; `host.events()` answers nil and `host.children()` nothing).
+- Ctrl-L and `:clear` home the cursor and erase below it instead of clearing the whole screen, so VS Code's terminal no longer hides the redrawn line.
 
 ### Fixed
 
@@ -71,41 +98,6 @@ answered it: a call failed at once, or after ten seconds under
   editor now reads each escape sequence whole and drops the ones it
   has no binding for. PgUp and PgDn scroll the terminal a page, and
   Delete deletes forward. `doc/repl-reference.html` has the same fix.
-
-
-## [0.17.3] - 2026-10-27
-
-`v0.17.3` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
-
-**A compiler fix, and corrections to what 0.16.0 said about itself.
-Compiling a chunk that uses `export` could write one instruction past
-the end of the function's code array: a heap overflow reached from
-source text alone, in every release since 0.16.0.**
-
-The dv ABI is still 2 and nothing else in the runtime moves. What
-changes for a program is that one chunk shape, which could crash the
-compiler or quietly corrupt its heap, now compiles cleanly.
-
-It also ships a new installer, `dlua` as a second name for
-`diluvium`, and colon commands in the REPL.
-
-### Added
-
-- **One installer, shipped as eight assets per release.** `install.sh`
-  and `install.ps1` are stamped into `start`, `install`, `get` and
-  `help`, each also as `-dlua`, in `.sh` and `.ps1`. `start` installs
-  the latest stable release, `install` the release that shipped the
-  copy, and `get` only downloads and verifies it into the current
-  directory. Releases sit side by side under
-  `<prefix>/share/diluvium/versions/<tag>/`, with `list`, `list-all`,
-  `check`, `use` and `remove` to manage them.
-- An install links `dlua` beside `diluvium`, and writes tab completion for bash, zsh, fish and PowerShell under the prefix. No shell profile is edited; where one is needed the install prints the line to add.
-- The REPL answers `:help` (`:h`, `:?`), `:quit` (`:q`, `:exit`) and `:clear`, the same colon commands as `drt repl`, and its banner says how to get help.
-- Every merge to `main` publishes a Linux dev build, `v<version>-dev.<n>`, and the installers' `list-all` and `dev` read them from the `release-log` branch. Running "Cut a dev tag" by hand with `full` builds every platform, so a dev build can be tried on Windows and macOS.
-
-### Changed
-
-- Ctrl-L and `:clear` home the cursor and erase below it instead of clearing the whole screen, so VS Code's terminal no longer hides the redrawn line.
 
 ### Security
 
