@@ -8,8 +8,10 @@ name: Tests
 #   * called by release.yml as a gate before publishing
 
 on:
+  # Push on `main` only: a pull request's commits are checked by its
+  # `pull_request` run, and a push trigger on every branch ran them twice.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
