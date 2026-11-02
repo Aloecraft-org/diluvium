@@ -53,6 +53,12 @@ permissions:
   contents: read
   packages: write
 
+# A newer commit on a pull request cancels the image build it replaces. A
+# tag or a dispatch is never cancelled: it may be publishing.
+concurrency:
+  group: docker-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   images:
     name: ${{ matrix.name }}
