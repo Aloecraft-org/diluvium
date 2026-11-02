@@ -110,8 +110,15 @@ export class Repl {
     this.redraw();
   }
 
+  // An escape sequence is consumed whole and either acted on or dropped.
+  // Falling through to the character branch is how PgUp used to type
+  // "[5~" into the line: xterm sends sequences this table does not name
+  // (PgUp, PgDn, Insert, F-keys, modified arrows), and none of them is text.
   key(data) {
-    for (const ch of data) {
+    let i = 0;
+    while (i < data.length) {
+      if (data[i] === '\x1b') { i = this.escape(data, i); continue; }
+      const ch = data[i++];
       const c = ch.charCodeAt(0);
       if (ch === '\r' || ch === '\n') { this.submit(); }
       else if (ch === '\t') { this.tab(); }
@@ -135,7 +142,6 @@ export class Repl {
         this.pos = 0;
         this.redraw();
       }
-      else if (ch === '\x1b') { /* escape sequences handled in seq() */ }
       else if (c >= 32) {
         this.line = this.line.slice(0, this.pos) + ch + this.line.slice(this.pos);
         this.pos++;
@@ -144,21 +150,51 @@ export class Repl {
     }
   }
 
-  seq(data) {
-    if (data === '\x1b[A' || data === '\x1b[B') {
-      if (this.history.length === 0) return true;
-      this.hindex += (data === '\x1b[A') ? -1 : 1;
-      this.hindex = Math.max(0, Math.min(this.history.length, this.hindex));
-      this.line = this.history[this.hindex] ?? '';
-      this.pos = this.line.length;
-      this.redraw();
-      return true;
+  // depth: escape sequence parsing
+  // Reads one sequence starting at data[i] (the ESC) and returns the index
+  // after it. CSI is ESC [ params intermediates final, final in @..~; SS3
+  // is ESC O x; anything else after ESC is Alt+key, dropped.
+  escape(data, i) {
+    const intro = data[i + 1];
+    if (intro === '[') {
+      let j = i + 2;
+      while (j < data.length && !/[\x40-\x7e]/.test(data[j])) j++;
+      const params = data.slice(i + 2, j);
+      this.csi(params, data[j]);
+      return j + 1;
     }
-    if (data === '\x1b[D') { if (this.pos > 0) { this.pos--; this.redraw(); } return true; }
-    if (data === '\x1b[C') { if (this.pos < this.line.length) { this.pos++; this.redraw(); } return true; }
-    if (data === '\x1b[H') { this.pos = 0; this.redraw(); return true; }
-    if (data === '\x1b[F') { this.pos = this.line.length; this.redraw(); return true; }
-    return false;
+    if (intro === 'O') {
+      this.csi('', data[i + 2]);
+      return i + 3;
+    }
+    return intro === undefined ? i + 1 : i + 2;
+  }
+
+  csi(params, final) {
+    const n = params.split(';')[0];
+    const plain = params === '' || params === '1';
+    if (plain && (final === 'A' || final === 'B')) this.historyStep(final === 'A' ? -1 : 1);
+    else if (plain && final === 'D') { if (this.pos > 0) { this.pos--; this.redraw(); } }
+    else if (plain && final === 'C') { if (this.pos < this.line.length) { this.pos++; this.redraw(); } }
+    else if ((plain && final === 'H') || (final === '~' && (n === '1' || n === '7'))) { this.pos = 0; this.redraw(); }
+    else if ((plain && final === 'F') || (final === '~' && (n === '4' || n === '8'))) { this.pos = this.line.length; this.redraw(); }
+    else if (final === '~' && n === '3') {                                  // Delete
+      if (this.pos < this.line.length) {
+        this.line = this.line.slice(0, this.pos) + this.line.slice(this.pos + 1);
+        this.redraw();
+      }
+    }
+    else if (final === '~' && n === '5') { this.term.scrollPages(-1); }    // PgUp
+    else if (final === '~' && n === '6') { this.term.scrollPages(1); }     // PgDn
+    // anything else: a key with no meaning here, swallowed
+  }
+
+  historyStep(dir) {
+    if (this.history.length === 0) return;
+    this.hindex = Math.max(0, Math.min(this.history.length, this.hindex + dir));
+    this.line = this.history[this.hindex] ?? '';
+    this.pos = this.line.length;
+    this.redraw();
   }
 
   // A paste arrives as one onData call carrying newlines. Splitting on them
@@ -173,6 +209,6 @@ export class Repl {
       });
       return;
     }
-    if (!this.seq(data)) this.key(data);
+    this.key(data);
   }
 }

@@ -9,6 +9,6 @@
     "serve": "python3 -m http.server --directory _out 8081"
   },
   "devDependencies": {
-    "playwright": "~1.56.0"
+    "playwright": "1.64.1"
   }
 }

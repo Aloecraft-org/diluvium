@@ -245,8 +245,11 @@ class Repl {
     this.redraw();
   }
 
-  key(data) {
-    for (const ch of data) {
+  key(data) {                             /* a sequence is consumed whole */
+    let i = 0;
+    while (i < data.length) {
+      if (data[i] === '\x1b') { i = this.escape(data, i); continue; }
+      const ch = data[i++];
       const c = ch.charCodeAt(0);
       if (ch === '\r') { this.submit(); }
       else if (ch === '\t') { this.tab(); }
@@ -264,7 +267,6 @@ class Repl {
       else if (ch === '\x05') { this.pos = this.line.length; this.redraw(); } /* ^E */
       else if (ch === '\x15') { this.line = this.line.slice(this.pos);
                                 this.pos = 0; this.redraw(); }          /* ^U */
-      else if (ch === '\x1b') { /* handled by the sequences below */ }
       else if (c >= 32) {
         this.line = this.line.slice(0, this.pos) + ch + this.line.slice(this.pos);
         this.pos++; this.redraw();
@@ -272,18 +274,30 @@ class Repl {
     }
   }
 
-  seq(data) {                             /* arrow keys */
-    if (data === '\x1b[A' || data === '\x1b[B') {
-      if (this.history.length === 0) return true;
-      this.hindex += (data === '\x1b[A') ? -1 : 1;
+  /* ESC [ params final (final in @..~), ESC O x, or ESC + key. A key
+     with no binding is dropped: PgUp is ESC [ 5 ~, and none of it is text. */
+  escape(data, i) {
+    if (data[i + 1] === '[') {
+      let j = i + 2;
+      while (j < data.length && !/[\x40-\x7e]/.test(data[j])) j++;
+      this.csi(data.slice(i + 2, j), data[j]);
+      return j + 1;
+    }
+    if (data[i + 1] === 'O') { this.csi('', data[i + 2]); return i + 3; }
+    return i + 2;
+  }
+
+  csi(params, final) {
+    if (params !== '' && params !== '1') return;   /* modified keys, PgUp, F-keys */
+    if (final === 'A' || final === 'B') {
+      if (this.history.length === 0) return;
+      this.hindex += (final === 'A') ? -1 : 1;
       this.hindex = Math.max(0, Math.min(this.history.length, this.hindex));
       this.line = this.history[this.hindex] ?? '';
       this.pos = this.line.length; this.redraw();
-      return true;
     }
-    if (data === '\x1b[D') { if (this.pos > 0) { this.pos--; this.redraw(); } return true; }
-    if (data === '\x1b[C') { if (this.pos < this.line.length) { this.pos++; this.redraw(); } return true; }
-    return false;
+    else if (final === 'D') { if (this.pos > 0) { this.pos--; this.redraw(); } }
+    else if (final === 'C') { if (this.pos < this.line.length) { this.pos++; this.redraw(); } }
   }
 }
 
@@ -305,7 +319,7 @@ try {
     : 'ready — this build predates repl_eval, so no continuation prompts or completion';
   term.write('Diluvium\r\n');
   repl.redraw();
-  term.onData((d) => { if (!repl.seq(d)) repl.key(d); });
+  term.onData((d) => repl.key(d));
   document.getElementById('reset').onclick = () => {
     rt.reset(); term.write('\r\n-- kernel restarted --\r\n'); repl.pending = '';
     repl.line = ''; repl.pos = 0; repl.redraw(); term.focus();
