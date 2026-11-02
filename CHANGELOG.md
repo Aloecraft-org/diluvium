@@ -12,7 +12,7 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
-## [0.17.4] - unreleased
+## [0.17.4] - 2026-11-02
 
 `v0.17.4` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
 
