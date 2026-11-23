@@ -9,7 +9,11 @@
 # -handling proposal, and an engine without the feature enabled refuses the
 # module outright. Same flag .github/workflows/build.yml passes to run the
 # WASI artifact.
-runner = ["wasmtime", "run", "--wasm", "exceptions", "--dir=.", "--"]
+#
+# '-S cli-exit-with-code' because newer Rust std imports
+# wasi:cli/exit.exit-with-code, which wasmtime links only when asked; a
+# test binary without it fails to instantiate before any test runs.
+runner = ["wasmtime", "run", "--wasm", "exceptions", "-S", "cli-exit-with-code", "--dir=.", "--"]
 
 [target.wasm32-unknown-unknown]
 # The runner for when this works. It does not yet: wasm-bindgen cannot
