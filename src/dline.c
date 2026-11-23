@@ -40,6 +40,10 @@
 */
 #define DLINE_CLEAR		"\x1b[H\x1b[J"
 
+/* Printed after Ctrl-C on an empty line, the usual way people try to leave
+   a REPL; the line editor otherwise only abandons the line. */
+#define DLINE_CTRLC_HINT	"Use :q or Ctrl-D (i.e. EOF) to exit\r\n"
+
 
 /* ====================================================================== */
 /* History                                                                */
@@ -557,9 +561,12 @@ static int editline (EditState *e) {
         return 0;
       }
       case DCTRL('c'): {  /* abandon this line, but keep the session */
+        /* Ctrl-C on an empty line is someone trying to leave, so say how. */
+        int empty = (e->len == 0);
         e->len = e->pos = 0;
         e->buf[0] = '\0';
         if (write(STDOUT_FILENO, "^C\r\n", 4) < 0) { }
+        if (empty && write(STDOUT_FILENO, DLINE_CTRLC_HINT, sizeof(DLINE_CTRLC_HINT) - 1) < 0) { }
         return 0;
       }
       case DCTRL('d'): {

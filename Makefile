@@ -367,7 +367,7 @@ build_platform: _build_step0 _native_static_lib
 
 	@echo '=== Building Compiler (luac) ==='
 	gcc -o .data/luac_$(UNAME_Sl)_$(ARCHl) .data/onelua.c .data/analyze.c .data/diluvium_api.c \
-		-std=c99 $(NUMERIC_CFLAGS) -DMAKE_LUAC -lm
+		-std=c99 $(NUMERIC_CFLAGS) -DMAKE_LUAC -DDILUVIUM_BUILD='"$(HOST_VERSION)"' -lm
 	
 	cp src/lua dist/diluvium_$(UNAME_Sl)_$(ARCHl) 2>/dev/null || \
 	cp src/lua.exe dist/diluvium_$(UNAME_Sl)_$(ARCHl).exe
@@ -385,11 +385,11 @@ build_linux_static: _build_step0 _portable_static_lib
 		make clean && \
 		make all \
 			CC=gcc \
-			MYCFLAGS='-static -Os -std=c99 -DLUA_USE_LINUX $(NUMERIC_CFLAGS) -DMAKE_LUAC' \
+			MYCFLAGS=\"-static -Os -std=c99 -DLUA_USE_LINUX $(NUMERIC_CFLAGS) -DMAKE_LUAC -DDILUVIUM_BUILD='\\\"$(HOST_VERSION)\\\"'\" \
 			MYLDFLAGS='-static' \
 			MYLIBS='' && \
 		echo '--- Building Compiler (luac) ---' && \
-		gcc -o /data/luac onelua.c analyze.c diluvium_api.c -static -Os -std=c99 $(NUMERIC_CFLAGS) -DMAKE_LUAC -lm"
+		gcc -o /data/luac onelua.c analyze.c diluvium_api.c -static -Os -std=c99 $(NUMERIC_CFLAGS) -DMAKE_LUAC -DDILUVIUM_BUILD='\"$(HOST_VERSION)\"' -lm"
 
 	cp .data/luac dist/diluvium_compiler_linux_$(ARCH_CANON)_musl
 	cp .data/lua dist/diluvium_linux_$(ARCH_CANON)_musl

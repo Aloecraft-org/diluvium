@@ -12,6 +12,23 @@ holds upstream Lua's own tags, so a bare `v5.4.7` is Lua's -- Diluvium's
 are the tags recorded here, and the Lua base each release embeds is the
 `Lua x.y.z` fact on its entry.
 
+## [0.17.5] - unreleased
+
+`v0.17.5` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
+
+The REPL's banner names the Diluvium release, and Ctrl-C on an
+empty line says how to leave.
+
+### Changed
+
+- The REPL opens with `Diluvium 0.17.5 (Lua 5.5.1) aloecraft.org (C) 2026` and `Type :h for help, Ctrl-D to exit.`, in place of `diluvium (lua) 5.5.1`, a second copyright line and `Show help: <:h+enter>`. `diluvium -v` and `luac -v` print the same first line. Lua.org's copyright stays in the binary's identification string. `_VERSION` is unchanged.
+- Ctrl-C on an empty REPL line prints `Use :q or Ctrl-D (i.e. EOF) to exit`. With text on the line it still only abandons the line.
+
+### Fixed
+
+- The static Linux (musl) binaries and every `luac` now carry the release from `VERSION`, so `_DILUVIUM.version` and the banner name the release there too instead of the Lua base `5.5.1`.
+
+
 ## [0.17.4] - 2026-11-02
 
 `v0.17.4` &middot; Lua 5.5.1 &middot; bytecode format `0x46`
