@@ -2,7 +2,7 @@
 #
 # This workflow allocates a number and asks the Release workflow to cut it. It
 # does not build anything: release.yml already knows how, and a `v*-dev.*` tag
-# selects its fast path (one platform, no cross-compilation, no wasm, no
+# selects its fast path (Linux x86_64 and arm64 only, no wasm, no
 # changelog entry). Two workflows that both built would be two things to keep
 # in step, which is the mistake §7's "the suffix decides the rigor" avoids.
 #

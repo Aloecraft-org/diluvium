@@ -70,6 +70,7 @@ releases:
     changed:
       - "The REPL opens with `Diluvium 0.17.5 (Lua 5.5.1) aloecraft.org (C) 2026` and `Type :h for help, Ctrl-D to exit.`, in place of `diluvium (lua) 5.5.1`, a second copyright line and `Show help: <:h+enter>`. `diluvium -v` and `luac -v` print the same first line. Lua.org's copyright stays in the binary's identification string. `_VERSION` is unchanged."
       - "Ctrl-C on an empty REPL line prints `Use :q or Ctrl-D (i.e. EOF) to exit`. With text on the line it still only abandons the line."
+      - "A dev build ships `diluvium_linux_arm64_musl` and `diluvium_compiler_linux_arm64_musl` beside the x86_64 binaries, built and smoke-tested under QEMU as a release does, so a Raspberry Pi or an arm64 server can try one. armv7, macOS, Windows and wasm stay release-only (or a `full` dispatch)."
     fixed:
       - "The static Linux (musl) binaries and every `luac` now carry the release from `VERSION`, so `_DILUVIUM.version` and the banner name the release there too instead of the Lua base `5.5.1`."
   - version: "0.17.4"
