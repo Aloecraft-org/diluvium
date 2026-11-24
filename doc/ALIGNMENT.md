@@ -482,7 +482,8 @@ dominates: `0.4.0.dev104 < 0.5.0.dev105`.
 
 ### The suffix decides the rigor
 
-A `dev` tag builds one platform and skips cross-compilation, wasm and the
+A `dev` tag builds Linux alone (x86_64, and arm64 under emulation, so a Pi or
+an arm64 server can try one) and skips the other platforms, wasm and the
 slow suites. Everything else runs the full gate. Better than a dispatch
 checkbox — diluvium's `run_tests` input is the only fast path any repository
 has today, and what it decided is invisible once the run is over.

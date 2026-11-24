@@ -70,7 +70,7 @@ jobs:
       draft: ${{ steps.check.outputs.draft }}
       prerelease: ${{ steps.check.outputs.prerelease }}
       # The suffix decides the rigor (doc/ALIGNMENT.md 7): a 'v*-dev.*' tag
-      # builds one platform, needs no changelog entry, and is always a
+      # builds Linux alone, needs no changelog entry, and is always a
       # prerelease. Same shape as diluvium-drt's preflight, deliberately --
       # one scheme across the repositories means one thing to reason about.
       dev: ${{ steps.check.outputs.dev }}

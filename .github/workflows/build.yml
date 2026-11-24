@@ -20,7 +20,7 @@ on:
         required: false
         default: ''
       dev:
-        description: 'Fast path: Linux x86_64 only, no cross-compilation, no wasm'
+        description: 'Fast path: Linux x86_64 and arm64 only, no other platforms, no wasm'
         type: boolean
         required: false
         default: false
@@ -30,8 +30,9 @@ on:
         type: string
         required: false
         default: ''
-      # doc/ALIGNMENT.md 7: "a dev tag builds one platform and skips
-      # cross-compilation, wasm and the slow suites". Narrowed here rather
+      # doc/ALIGNMENT.md 7: a dev tag builds Linux alone (x86_64 and
+      # arm64) and skips the other platforms, wasm and the slow suites.
+      # Narrowed here rather
       # than in a second workflow, so the dev path and the release path
       # cannot drift into building different things -- which is how
       # diluvium-drt does it too.
@@ -91,15 +92,16 @@ jobs:
           ref: ${{ needs.resolve.outputs.sha }}
 
       # NOT skipped for a dev build: 'make build_linux_static' runs the
-      # x86_64 build inside PODMAN_RUN_ALPINE, so the one platform a dev
-      # build does keep needs this.
+      # x86_64 build inside PODMAN_RUN_ALPINE, so the Linux legs a dev
+      # build does keep need this.
       - name: Install Podman
         run: |
           sudo apt-get update
           sudo apt-get -y install podman
 
+      # Not skipped for a dev build either: a dev build ships the aarch64
+      # binary too, so a Pi or an arm64 server can try one.
       - name: Install QEMU (for ARM support)
-        if: ${{ !inputs.dev }}
         uses: docker/setup-qemu-action@v3
 
       - name: Build WASM
@@ -132,7 +134,6 @@ jobs:
         run: make build_linux_static ARCHl=x86_64
 
       - name: Build Linux static (aarch64 / Raspberry Pi 3-5)
-        if: ${{ !inputs.dev }}
         run: |
           # --platform triggers QEMU emulation; ARCHl is the build arch, which
           # the Makefile maps to the arm64 artifact name (doc/ALIGNMENT.md §4).
@@ -185,13 +186,16 @@ jobs:
       # run. QEMU and the container are already set up from building them,
       # so running the binary costs one more invocation each.
       - name: Smoke test the ARM static binaries
-        if: ${{ !inputs.dev }}
+        env:
+          DEV: ${{ inputs.dev }}
         run: |
           set -eu
           # spec: <podman platform> <build arch> <artifact arch token (§4)>
           for spec in "linux/arm64 aarch64 arm64" "linux/arm/v7 armv7l armv7"; do
             set -- $spec
             plat=$1; arch=$2; name=$3
+            # armv7l is a release-only leg; a dev build has aarch64 alone.
+            [ "$DEV" = true ] && [ "$arch" = armv7l ] && continue
             bin="dist/diluvium_linux_${name}_musl"
             [ -f "$bin" ] || { echo "::error::$bin missing"; exit 1; }
             echo "--- $arch (under QEMU)"
