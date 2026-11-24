@@ -735,8 +735,9 @@ Lua releases tractable.
 
 [`CHANGELOG.md`](CHANGELOG.md) records what changed in each release. It is
 generated from [`CHANGELOG.yaml`](CHANGELOG.yaml), which is the source of
-truth for the release page and the release mirror alike -- edit that file
-and run `script/changelog.py generate`.
+truth for the release page and the release mirror alike. A pull request
+adds `changelog.d/<name>.yaml` instead of editing it, and a release folds
+those in with `script/changelog.py fold` then `generate`.
 
 ## Testing (`test/`)
 

@@ -51,6 +51,10 @@
 # The January 5.4.7 candidates (v5.4.7_rc, _rc2, _rc3) are represented by
 # the single 5.4.7-rc4 entry below; they shipped no notes and differ only
 # in build fixes.
+#
+# A pull request does not edit this file. It adds changelog.d/<name>.yaml,
+# section keys and bullets for the newest entry, and the release-prep commit
+# runs `script/changelog.py fold` (see that script for why).
 
 schema: 1
 repo: Aloecraft-org/diluvium

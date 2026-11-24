@@ -333,14 +333,14 @@ jobs:
           # does not belong in the changelog.
           if [ "$DEV" = true ]; then
             # A dev tag has no entry of its own, so the notes come from the
-            # newest one -- changelog.json's 'notes_md', which is the rendered
-            # Markdown travelling with each entry so a consumer needs no
-            # renderer. Read by index and not looked up by tag: the entry names
+            # newest one, with the changelog.d/ fragments the PRs since the
+            # last release added (script/changelog.py, "changelog
+            # fragments"). The newest and not looked up by tag: the entry names
             # the version being developed while the tag carries the global
             # counter, so the two stop matching after the first dev build.
             # That divergence is intended; ALIGNMENT 7 keeps the counter out of
             # the tree precisely so cutting one commits nothing.
-            jq -r '.releases[0].notes_md' changelog.json > release_notes.md
+            script/changelog.py render md --newest > release_notes.md
             {
               echo ""
               echo "---"
