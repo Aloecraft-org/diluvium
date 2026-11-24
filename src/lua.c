@@ -283,7 +283,7 @@ static void print_version (void) {
 ** a program could say. The same commands as 'drt repl', so the two
 ** prompts answer alike.
 */
-#define REPL_HINT	"Show help: <:h+enter>"
+#define REPL_HINT	"Type :h for help, Ctrl-D to exit."
 
 static const char repl_commands[] =
   "\n"

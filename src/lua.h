@@ -13,7 +13,22 @@
 #include <stddef.h>
 
 
-#define LUA_COPYRIGHT	LUA_RELEASE "  aloecraft.org (C) 2026\n(original copyright (c) 1994-2026 lua.org)"
+/*
+** Diluvium: the release number comes from the VERSION file, passed in as
+** DILUVIUM_BUILD by every makefile target that builds a binary. A build
+** that does not pass it (an embedder compiling these sources directly)
+** names no release rather than guessing one. LUA_RELEASE and LUA_VERSION
+** stay as they were: '_VERSION' and the snapshot identity (dsnap.c) read
+** them, so the banner must not.
+*/
+#if defined(DILUVIUM_BUILD)
+#define DILUVIUM_NAME	"Diluvium " DILUVIUM_BUILD
+#else
+#define DILUVIUM_NAME	"Diluvium"
+#endif
+#define LUA_COPYRIGHT	DILUVIUM_NAME " (Lua " LUA_VERSION_MAJOR "." \
+	LUA_VERSION_MINOR "." LUA_VERSION_RELEASE ") aloecraft.org (C) 2026"
+#define LUA_ORIGINAL_COPYRIGHT	"Lua: Copyright (C) 1994-2026 Lua.org, PUC-Rio"
 #define LUA_AUTHORS	"M. Godfrey, R. Ierusalimschy, L. H. de Figueiredo, W. Celes"
 
 

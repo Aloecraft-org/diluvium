@@ -2657,7 +2657,7 @@ artifact between sessions that do not share context.
   so it was skipped everywhere for a problem occurring somewhere this project does not
   test. `main` blamed static linking; it actually fails because `main.lua:82` reads
   the version with `string.match(out, "Lua (%d+%.%d+%.%d+)")` and this fork's banner
-  says `diluvium (lua) X.Y.Z`, so `release` is nil. Three of the tests pass once the
+  said `diluvium (lua) X.Y.Z` at the time, so `release` was nil. Three of the tests pass once the
   sentence stops being believed, and `attrib` covers `require` and C module loading
   against a modified `loadlib.c`. The table now takes a guard *function*, evaluated
   every run: `attrib`'s tries to load `lib1.so` rather than looking for the file,

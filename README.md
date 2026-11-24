@@ -185,9 +185,8 @@ Download Here: [Github Releases](https://github.com/Aloecraft-org/diluvium/relea
 ``` sh
 $ diluvium
 
-diluvium (lua) 5.5.1  aloecraft.org (C) 2026
-(original copyright (c) 1994-2026 lua.org)
-type 'help()' for what Diluvium adds, Ctrl-D to exit
+Diluvium 0.17.4 (Lua 5.5.1) aloecraft.org (C) 2026
+Type :h for help, Ctrl-D to exit.
 > 
 ```
 

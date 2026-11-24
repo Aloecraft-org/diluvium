@@ -96,7 +96,7 @@ goto|run||
 heavy|skip||designed to consume 2GB-16GB of RAM
 literals|run||float formatting is only verified against glibc; other libcs are untested rather than known-bad|guard_not_glibc
 locals|run||
-main|skip||main.lua:82 reads the version with string.match(out, "Lua (%d+%.%d+%.%d+)") and this fork's banner is 'diluvium (lua) X.Y.Z', so 'release' is nil and line 201 compares a string with nil
+main|skip||main.lua:207 expects stock lua.c to try loading a readline library named by LUA_READLINELIB and warn when it cannot; Diluvium's line editor is dline.c and loads no library, so there is no warning to find
 math|run||
 nextvar|run||
 pm|run||

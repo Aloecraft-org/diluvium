@@ -35,8 +35,10 @@
 ** specific, answer: the Lua base version 'lua.h' carries, which the
 ** changelog's consistency check keeps in step.
 */
-#ifndef DILUVIUM_BUILD
-#define DILUVIUM_BUILD \
+#if defined(DILUVIUM_BUILD)
+#define DILUVIUM_BUILD_STRING	DILUVIUM_BUILD
+#else  /* not DILUVIUM_BUILD itself: in onelua.c, lua.c reads that after us */
+#define DILUVIUM_BUILD_STRING \
 	LUA_VERSION_MAJOR "." LUA_VERSION_MINOR "." LUA_VERSION_RELEASE
 #endif
 
@@ -86,7 +88,7 @@ LUA_API void diluvium_openlibs (lua_State *L) {
   ** hashes named C functions, not a table of strings).
   */
   lua_createtable(L, 0, 3);
-  lua_pushliteral(L, DILUVIUM_BUILD);
+  lua_pushliteral(L, DILUVIUM_BUILD_STRING);
   lua_setfield(L, -2, "version");
   lua_pushliteral(L,
     LUA_VERSION_MAJOR "." LUA_VERSION_MINOR "." LUA_VERSION_RELEASE);

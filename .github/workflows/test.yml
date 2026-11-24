@@ -443,9 +443,14 @@ jobs:
         working-directory: bindings/rust/diluvium-repl
         env:
           WINEDEBUG: -all
+        # The test binary's path comes from cargo, not a glob: newer cargo
+        # puts it under target/<triple>/debug/build/<pkg>/<hash>/out/, not
+        # deps/, and a glob that matches nothing hands wine the pattern.
         run: |
-          cargo test --target x86_64-pc-windows-gnu --no-run
-          for exe in target/x86_64-pc-windows-gnu/debug/deps/repl-*.exe; do
+          exes=$(cargo test --target x86_64-pc-windows-gnu --no-run --message-format=json \
+            | jq -r 'select(.reason == "compiler-artifact" and .profile.test == true and .target.name == "repl") | .executable')
+          test -n "$exes"
+          for exe in $exes; do
             wine "$exe"
           done
 
